@@ -157,25 +157,14 @@ func (r *Reconciler) sweep(ctx context.Context) error {
 		return fmt.Errorf("failed to list DefectDojo tests: %w", err)
 	}
 
-	var (
-		errs     []error
-		decided  = map[string]struct{}{}
-		withTest = map[string]struct{}{}
-	)
+	candidates, withTest := r.sweepCandidates(tests)
 
-	for _, test := range tests {
-		namespace, ok := test.TagValue(trivy.TagPrefixNamespace)
-		if !ok || !trivy.IsOwned(test, r.config.ClusterName) {
+	var errs []error
+
+	for _, namespace := range candidates {
+		if r.isReleased(namespace) {
 			continue
 		}
-
-		withTest[namespace] = struct{}{}
-
-		if _, done := decided[namespace]; done || r.isReleased(namespace) {
-			continue
-		}
-
-		decided[namespace] = struct{}{}
 
 		inScope, scopeErr := r.namespaceInScope(ctx, namespace)
 		if scopeErr != nil {
@@ -184,16 +173,39 @@ func (r *Reconciler) sweep(ctx context.Context) error {
 			continue
 		}
 
-		if !inScope {
-			if wakeErr := r.wakeNamespace(ctx, namespace); wakeErr != nil {
-				return errors.Join(append(errs, wakeErr)...)
-			}
+		if inScope {
+			continue
+		}
+
+		if wakeErr := r.wakeNamespace(ctx, namespace); wakeErr != nil {
+			return errors.Join(append(errs, wakeErr)...)
 		}
 	}
 
 	r.pruneReleased(withTest)
 
 	return errors.Join(errs...)
+}
+
+// sweepCandidates returns, in the order of the tests and once each, the namespaces that still have an owned test,
+// as a list and as a set.
+func (r *Reconciler) sweepCandidates(tests []defectdojo.Test) (candidates []string, withTest map[string]struct{}) {
+	withTest = map[string]struct{}{}
+
+	for _, test := range tests {
+		namespace, ok := test.TagValue(trivy.TagPrefixNamespace)
+		if !ok || !trivy.IsOwned(test, r.config.ClusterName) {
+			continue
+		}
+
+		if _, seen := withTest[namespace]; !seen {
+			candidates = append(candidates, namespace)
+		}
+
+		withTest[namespace] = struct{}{}
+	}
+
+	return candidates, withTest
 }
 
 // wakeNamespace asks the controller to reconcile the namespace.

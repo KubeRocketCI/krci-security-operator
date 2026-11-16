@@ -89,74 +89,28 @@ func LoadConfigFromEnv() (Config, error) {
 // LoadConfig reads the configuration through lookup, applies the defaults and validates the result.
 // A variable that is set but empty keeps the list variables empty and takes the default for the others.
 func LoadConfig(lookup func(string) (string, bool)) (Config, error) {
-	var errs []error
-
-	get := func(key, def string) string {
-		if v, ok := lookup(key); ok && strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
-		}
-
-		return def
-	}
-
-	list := func(key string, def []string) []string {
-		v, ok := lookup(key)
-		if !ok {
-			return def
-		}
-
-		return splitList(v)
-	}
-
-	boolean := func(key string) bool {
-		raw := get(key, "true")
-
-		b, err := strconv.ParseBool(raw)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", key, err))
-		}
-
-		return b
-	}
+	env := &envReader{lookup: lookup}
 
 	cfg := Config{
-		OperatorNamespace: get(EnvPodNamespace, ""),
-		SecretName:        get(EnvDefectDojoSecretName, ""),
-		ProductType:       get(EnvDefectDojoProductType, defaultProductType),
-		PlatformProduct:   get(EnvDefectDojoPlatformProd, defaultPlatformProduct),
-		ClusterName:       get(EnvClusterName, defaultClusterName),
+		OperatorNamespace: env.get(EnvPodNamespace, ""),
+		SecretName:        env.get(EnvDefectDojoSecretName, ""),
+		ProductType:       env.get(EnvDefectDojoProductType, defaultProductType),
+		PlatformProduct:   env.get(EnvDefectDojoPlatformProd, defaultPlatformProduct),
+		ClusterName:       env.get(EnvClusterName, defaultClusterName),
 		Scopes: Scopes{
-			Stage:    boolean(EnvScopeStage),
-			Tenant:   boolean(EnvScopeTenant),
-			Platform: boolean(EnvScopePlatform),
+			Stage:    parseEnv(env, EnvScopeStage, true, strconv.ParseBool),
+			Tenant:   parseEnv(env, EnvScopeTenant, true, strconv.ParseBool),
+			Platform: parseEnv(env, EnvScopePlatform, true, strconv.ParseBool),
 		},
-		ExcludeNamespaces: list(EnvExcludeNamespaces, nil),
-		ComponentPrefixes: list(EnvComponentPrefixes, []string{defaultComponentPrefix}),
-		ReportKinds:       list(EnvReportKinds, slices.Clone(trivy.ReportKinds)),
-		ResyncPeriod:      defaultResyncPeriod,
-		Concurrency:       defaultConcurrency,
+		ExcludeNamespaces: env.list(EnvExcludeNamespaces, nil),
+		ComponentPrefixes: env.list(EnvComponentPrefixes, []string{defaultComponentPrefix}),
+		ReportKinds:       env.list(EnvReportKinds, slices.Clone(trivy.ReportKinds)),
+		ResyncPeriod:      parseEnv(env, EnvResyncPeriod, defaultResyncPeriod, time.ParseDuration),
+		Concurrency:       parseEnv(env, EnvConcurrency, defaultConcurrency, strconv.Atoi),
 	}
 
-	if raw := get(EnvResyncPeriod, ""); raw != "" {
-		d, err := time.ParseDuration(raw)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", EnvResyncPeriod, err))
-		} else {
-			cfg.ResyncPeriod = d
-		}
-	}
-
-	if raw := get(EnvConcurrency, ""); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", EnvConcurrency, err))
-		} else {
-			cfg.Concurrency = n
-		}
-	}
-
-	if len(errs) > 0 {
-		return Config{}, fmt.Errorf("%s: %w", errInvalidConfig, errors.Join(errs...))
+	if len(env.errs) > 0 {
+		return Config{}, fmt.Errorf("%s: %w", errInvalidConfig, errors.Join(env.errs...))
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -166,8 +120,61 @@ func LoadConfig(lookup func(string) (string, bool)) (Config, error) {
 	return cfg, nil
 }
 
+// envReader reads configuration variables through lookup and collects their parse errors.
+type envReader struct {
+	lookup func(string) (string, bool)
+	errs   []error
+}
+
+// get returns the trimmed value of key, or def when the variable is unset or blank.
+func (e *envReader) get(key, def string) string {
+	if v, ok := e.lookup(key); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+
+	return def
+}
+
+// list returns the items of the comma-separated variable key, or def when the variable is unset.
+func (e *envReader) list(key string, def []string) []string {
+	v, ok := e.lookup(key)
+	if !ok {
+		return def
+	}
+
+	return splitList(v)
+}
+
+// parseEnv parses key with parse, or returns def when the variable is unset or blank. A parse error is recorded
+// in e and def is returned.
+func parseEnv[T any](e *envReader, key string, def T, parse func(string) (T, error)) T {
+	raw := e.get(key, "")
+	if raw == "" {
+		return def
+	}
+
+	v, err := parse(raw)
+	if err != nil {
+		e.errs = append(e.errs, fmt.Errorf("%s: %w", key, err))
+
+		return def
+	}
+
+	return v
+}
+
 // Validate reports every violated constraint of the configuration.
 func (c Config) Validate() error {
+	errs := slices.Concat(c.identityErrors(), c.nameErrors(), c.tuningErrors(), c.reportKindErrors(), c.excludeErrors())
+	if len(errs) > 0 {
+		return fmt.Errorf("%s: %w", errInvalidConfig, errors.Join(errs...))
+	}
+
+	return nil
+}
+
+// identityErrors checks the operator namespace, the credentials Secret and the cluster name.
+func (c Config) identityErrors() []error {
 	var errs []error
 
 	if c.OperatorNamespace == "" {
@@ -184,7 +191,13 @@ func (c Config) Validate() error {
 			EnvClusterName, c.ClusterName, strings.Join(msgs, "; ")))
 	}
 
-	// The names end up in DefectDojo, where a comma separates tags.
+	return errs
+}
+
+// nameErrors checks the values that end up in DefectDojo, where a comma separates tags.
+func (c Config) nameErrors() []error {
+	var errs []error
+
 	for _, f := range []struct{ env, value string }{
 		{EnvDefectDojoProductType, c.ProductType},
 		{EnvDefectDojoPlatformProd, c.PlatformProduct},
@@ -200,6 +213,13 @@ func (c Config) Validate() error {
 		}
 	}
 
+	return errs
+}
+
+// tuningErrors checks the resync period and the concurrency.
+func (c Config) tuningErrors() []error {
+	var errs []error
+
 	if c.ResyncPeriod <= 0 {
 		errs = append(errs, fmt.Errorf("%s must be positive, got %s", EnvResyncPeriod, c.ResyncPeriod))
 	}
@@ -207,6 +227,13 @@ func (c Config) Validate() error {
 	if c.Concurrency < 1 {
 		errs = append(errs, fmt.Errorf("%s must be at least 1, got %d", EnvConcurrency, c.Concurrency))
 	}
+
+	return errs
+}
+
+// reportKindErrors checks that at least one report kind is set and that every kind is supported.
+func (c Config) reportKindErrors() []error {
+	var errs []error
 
 	if len(c.ReportKinds) == 0 {
 		errs = append(errs, fmt.Errorf("%s must list at least one report kind", EnvReportKinds))
@@ -218,17 +245,20 @@ func (c Config) Validate() error {
 		}
 	}
 
+	return errs
+}
+
+// excludeErrors checks that every exclude pattern is a valid glob.
+func (c Config) excludeErrors() []error {
+	var errs []error
+
 	for _, p := range c.ExcludeNamespaces {
 		if _, err := path.Match(p, ""); err != nil {
 			errs = append(errs, fmt.Errorf("%s: invalid glob %q: %w", EnvExcludeNamespaces, p, err))
 		}
 	}
 
-	if len(errs) > 0 {
-		return fmt.Errorf("%s: %w", errInvalidConfig, errors.Join(errs...))
-	}
-
-	return nil
+	return errs
 }
 
 func splitList(v string) []string {

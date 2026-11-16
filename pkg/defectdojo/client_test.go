@@ -578,6 +578,22 @@ func TestClient_ListTests_ServerError(t *testing.T) {
 	assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
 }
 
+func TestListAll_NilFilter(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, strconv.Itoa(pageSize), r.URL.Query().Get("limit"))
+		assert.Equal(t, "0", r.URL.Query().Get("offset"))
+
+		writeJSON(w, http.StatusOK, map[string]any{"next": nil, "results": []Test{{ID: 7}}})
+	})
+
+	var got []Test
+
+	err := listAll(context.Background(), c, testsPath, "tests", nil, func(test Test) { got = append(got, test) })
+
+	require.NoError(t, err)
+	assert.Equal(t, []Test{{ID: 7}}, got)
+}
+
 func TestTest_Tags(t *testing.T) {
 	test := Test{Tags: []string{"krci-scope:runtime", "krci-env:cdp.dev"}}
 

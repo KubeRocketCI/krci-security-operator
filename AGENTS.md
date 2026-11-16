@@ -49,6 +49,8 @@ make helm-docs      # after editing values.yaml or README.md.gotmpl
 helm lint deploy-templates
 ```
 
+`gocognit` fails a function above cognitive complexity 15, the limit of the Sonar rule go:S3776 in the KubeRocketCI quality gate: split the function into helpers instead of suppressing the linter.
+
 ## Testing & Development
 
 ```bash
