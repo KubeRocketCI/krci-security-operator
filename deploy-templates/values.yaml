@@ -96,3 +96,9 @@ concurrency: 2
 reportKinds:
   - VulnerabilityReport
   - ExposedSecretReport
+
+metrics:
+  # -- Serve the Prometheus metrics of the manager over plain HTTP on `metrics.port` of the pod. The chart creates no Service for them
+  enabled: false
+  # -- Container port of the metrics endpoint
+  port: 8080

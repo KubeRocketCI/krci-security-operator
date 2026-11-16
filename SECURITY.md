@@ -41,7 +41,7 @@ We follow a coordinated disclosure process:
 | DefectDojo credentials | the operator namespace | a Secret with `url` and `token`, read without a cache at most once a minute; the token goes only into the `Authorization` header of requests to that `url`. Keep tenants out of this namespace |
 | DefectDojo API | the operator | writes only `reimport-scan` and the closing of findings, and closes findings only in tests tagged with its own cluster |
 | Stages and workloads | tenants | a `Stage` counts only for a namespace whose `app.edp.epam.com/tenant` label equals the Stage's namespace; workload labels and annotations only feed the lower-cased `krci-component` tag |
-| Health probes | the pod IP | `:8081`; the chart creates no Service and serves no metrics |
+| Probes and metrics | the pod IP | probes on `:8081`; metrics only with `metrics.enabled`, plain HTTP on `:8080`, counters without credentials; the chart creates no Service |
 | Pod | | distroless static image, non-root user 65532, read-only root filesystem, no capabilities, no privilege escalation, seccomp `RuntimeDefault` |
 
 Thank you for helping us keep our project and our users secure!

@@ -12,7 +12,7 @@ A Go operator for the security integrations of a KubeRocketCI cluster, one modul
 
 ```bash
 make build         # Linux binary to dist/manager-$(GOARCH); the Dockerfile only packages it
-make test          # fmt, vet, unit tests with coverage
+make test          # fmt, vet, unit tests with coverage, chart render tests (need helm)
 make lint-fix      # golangci-lint with auto-fix
 make helm-docs     # after changing deploy-templates/values.yaml or README.md.gotmpl
 make validate-docs # CI gate: fails when deploy-templates/README.md is stale
@@ -36,4 +36,4 @@ The reconcile key is a namespace. Its scope (stage, tenant, platform) is decided
 
 ## Generated-file gotchas
 
-`deploy-templates/README.md` is generated from `README.md.gotmpl` and the `# --` comments of `values.yaml` by helm-docs. CI enforces freshness with `make validate-docs`. RBAC has no generator: edit `deploy-templates/templates/role.yaml` and `config/rbac/role.yaml` together.
+`deploy-templates/README.md` is generated from `README.md.gotmpl` and the `# --` comments of `values.yaml` by helm-docs. CI enforces freshness with `make validate-docs`. RBAC has no generator: edit `deploy-templates/templates/role.yaml` and the access table of `docs/trivy.md` together. The chart is the only deployment path; `test/deploy` renders it and checks it against `config.go` and the read-only access.
