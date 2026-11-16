@@ -7,6 +7,7 @@ linters:
     - copyloopvar
     - dupl
     - errcheck
+    - gocognit
     - goconst
     - gocyclo
     - govet
@@ -22,6 +23,9 @@ linters:
     - unused
     - wsl_v5
   settings:
+    gocognit:
+      # The limit of the Sonar rule go:S3776 in the KubeRocketCI quality gate.
+      min-complexity: 15
     revive:
       rules:
         - name: comment-spacings
@@ -31,6 +35,7 @@ linters:
     rules:
       - linters:
           - dupl
+          - gocognit
           - goconst
           - lll
         path: _test\.go

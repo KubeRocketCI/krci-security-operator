@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
@@ -244,43 +245,9 @@ func (c *Client) closeActiveFindings(ctx context.Context, testID int, selected f
 	defer unlock()
 
 	// The list is read completely before anything is closed so closing does not shift the pages.
-	var ids []int
-
-	for offset := 0; ; offset += pageSize {
-		q := url.Values{}
-		q.Set("test", strconv.Itoa(testID))
-		q.Set("active", "true")
-		q.Set("limit", strconv.Itoa(pageSize))
-		q.Set("offset", strconv.Itoa(offset))
-
-		body, err := c.do(ctx, retryAll, defaultRequestTimeout, func(ctx context.Context) (*http.Request, error) {
-			return c.newRequest(ctx, http.MethodGet, findingsPath+"?"+q.Encode(), nil, "")
-		})
-		if err != nil {
-			return 0, err
-		}
-
-		var page struct {
-			Next    *string `json:"next"`
-			Results []struct {
-				ID      int    `json:"id"`
-				Service string `json:"service"`
-			} `json:"results"`
-		}
-
-		if err = json.Unmarshal(body, &page); err != nil {
-			return 0, fmt.Errorf("failed to decode findings list: %w", err)
-		}
-
-		for _, f := range page.Results {
-			if selected(f.Service) {
-				ids = append(ids, f.ID)
-			}
-		}
-
-		if page.Next == nil || len(page.Results) == 0 {
-			break
-		}
+	ids, err := c.activeFindingIDs(ctx, testID, selected)
+	if err != nil {
+		return 0, err
 	}
 
 	for _, id := range ids {
@@ -290,6 +257,66 @@ func (c *Client) closeActiveFindings(ctx context.Context, testID int, selected f
 	}
 
 	return len(ids), nil
+}
+
+// findingRef holds the fields of a finding that closing needs.
+type findingRef struct {
+	ID      int    `json:"id"`
+	Service string `json:"service"`
+}
+
+// activeFindingIDs returns the IDs of the active findings of the test whose service is selected.
+func (c *Client) activeFindingIDs(ctx context.Context, testID int, selected func(service string) bool) ([]int, error) {
+	var ids []int
+
+	filter := url.Values{}
+	filter.Set("test", strconv.Itoa(testID))
+	filter.Set("active", boolTrue)
+
+	err := listAll(ctx, c, findingsPath, "findings", filter, func(f findingRef) {
+		if selected(f.Service) {
+			ids = append(ids, f.ID)
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return ids, nil
+}
+
+// listAll reads every page of the DefectDojo list endpoint with the filter and calls each with every result.
+func listAll[T any](ctx context.Context, c *Client, endpoint, what string, filter url.Values, each func(T)) error {
+	for offset := 0; ; offset += pageSize {
+		q := make(url.Values, len(filter)+2)
+		maps.Copy(q, filter)
+		q.Set("limit", strconv.Itoa(pageSize))
+		q.Set("offset", strconv.Itoa(offset))
+
+		body, err := c.do(ctx, retryAll, defaultRequestTimeout, func(ctx context.Context) (*http.Request, error) {
+			return c.newRequest(ctx, http.MethodGet, endpoint+"?"+q.Encode(), nil, "")
+		})
+		if err != nil {
+			return err
+		}
+
+		var page struct {
+			Next    *string `json:"next"`
+			Results []T     `json:"results"`
+		}
+
+		if err = json.Unmarshal(body, &page); err != nil {
+			return fmt.Errorf("failed to decode %s list: %w", what, err)
+		}
+
+		for _, item := range page.Results {
+			each(item)
+		}
+
+		if page.Next == nil || len(page.Results) == 0 {
+			return nil
+		}
+	}
 }
 
 func (c *Client) closeFinding(ctx context.Context, findingID int) error {
@@ -332,34 +359,14 @@ func (c *Client) GetTest(ctx context.Context, testID int) (Test, error) {
 func (c *Client) ListTests(ctx context.Context, tag string) ([]Test, error) {
 	var tests []Test
 
-	for offset := 0; ; offset += pageSize {
-		q := url.Values{}
-		q.Set("tags", tag)
-		q.Set("limit", strconv.Itoa(pageSize))
-		q.Set("offset", strconv.Itoa(offset))
+	filter := url.Values{}
+	filter.Set("tags", tag)
 
-		body, err := c.do(ctx, retryAll, defaultRequestTimeout, func(ctx context.Context) (*http.Request, error) {
-			return c.newRequest(ctx, http.MethodGet, testsPath+"?"+q.Encode(), nil, "")
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		var page struct {
-			Next    *string `json:"next"`
-			Results []Test  `json:"results"`
-		}
-
-		if err = json.Unmarshal(body, &page); err != nil {
-			return nil, fmt.Errorf("failed to decode tests list: %w", err)
-		}
-
-		tests = append(tests, page.Results...)
-
-		if page.Next == nil || len(page.Results) == 0 {
-			return tests, nil
-		}
+	if err := listAll(ctx, c, testsPath, "tests", filter, func(t Test) { tests = append(tests, t) }); err != nil {
+		return nil, err
 	}
+
+	return tests, nil
 }
 
 func (c *Client) postReport(ctx context.Context, fields [][2]string, report []byte) (ReimportResult, error) {

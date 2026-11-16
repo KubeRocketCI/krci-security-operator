@@ -533,49 +533,68 @@ func (r *Reconciler) closeStaleServices(
 }
 
 // eachReportPage calls fn with every page of reports of the configured kinds in the namespace.
-// Only one page is held at a time. served is false when the cluster serves none of the report kinds.
+// Only one page is held at a time. The result is false when the cluster serves none of the report kinds.
 func (r *Reconciler) eachReportPage(
 	ctx context.Context,
 	namespace string,
 	fn func(page []unstructured.Unstructured) error,
-) (served bool, err error) {
+) (bool, error) {
+	var served bool
+
 	for _, kind := range r.config.ReportKinds {
-		gvk := trivy.ReportGVK(kind)
-		base := []client.ListOption{client.InNamespace(namespace), client.Limit(reportsPageSize)}
-		opts := base
-
-		for {
-			list := &unstructured.UnstructuredList{}
-			list.SetGroupVersionKind(gvk.GroupVersion().WithKind(kind + "List"))
-
-			if err = r.reader.List(ctx, list, opts...); err != nil {
-				if meta.IsNoMatchError(err) || k8sErrors.IsNotFound(err) {
-					break
-				}
-
-				return false, fmt.Errorf("failed to list %s: %w", kind, err)
-			}
-
-			served = true
-
-			for i := range list.Items {
-				// The item kind is not always set on a list read.
-				list.Items[i].SetGroupVersionKind(gvk)
-			}
-
-			if err = fn(list.Items); err != nil {
-				return false, err
-			}
-
-			if list.GetContinue() == "" {
-				break
-			}
-
-			opts = append(slices.Clone(base), client.Continue(list.GetContinue()))
+		kindServed, err := r.eachPageOfKind(ctx, namespace, kind, fn)
+		if err != nil {
+			return false, err
 		}
+
+		served = served || kindServed
 	}
 
 	return served, nil
+}
+
+// eachPageOfKind calls fn with every page of the reports of one kind in the namespace. The result is true once the
+// cluster has answered a list of the kind, even when the kind disappears on a later page.
+func (r *Reconciler) eachPageOfKind(
+	ctx context.Context,
+	namespace, kind string,
+	fn func(page []unstructured.Unstructured) error,
+) (bool, error) {
+	var served bool
+
+	gvk := trivy.ReportGVK(kind)
+	base := []client.ListOption{client.InNamespace(namespace), client.Limit(reportsPageSize)}
+	opts := base
+
+	for {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(gvk.GroupVersion().WithKind(kind + "List"))
+
+		if err := r.reader.List(ctx, list, opts...); err != nil {
+			if meta.IsNoMatchError(err) || k8sErrors.IsNotFound(err) {
+				return served, nil
+			}
+
+			return false, fmt.Errorf("failed to list %s: %w", kind, err)
+		}
+
+		served = true
+
+		for i := range list.Items {
+			// The item kind is not always set on a list read.
+			list.Items[i].SetGroupVersionKind(gvk)
+		}
+
+		if err := fn(list.Items); err != nil {
+			return false, err
+		}
+
+		if list.GetContinue() == "" {
+			return served, nil
+		}
+
+		opts = append(slices.Clone(base), client.Continue(list.GetContinue()))
+	}
 }
 
 // codebasesByImage maps the normalised image of each CodebaseImageStream of the tenant namespace to its codebase.

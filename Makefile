@@ -52,9 +52,10 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
+# The race detector needs cgo, which the golang task of the KubeRocketCI pipelines turns off by default.
 .PHONY: test
 test: fmt vet ## Run the unit tests and, when helm is installed, the chart render tests.
-	go test -race ./... -coverprofile cover.out
+	CGO_ENABLED=1 go test -race ./... -coverprofile cover.out
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

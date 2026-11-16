@@ -37,8 +37,8 @@ The unit tests use the fake client and a fake DefectDojo. The event wiring in `S
 ## Checks
 
 ```bash
-make test           # fmt, vet, unit tests, and the chart render tests when helm is installed
-make lint           # golangci-lint
+make test           # fmt, vet, unit tests with the race detector (needs gcc), and the chart render tests when helm is installed
+make lint           # golangci-lint; gocognit fails a function above cognitive complexity 15, the Sonar go:S3776 limit of the quality gate
 make validate-docs  # chart README is current
 helm lint deploy-templates
 ```
