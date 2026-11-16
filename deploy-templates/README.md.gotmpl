@@ -1,0 +1,59 @@
+{{ template "chart.header" . }}
+
+{{ template "chart.deprecationWarning" . }}
+
+{{ template "chart.badgesSection" . }}
+
+{{ template "chart.description" . }}
+
+{{ template "chart.homepageLine" . }}
+
+## Introduction
+
+KubeRocketCI Security Operator is the home of the in-house security integrations of a KubeRocketCI cluster.
+The first module imports Trivy Operator reports (`VulnerabilityReport`, `ExposedSecretReport`) into the DefectDojo of the cluster.
+One instance runs per cluster with cluster-wide read-only access and writes only to DefectDojo.
+
+## Prerequisites
+
+- [Trivy Operator](https://aquasecurity.github.io/trivy-operator/) is installed in the cluster and produces the reports.
+- DefectDojo is reachable from the operator pod.
+- A Secret in the release namespace holds the DefectDojo address and API token under the keys `url` and `token`. Its name is set in `defectdojo.secretName`:
+
+  ```bash
+  kubectl create secret generic defectdojo-credentials -n <namespace> \
+    --from-literal=url=https://defectdojo.example.com \
+    --from-literal=token=<api-token>
+  ```
+
+## Deploy with Helm
+
+1. Add the Helm EPAMEDP Charts repository:
+
+    ```bash
+    helm repo add epamedp https://epam.github.io/edp-helm-charts/stable
+    ```
+
+2. Choose an available chart version:
+
+    ```bash
+    helm search repo epamedp/krci-security-operator -l
+    ```
+
+    _**NOTE:** It is highly recommended to use the latest released version._
+
+3. Install the operator:
+
+    ```bash
+    helm install krci-security-operator epamedp/krci-security-operator --version <chart_version> -n <namespace>
+    ```
+
+4. Check that the pod of the operator is running.
+
+{{ template "chart.maintainersSection" . }}
+
+{{ template "chart.sourcesSection" . }}
+
+{{ template "chart.requirementsSection" . }}
+
+{{ template "chart.valuesSection" . }}

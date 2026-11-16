@@ -1,0 +1,30 @@
+apiVersion: v2
+description: A Helm chart for the KubeRocketCI Security Operator
+home: https://docs.kuberocketci.io/
+name: krci-security-operator
+type: application
+version: 0.1.0
+appVersion: 0.1.0
+keywords:
+  - defectdojo
+  - kuberocketci
+  - security
+  - trivy
+maintainers:
+  - name: epmd-edp
+    email: SupportEPMD-EDP@epam.com
+    url: https://solutionshub.epam.com/solution/kuberocketci
+sources:
+  - https://github.com/KubeRocketCI/krci-security-operator
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/operator: "true"
+  artifacthub.io/images: |
+    - name: krci-security-operator:0.1.0
+      image: epamedp/krci-security-operator:0.1.0
+  artifacthub.io/operatorCapabilities: Basic Install
+  artifacthub.io/links: |
+    - name: KubeRocketCI Documentation
+      url: https://docs.kuberocketci.io
+    - name: EPAM SolutionHub
+      url: https://solutionshub.epam.com/solution/kuberocketci
