@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"sync"
@@ -30,6 +31,8 @@ import (
 const (
 	// reportsPageSize is the number of full reports held in memory at a time.
 	reportsPageSize = 10
+	// maxListRestarts is how often the listing of a report kind starts again after its continue token expired.
+	maxListRestarts = 3
 	// dependencyRetry is the longest wait before a namespace is retried while an optional dependency is absent.
 	dependencyRetry = 5 * time.Minute
 	// secretTTL is how long the credentials are used before the Secret is read again.
@@ -281,8 +284,10 @@ type pass struct {
 	// keepOpenTitles holds the titles of tests that stay open although no import of this pass reached them:
 	// those whose workload only has superseded reports so far, and those whose report DefectDojo rejected.
 	keepOpenTitles map[string]struct{}
-	// rejected holds the report versions DefectDojo rejected, now and in earlier passes.
+	// rejected holds the versions of the reports of this pass that DefectDojo rejected, in this pass or before.
 	rejected map[importKey]reportVersion
+	// unlisted holds the configured report kinds the pass could not list completely.
+	unlisted []string
 }
 
 // reject records a report version DefectDojo rejected: its test stays open and keeps reflecting the earlier import.
@@ -295,9 +300,34 @@ func (p *pass) reject(key importKey, version reportVersion, title string, prev i
 	}
 }
 
+// listed reports whether the pass listed every report of the kind of the test title.
+func (p *pass) listed(title string) bool {
+	return !slices.Contains(p.unlisted, trivy.TitleKind(title))
+}
+
+// keepsOpen reports whether a test that no import of the pass reached stays open: its workload only has superseded
+// reports so far, DefectDojo rejected its report, or the pass could not list its report kind.
+func (p *pass) keepsOpen(title string) bool {
+	if _, ok := p.keepOpenTitles[title]; ok {
+		return true
+	}
+
+	return !p.listed(title)
+}
+
+// forget drops what the pass found for the reports of a kind, before a restarted listing delivers them again.
+// A report deleted in between then no longer counts as live.
+func (p *pass) forget(kind string) {
+	ofKind := func(title string) bool { return trivy.TitleKind(title) == kind }
+
+	maps.DeleteFunc(p.current, func(key importKey, _ importedReport) bool { return ofKind(key.title) })
+	maps.DeleteFunc(p.rejected, func(key importKey, _ reportVersion) bool { return ofKind(key.title) })
+	maps.DeleteFunc(p.keepOpenTitles, func(title string, _ struct{}) bool { return ofKind(title) })
+}
+
 // syncNamespace imports the reports of an in-scope namespace page by page and closes the tests of workloads
 // that are gone. Tests are closed only after every report was imported: a failed import hides which tests
-// are still alive.
+// are still alive. The tests of a report kind the pass could not list stay as they are.
 func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target trivy.Target) error {
 	var (
 		codebases map[string]string
@@ -320,20 +350,20 @@ func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target tr
 		rejected:       map[importKey]reportVersion{},
 	}
 
-	served, err := r.eachReportPage(ctx, target.Namespace, func(page []unstructured.Unstructured) error {
-		return r.importPage(ctx, dd, p, page)
-	})
-	if err != nil {
+	if err = r.importReports(ctx, dd, p); err != nil {
 		return err
 	}
 
-	if !served {
-		ctrl.LoggerFrom(ctx).Info("Trivy Operator reports are not served by the cluster, nothing to import")
+	if len(p.unlisted) > 0 {
+		ctrl.LoggerFrom(ctx).Info("Report kinds are not served by the cluster, their tests stay as they are",
+			"kinds", p.unlisted)
+	}
 
+	if len(p.unlisted) == len(r.config.ReportKinds) {
 		return nil
 	}
 
-	r.keepImports(target.Namespace, p.current, p.rejected)
+	r.keepImports(target.Namespace, p)
 
 	return r.closeStaleTests(ctx, dd, target, p)
 }
@@ -417,6 +447,7 @@ func (r *Reconciler) importOne(ctx context.Context, dd DefectDojo, p *pass, repo
 			"report", report.GetName(), "kind", report.GetKind())
 		rejectedReports.WithLabelValues(report.GetKind()).Inc()
 
+		r.recordRejection(p.target.Namespace, key, version)
 		p.reject(key, version, imp.TestTitle, prev, hasPrev)
 
 		return nil
@@ -532,69 +563,77 @@ func (r *Reconciler) closeStaleServices(
 	}
 }
 
-// eachReportPage calls fn with every page of reports of the configured kinds in the namespace.
-// Only one page is held at a time. The result is false when the cluster serves none of the report kinds.
-func (r *Reconciler) eachReportPage(
-	ctx context.Context,
-	namespace string,
-	fn func(page []unstructured.Unstructured) error,
-) (bool, error) {
-	var served bool
-
+// importReports imports every page of reports of the configured kinds in the namespace; only one page is held at
+// a time. The kinds it could not list completely are recorded in the pass.
+func (r *Reconciler) importReports(ctx context.Context, dd DefectDojo, p *pass) error {
 	for _, kind := range r.config.ReportKinds {
-		kindServed, err := r.eachPageOfKind(ctx, namespace, kind, fn)
+		listed, err := r.importKind(ctx, dd, p, kind)
 		if err != nil {
-			return false, err
+			return err
 		}
 
-		served = served || kindServed
+		if !listed {
+			p.unlisted = append(p.unlisted, kind)
+		}
 	}
 
-	return served, nil
+	return nil
 }
 
-// eachPageOfKind calls fn with every page of the reports of one kind in the namespace. The result is true once the
-// cluster has answered a list of the kind, even when the kind disappears on a later page.
-func (r *Reconciler) eachPageOfKind(
-	ctx context.Context,
-	namespace, kind string,
-	fn func(page []unstructured.Unstructured) error,
-) (bool, error) {
-	var served bool
-
+// importKind imports every page of the reports of one kind in the namespace. The result is false when the cluster
+// does not serve the kind, also when it stops serving it while its pages are listed. An expired continue token
+// starts the listing again, up to maxListRestarts times: the pass forgets what the earlier listing found, and the
+// reports imported or rejected before are skipped as unchanged.
+func (r *Reconciler) importKind(ctx context.Context, dd DefectDojo, p *pass, kind string) (bool, error) {
 	gvk := trivy.ReportGVK(kind)
-	base := []client.ListOption{client.InNamespace(namespace), client.Limit(reportsPageSize)}
+	base := []client.ListOption{client.InNamespace(p.target.Namespace), client.Limit(reportsPageSize)}
 	opts := base
+	restarts := 0
 
 	for {
 		list := &unstructured.UnstructuredList{}
 		list.SetGroupVersionKind(gvk.GroupVersion().WithKind(kind + "List"))
 
-		if err := r.reader.List(ctx, list, opts...); err != nil {
-			if meta.IsNoMatchError(err) || k8sErrors.IsNotFound(err) {
-				return served, nil
-			}
+		err := r.reader.List(ctx, list, opts...)
 
+		switch {
+		case err == nil:
+			// The page is imported below.
+		case meta.IsNoMatchError(err) || k8sErrors.IsNotFound(err):
+			return false, nil
+		case continueExpired(err) && restarts < maxListRestarts:
+			restarts++
+			opts = base
+
+			p.forget(kind)
+
+			continue
+		case continueExpired(err):
+			return false, fmt.Errorf("failed to list %s after %d restarts: %w", kind, restarts, err)
+		default:
 			return false, fmt.Errorf("failed to list %s: %w", kind, err)
 		}
-
-		served = true
 
 		for i := range list.Items {
 			// The item kind is not always set on a list read.
 			list.Items[i].SetGroupVersionKind(gvk)
 		}
 
-		if err := fn(list.Items); err != nil {
+		if err := r.importPage(ctx, dd, p, list.Items); err != nil {
 			return false, err
 		}
 
 		if list.GetContinue() == "" {
-			return served, nil
+			return true, nil
 		}
 
 		opts = append(slices.Clone(base), client.Continue(list.GetContinue()))
 	}
+}
+
+// continueExpired reports whether a list failed because its continue token is too old (HTTP 410).
+func continueExpired(err error) bool {
+	return k8sErrors.IsResourceExpired(err) || k8sErrors.IsGone(err)
 }
 
 // codebasesByImage maps the normalised image of each CodebaseImageStream of the tenant namespace to its codebase.
@@ -642,33 +681,48 @@ func (r *Reconciler) recordImport(namespace string, key importKey, entry importe
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.imported[namespace] == nil {
-		r.imported[namespace] = map[importKey]importedReport{}
-	}
-
-	r.imported[namespace][key] = entry
+	put(r.imported, namespace, key, entry)
 	delete(r.closed[namespace], entry.testID)
 }
 
-// keepImports forgets the tests that no report reflects any more.
-// The rejected versions of reports that are gone are forgotten the same way.
-func (r *Reconciler) keepImports(
-	namespace string,
-	current map[importKey]importedReport,
-	rejected map[importKey]reportVersion,
-) {
+// recordRejection remembers a rejected report version at once, so a pass that fails later does not upload it again.
+func (r *Reconciler) recordRejection(namespace string, key importKey, version reportVersion) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.imported[namespace] = current
+	put(r.rejectedVersions, namespace, key, version)
+}
 
-	if len(rejected) == 0 {
-		delete(r.rejectedVersions, namespace)
+// keepImports forgets the tests that no report reflects any more, and the rejected versions of reports that are
+// gone. What is remembered about a kind the pass could not list stays, and its tests count as live in the pass.
+func (r *Reconciler) keepImports(namespace string, p *pass) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	store(r.imported, namespace, withUnlisted(p, r.imported[namespace], p.current))
+	store(r.rejectedVersions, namespace, withUnlisted(p, r.rejectedVersions[namespace], p.rejected))
+}
+
+// store sets the entries of the namespace, and forgets the namespace when it has none.
+func store[V any](m map[string]map[importKey]V, namespace string, entries map[importKey]V) {
+	if len(entries) == 0 {
+		delete(m, namespace)
 
 		return
 	}
 
-	r.rejectedVersions[namespace] = rejected
+	m[namespace] = entries
+}
+
+// withUnlisted adds to found the remembered entries of the report kinds the pass could not list, and returns found.
+func withUnlisted[V any](p *pass, remembered, found map[importKey]V) map[importKey]V {
+	for key, v := range remembered {
+		if !p.listed(key.title) {
+			found[key] = v
+		}
+	}
+
+	return found
 }
 
 func (r *Reconciler) isRejected(namespace string, key importKey, version reportVersion) bool {
@@ -693,7 +747,7 @@ func (r *Reconciler) markClosed(namespace string, testID int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	addID(r.closed, namespace, testID)
+	put(r.closed, namespace, testID, struct{}{})
 }
 
 func (r *Reconciler) markOpen(namespace string, testID int) {
@@ -716,7 +770,7 @@ func (r *Reconciler) markHealed(namespace string, testID int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	addID(r.healed, namespace, testID)
+	put(r.healed, namespace, testID, struct{}{})
 }
 
 // pruneTests keeps the closed IDs that DefectDojo still lists for the namespace and the healed IDs of live tests.
@@ -769,12 +823,13 @@ func (r *Reconciler) pruneReleased(withTests map[string]struct{}) {
 	}
 }
 
-func addID(m map[string]map[int]struct{}, namespace string, id int) {
+// put sets m[namespace][key], creating the map of the namespace when needed.
+func put[K comparable, V any](m map[string]map[K]V, namespace string, key K, value V) {
 	if m[namespace] == nil {
-		m[namespace] = map[int]struct{}{}
+		m[namespace] = map[K]V{}
 	}
 
-	m[namespace][id] = struct{}{}
+	m[namespace][key] = value
 }
 
 func keepIDs(m map[string]map[int]struct{}, namespace string, keep map[int]struct{}) {

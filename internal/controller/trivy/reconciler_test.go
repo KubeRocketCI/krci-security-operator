@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,6 +20,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -684,10 +687,7 @@ func TestReconcile_NoOps(t *testing.T) {
 	noMatch := interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GroupVersionKind().Group == trivy.TrivyGroup {
-				return &meta.NoKindMatchError{
-					GroupKind:        schema.GroupKind{Group: trivy.TrivyGroup, Kind: "VulnerabilityReport"},
-					SearchedVersions: []string{trivy.TrivyVersion},
-				}
+				return noKindMatch()
 			}
 
 			return c.List(ctx, list, opts...)
@@ -774,6 +774,7 @@ func TestReconcile_ClosesAllTestsWhenNamespaceHasNoReports(t *testing.T) {
 
 	assert.Equal(t, []int{7}, h.dd.closed)
 	assert.Empty(t, h.dd.reimports, "a test is closed without a re-import")
+	assert.NotContains(t, h.reconciler.imported, stageNS, "a namespace without reports keeps no memory")
 }
 
 func TestReconcile_ReopenedTestIsClosedAgainWhenWorkloadGoesAgain(t *testing.T) {
@@ -799,8 +800,215 @@ func TestReconcile_ReopenedTestIsClosedAgainWhenWorkloadGoesAgain(t *testing.T) 
 	assert.Equal(t, []int{100, 100}, h.dd.closed)
 }
 
+const (
+	// staleTitle is the test of a workload whose report would be on a page that was not read.
+	staleTitle = "VulnerabilityReport krci-demo-dev/deployment/other/other"
+	// staleSecretsTitle is the test of the other report kind of a workload that is gone.
+	staleSecretsTitle = "ExposedSecretReport krci-demo-dev/deployment/other/other"
+)
+
+// restartedCalls are the continue tokens of a listing that started again once after its second page.
+var restartedCalls = []string{"", "page-2", "", "page-2"}
+
+var (
+	// errExpired is the answer of the API server to a too old continue token.
+	errExpired = k8sErrors.NewResourceExpired("the continue token is too old")
+	// errGone is the 410 answer with the reason Gone that older API servers give for a too old continue token.
+	errGone = &k8sErrors.StatusError{ErrStatus: metav1.Status{
+		Status:  metav1.StatusFailure,
+		Code:    http.StatusGone,
+		Reason:  metav1.StatusReasonGone,
+		Message: "the continue token is gone",
+	}}
+)
+
+// noKindMatch is the answer of a cluster that does not serve VulnerabilityReports.
+func noKindMatch() error {
+	return &meta.NoKindMatchError{GroupKind: trivy.ReportGVK(trivy.KindVulnerabilityReport).GroupKind()}
+}
+
+// pagedReports serves the VulnerabilityReports of the stage namespace in two pages, checks that every list reads one
+// page of that namespace, and records the continue token of every list. The list of the second page fails with err
+// the first failures times.
+func pagedReports(t *testing.T, calls *[]string, err error, failures int) interceptor.Funcs {
+	t.Helper()
+
+	return interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			u, ok := list.(*unstructured.UnstructuredList)
+			if !ok || u.GroupVersionKind().Kind != "VulnerabilityReportList" {
+				return c.List(ctx, list, opts...)
+			}
+
+			lo := &client.ListOptions{}
+			lo.ApplyOptions(opts)
+
+			assert.Equal(t, stageNS, lo.Namespace, "every list reads the namespace of the pass")
+			assert.Equal(t, int64(reportsPageSize), lo.Limit, "every list reads one page")
+
+			*calls = append(*calls, lo.Continue)
+
+			if lo.Continue == "" {
+				u.Items = []unstructured.Unstructured{*goApp(t)}
+				u.SetContinue("page-2")
+
+				return nil
+			}
+
+			if failures > 0 {
+				failures--
+
+				return err
+			}
+
+			u.Items = []unstructured.Unstructured{*fixture(t, "vulnerabilityreport_dockerhub.json")}
+
+			return nil
+		},
+	}
+}
+
+// unservedReports answers the lists of VulnerabilityReports with err while *unserved is true.
+func unservedReports(err error, unserved *bool) interceptor.Funcs {
+	return interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if u, ok := list.(*unstructured.UnstructuredList); ok && *unserved && u.GroupVersionKind().Kind == "VulnerabilityReportList" {
+				return err
+			}
+
+			return c.List(ctx, list, opts...)
+		},
+	}
+}
+
+// pagedObjects are the objects behind the two pages of pagedReports.
+func pagedObjects() []client.Object {
+	return []client.Object{
+		demoStage(),
+		integrationSecret(),
+		tenantNamespace(stageNS),
+		deployment("test-go-app", "1"),
+		replicaSet("test-go-app-9dc66c9c6", "test-go-app", "1"),
+		deployment("defectdojo-primary", "1"),
+		replicaSet("defectdojo-primary-55747b486", "defectdojo-primary", "1"),
+	}
+}
+
+// uploadsOf counts the uploads into the test with the title.
+func (h *harness) uploadsOf(title string) int {
+	uploads := 0
+
+	for _, r := range h.dd.reimports {
+		if r.TestTitle == title {
+			uploads++
+		}
+	}
+
+	return uploads
+}
+
 func TestReconcile_PagesThroughReports(t *testing.T) {
 	var calls []string
+
+	h := newHarness(t, pagedObjects(), pagedReports(t, &calls, nil, 0))
+
+	h.reconcile()
+
+	assert.Equal(t, []string{"", "page-2"}, calls)
+	assert.Len(t, h.dd.reimports, 2)
+}
+
+func TestReconcile_UnservedReportKindKeepsItsTestsOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "no kind match", err: noKindMatch()},
+		{name: "not found", err: k8sErrors.NewNotFound(schema.GroupResource{Group: trivy.TrivyGroup, Resource: "vulnerabilityreports"}, "")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			unserved := true
+
+			h := newHarness(t, withReports(goAppObjects(), goApp(t), goAppSecrets(t)), unservedReports(tc.err, &unserved))
+			h.dd.tests = []defectdojo.Test{ownedTest(7, goAppTitle), ownedTest(8, staleSecretsTitle)}
+
+			require.NoError(t, h.reconcileErr())
+
+			assert.Len(t, h.dd.reimports, 1, "the served kind is imported")
+			assert.Equal(t, []int{8}, h.dd.closed, "the served kind closes its stale test, the other kind closes nothing")
+		})
+	}
+}
+
+func TestReconcile_UnservedReportKindKeepsWhatIsRemembered(t *testing.T) {
+	unserved := false
+
+	h := newHarness(t,
+		withReports(pagedObjects(), goApp(t), fixture(t, "vulnerabilityreport_dockerhub.json"), goAppSecrets(t)),
+		unservedReports(noKindMatch(), &unserved))
+	h.dd.reimportErr = rejectGoApp
+
+	h.reconcile()
+	require.Len(t, h.dd.reimports, 3, "one version rejected, two imported")
+
+	unserved = true
+
+	h.reconcile()
+	assert.Empty(t, h.dd.closed, "the tests of the kind that was not listed stay open")
+
+	unserved = false
+
+	h.reconcile()
+	assert.Len(t, h.dd.reimports, 3, "neither the imported nor the rejected version is uploaded again")
+	assert.Empty(t, h.dd.closed)
+}
+
+func TestReconcile_ReportKindGoneOnALaterPageKeepsItsTestsOpen(t *testing.T) {
+	var calls []string
+
+	h := newHarness(t, pagedObjects(), pagedReports(t, &calls, noKindMatch(), 1))
+	h.dd.tests = []defectdojo.Test{ownedTest(7, staleTitle), ownedTest(8, staleSecretsTitle)}
+
+	require.NoError(t, h.reconcileErr())
+	assert.Equal(t, []string{"", "page-2"}, calls)
+	assert.Equal(t, []int{8}, h.dd.closed, "an incomplete listing closes nothing of its kind")
+}
+
+func TestReconcile_ExpiredContinueTokenStartsTheListAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "expired", err: errExpired},
+		{name: "gone", err: errGone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []string
+
+			h := newHarness(t, pagedObjects(), pagedReports(t, &calls, tc.err, 1))
+
+			h.reconcile()
+
+			assert.Equal(t, restartedCalls, calls)
+			assert.Len(t, h.dd.reimports, 2, "the report of the first page is imported once")
+		})
+	}
+}
+
+func TestReconcile_RestartedListDoesNotUploadARejectedReportAgain(t *testing.T) {
+	var calls []string
+
+	h := newHarness(t, pagedObjects(), pagedReports(t, &calls, errExpired, 1))
+	h.dd.reimportErr = rejectGoApp
+
+	h.reconcile()
+
+	assert.Equal(t, restartedCalls, calls)
+	assert.Equal(t, 1, h.uploadsOf(goAppTitle), "the version rejected on the first listing is not uploaded again")
+}
+
+func TestReconcile_ReportDeletedBeforeARestartIsNotLive(t *testing.T) {
+	listings := 0
 
 	funcs := interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
@@ -812,37 +1020,63 @@ func TestReconcile_PagesThroughReports(t *testing.T) {
 			lo := &client.ListOptions{}
 			lo.ApplyOptions(opts)
 
-			calls = append(calls, lo.Continue)
+			if lo.Continue != "" {
+				return errExpired
+			}
 
-			if lo.Continue == "" {
+			listings++
+
+			if listings == 1 {
 				u.Items = []unstructured.Unstructured{*goApp(t)}
 				u.SetContinue("page-2")
 
 				return nil
 			}
 
+			// The report of the go app was deleted before the listing started again.
 			u.Items = []unstructured.Unstructured{*fixture(t, "vulnerabilityreport_dockerhub.json")}
 
 			return nil
 		},
 	}
 
-	objects := []client.Object{
-		demoStage(),
-		integrationSecret(),
-		tenantNamespace(stageNS),
-		deployment("test-go-app", "1"),
-		replicaSet("test-go-app-9dc66c9c6", "test-go-app", "1"),
-		deployment("defectdojo-primary", "1"),
-		replicaSet("defectdojo-primary-55747b486", "defectdojo-primary", "1"),
-	}
-
-	h := newHarness(t, objects, funcs)
+	h := newHarness(t, pagedObjects(), funcs)
 
 	h.reconcile()
 
-	assert.Equal(t, []string{"", "page-2"}, calls)
-	assert.Len(t, h.dd.reimports, 2)
+	assert.Equal(t, 2, listings)
+	require.Len(t, h.dd.reimports, 2)
+	assert.Equal(t, []int{100}, h.dd.closed, "the test the deleted report was imported into closes in the same pass")
+}
+
+func TestReconcile_RejectedVersionIsNotUploadedAgainAfterAFailedPass(t *testing.T) {
+	before := testutil.ToFloat64(rejectedReports.WithLabelValues(trivy.KindVulnerabilityReport))
+
+	var calls []string
+
+	h := newHarness(t, pagedObjects(), pagedReports(t, &calls, errors.New("the API server is unavailable"), 1))
+	h.dd.reimportErr = rejectGoApp
+
+	require.Error(t, h.reconcileErr(), "the list of the second page fails the first pass")
+
+	h.reconcile()
+
+	assert.Equal(t, 1, h.uploadsOf(goAppTitle), "the version rejected by the failed pass is not uploaded again")
+	assert.InDelta(t, before+1, testutil.ToFloat64(rejectedReports.WithLabelValues(trivy.KindVulnerabilityReport)), 0,
+		"the rejection is counted once")
+}
+
+func TestReconcile_ExpiredContinueTokenGivesUpAfterTheRestarts(t *testing.T) {
+	var calls []string
+
+	h := newHarness(t, pagedObjects(), pagedReports(t, &calls, errExpired, maxListRestarts+1))
+	h.dd.tests = []defectdojo.Test{ownedTest(7, staleTitle)}
+
+	err := h.reconcileErr()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), fmt.Sprintf("after %d restarts", maxListRestarts))
+	assert.Len(t, calls, 2*(1+maxListRestarts), "the first listing and every restart read both pages")
+	assert.Empty(t, h.dd.closed, "an incomplete listing closes nothing")
 }
 
 func TestReconcile_ReportIsNotModified(t *testing.T) {
@@ -1906,7 +2140,7 @@ func TestReconcile_ErrorSemantics(t *testing.T) {
 	noReportKind := interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GroupVersionKind().Group == trivy.TrivyGroup {
-				return &meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: trivy.TrivyGroup, Kind: "VulnerabilityReport"}}
+				return noKindMatch()
 			}
 
 			return c.List(ctx, list, opts...)
@@ -2155,17 +2389,7 @@ func TestReconcile_ProcessesReportsPageByPage(t *testing.T) {
 		},
 	}
 
-	objects := []client.Object{
-		demoStage(),
-		integrationSecret(),
-		tenantNamespace(stageNS),
-		deployment("test-go-app", "1"),
-		replicaSet("test-go-app-9dc66c9c6", "test-go-app", "1"),
-		deployment("defectdojo-primary", "1"),
-		replicaSet("defectdojo-primary-55747b486", "defectdojo-primary", "1"),
-	}
-
-	h = newHarness(t, objects, funcs)
+	h = newHarness(t, pagedObjects(), funcs)
 	h.dd.tests = []defectdojo.Test{ownedTest(7, "VulnerabilityReport krci-demo-dev/deployment/removed/removed")}
 
 	h.reconcile()

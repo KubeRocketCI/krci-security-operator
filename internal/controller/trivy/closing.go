@@ -20,8 +20,8 @@ const sweepInterval = 6 * time.Hour
 
 // closeStaleTests closes the owned tests of the namespace that no longer reflect a running workload container.
 // That covers removed workloads and tests written under another scope before the namespace changed its scope.
-// A test whose Deployment has only superseded reports so far (a rollout is in progress), and a test whose
-// report was rejected, stay open.
+// A test whose Deployment has only superseded reports so far (a rollout is in progress), a test whose report
+// was rejected, and a test of a report kind the pass could not list stay open.
 func (r *Reconciler) closeStaleTests(ctx context.Context, dd DefectDojo, target trivy.Target, p *pass) error {
 	live := make(map[int]struct{}, len(p.current))
 	for _, entry := range p.current {
@@ -48,7 +48,7 @@ func (r *Reconciler) closeStaleTests(ctx context.Context, dd DefectDojo, target 
 			continue
 		}
 
-		if _, ok := p.keepOpenTitles[test.Title]; ok {
+		if p.keepsOpen(test.Title) {
 			continue
 		}
 

@@ -220,6 +220,17 @@ func TestImportTitle_IsUniquePerNamespace(t *testing.T) {
 	assert.NotEqual(t, ImportTitle("VulnerabilityReport", "ns-a", w, "web"), ImportTitle("VulnerabilityReport", "ns-b", w, "web"))
 }
 
+func TestTitleKind(t *testing.T) {
+	w := Workload{"deployment", "app"}
+
+	for _, kind := range ReportKinds {
+		assert.Equal(t, kind, TitleKind(ImportTitle(kind, "ns-a", w, "web")))
+	}
+
+	assert.Equal(t, "Trivy", TitleKind("Trivy Scan"), "a title written elsewhere yields its first word")
+	assert.Empty(t, TitleKind(""))
+}
+
 func TestNamespaceTag(t *testing.T) {
 	assert.Equal(t, "krci-namespace:ns-a", NamespaceTag("ns-a"))
 }
