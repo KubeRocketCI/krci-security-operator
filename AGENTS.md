@@ -1,6 +1,6 @@
 # krci-security-operator - AI Agent Guide
 
-A Go operator (controller-runtime) that hosts the in-house security integrations of a KubeRocketCI cluster as modules. The first module imports Trivy Operator reports (`VulnerabilityReport`, `ExposedSecretReport`) into the cluster's DefectDojo. One instance runs per cluster with cluster-wide read-only access. The repository defines no CRDs, `api/` types or webhooks. See `README.md` for the behavior and the DefectDojo naming table.
+A Go operator (controller-runtime) for the security integrations of a KubeRocketCI cluster, one module per integration. The first module imports Trivy Operator reports (`VulnerabilityReport`, `ExposedSecretReport`) into the cluster's DefectDojo. One instance runs per cluster with cluster-wide read-only access. The repository defines no CRDs, `api/` types or webhooks. See `docs/trivy.md` for the behavior and the DefectDojo naming table.
 
 ## Project Structure
 
@@ -30,7 +30,7 @@ CI runs `make validate-docs`; it fails when `deploy-templates/README.md` is stal
 
 ### RBAC Is Hand-Maintained
 
-The ClusterRole is read-only and lists exactly the verbs the code calls. It lives in `deploy-templates/templates/role.yaml` and `config/rbac/role.yaml`; keep both and the access table of `README.md` identical. There are no RBAC markers. A new read through the API reader needs its verb added.
+The ClusterRole is read-only and lists exactly the verbs the code calls. It lives in `deploy-templates/templates/role.yaml` and `config/rbac/role.yaml`; keep both and the access table of `docs/trivy.md` identical. There are no RBAC markers. A new read through the API reader needs its verb added.
 
 ### No Dependency on Other KubeRocketCI Operators
 
@@ -38,7 +38,7 @@ The ClusterRole is read-only and lists exactly the verbs the code calls. It live
 
 ### Configuration Is Environment Variables
 
-The chart maps values to the variables parsed in `internal/controller/trivy/config.go`. A new value needs: the variable in `config.go` with a test, the env entry in `deploy-templates/templates/deployment.yaml` and `config/manager/manager.yaml` when the default is not enough, the `# --` documented key in `values.yaml`, `make helm-docs`, and the README table.
+The chart maps values to the variables parsed in `internal/controller/trivy/config.go`. A new value needs: the variable in `config.go` with a test, the env entry in `deploy-templates/templates/deployment.yaml` and `config/manager/manager.yaml` when the default is not enough, the `# --` documented key in `values.yaml`, `make helm-docs`, and the configuration table of `docs/trivy.md`.
 
 ## After Making Changes
 
@@ -64,7 +64,7 @@ Tests use `testify` and fake clients; there is no envtest suite.
 
 - **Reconcile key is a namespace.** Namespaces are classified on every pass (`classify.go`): stage when an in-cluster Stage with DNS label names points at it and its tenant label equals the Stage namespace, else tenant when it has the tenant label, else platform. The tenant is the namespace label `app.edp.epam.com/tenant`, never what a Stage claims. `excludeNamespaces` globs and disabled scopes make a namespace out of scope.
 - **Cache discipline.** Only Namespaces, Stages and the metadata of reports are watched. Full reports, workloads, `CodebaseImageStream`s and the Secret are read through `mgr.GetAPIReader()`; never read a report through the cache.
-- **Naming per scope** is built in `pkg/trivy.ReportImport` from a `Target`; see the table in `README.md`.
+- **Naming per scope** is built in `pkg/trivy.ReportImport` from a `Target`; see the table in `docs/trivy.md`.
 - **Ownership.** The operator closes only DefectDojo tests that carry its `krci-cluster:<clusterName>` tag and a `krci-scope` of `runtime`, `tenant` or `platform` (`trivy.IsOwned`).
 - **Closing.** After a pass the owned tests of the namespace that the pass did not import are closed; a namespace that is gone or out of scope is released once; the sweeper repeats this for every owned test at start and every 6h.
 - **State is in memory.** A restart re-imports once.
