@@ -8,7 +8,7 @@ A Helm chart for the KubeRocketCI Security Operator
 
 ## Introduction
 
-KubeRocketCI Security Operator is the home of the in-house security integrations of a KubeRocketCI cluster.
+KubeRocketCI Security Operator runs the security integrations of a cluster, one module per integration.
 The first module imports Trivy Operator reports (`VulnerabilityReport`, `ExposedSecretReport`) into the DefectDojo of the cluster.
 One instance runs per cluster with cluster-wide read-only access and writes only to DefectDojo.
 

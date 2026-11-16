@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Go operator that hosts the in-house security integrations of a KubeRocketCI cluster as modules. The first module (`internal/controller/trivy`) imports Trivy Operator `VulnerabilityReport` and `ExposedSecretReport` objects into the cluster's DefectDojo. It has no CRDs and no webhooks.
+A Go operator for the security integrations of a KubeRocketCI cluster, one module per integration. The first module (`internal/controller/trivy`) imports Trivy Operator `VulnerabilityReport` and `ExposedSecretReport` objects into the cluster's DefectDojo. It has no CRDs and no webhooks.
 
 **Read `AGENTS.md` first** - it covers the project structure, the files you must not edit, and the design rules. This file adds the commands and the control flow.
 

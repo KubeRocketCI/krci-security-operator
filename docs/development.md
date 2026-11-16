@@ -20,7 +20,7 @@
 - A module returns transient errors from `Reconcile`; only an absent optional dependency requeues with a nil error.
 - Background work that must change state wakes the controller through a channel source instead of acting itself, so the workqueue serializes it per key.
 - A module watches the metadata of large objects only and reads everything else through the API reader, so big objects never sit in the cache.
-- The ClusterRole stays read-only and lists exactly what the code calls. A new module that needs more access adds its rules to `deploy-templates/templates/role.yaml` and `config/rbac/role.yaml`, and to the access table of the README.
+- The ClusterRole stays read-only and lists exactly what the code calls. A new module that needs more access adds its rules to `deploy-templates/templates/role.yaml` and `config/rbac/role.yaml`, and to the access table of [trivy.md](trivy.md#access).
 
 ## The Trivy module
 
