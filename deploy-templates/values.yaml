@@ -1,0 +1,98 @@
+# -- component name
+name: krci-security-operator
+
+# -- Annotations to add to the deployment
+annotations: {}
+
+# -- Node labels for pod assignment
+nodeSelector: {}
+
+# -- Tolerations for pod assignment
+tolerations: []
+
+# -- Affinity for pod assignment
+affinity: {}
+
+image:
+  # -- krci-security-operator image registry. Leave empty to use the repository as-is (Docker Hub by default)
+  registry: ""
+  # -- krci-security-operator Docker image name. The released image can be found on [Dockerhub](https://hub.docker.com/r/epamedp/krci-security-operator)
+  repository: epamedp/krci-security-operator
+  # -- krci-security-operator Docker image tag. The released image can be found on [Dockerhub](https://hub.docker.com/r/epamedp/krci-security-operator). If not defined then .Chart.AppVersion is used
+  tag:
+
+# -- Image pull policy
+imagePullPolicy: "IfNotPresent"
+
+# -- Optional array of imagePullSecrets containing private registry credentials
+## Ref: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry
+imagePullSecrets: []
+# - name: regcred
+
+# -- Additional volumes to add to the manager pod
+extraVolumes: []
+
+# -- Additional volume mounts to add to the manager container
+extraVolumeMounts: []
+
+# -- Resource requests/limits for the manager container. Memory scales with `concurrency` multiplied by one page of 10 full Trivy reports (a report can reach 3 MB), plus the metadata of all reports in the cluster: raise the memory limit when `concurrency` or the report sizes grow.
+## Ref: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+resources:
+  limits:
+    memory: 512Mi
+  requests:
+    cpu: 50m
+    memory: 128Mi
+
+# -- Pod-level security context
+## Ref: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context
+## Ref: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+defectdojo:
+  # -- Secret in the release namespace with the keys `url` and `token` of the cluster's DefectDojo. The operator reads it at runtime and never writes it
+  secretName: defectdojo-credentials
+  # -- DefectDojo product type of the products the operator creates
+  productType: KubeRocketCI
+  # -- DefectDojo product of the platform scope
+  platformProduct: platform
+
+# -- Cluster name. Every imported test carries the tag `krci-cluster:<clusterName>`, and the operator closes only the tests that carry it
+clusterName: in-cluster
+
+scopes:
+  # -- Import the reports of namespaces that belong to a Stage
+  stage: true
+  # -- Import the reports of tenant namespaces (label `app.edp.epam.com/tenant`) that belong to no Stage
+  tenant: true
+  # -- Import the reports of the remaining (platform) namespaces
+  platform: true
+
+# -- Glob patterns of namespaces that are skipped
+excludeNamespaces: []
+
+# -- Prefixes stripped from the Argo CD application name when the component tag is derived
+componentPrefixes:
+  - in-cluster-
+
+# -- Interval of the periodic re-check of every namespace (Go duration)
+resyncPeriod: 30m
+
+# -- Number of namespaces reconciled in parallel
+concurrency: 2
+
+# -- Trivy Operator report kinds to import. Supported: `VulnerabilityReport`, `ExposedSecretReport`
+reportKinds:
+  - VulnerabilityReport
+  - ExposedSecretReport

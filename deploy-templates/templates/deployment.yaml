@@ -1,0 +1,106 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    {{- include "krci-security-operator.labels" . | nindent 4 }}
+  {{- with .Values.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  name: {{ .Values.name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: {{ .Values.name }}
+  template:
+    metadata:
+      labels:
+        name: {{ .Values.name }}
+    spec:
+      serviceAccountName: edp-{{ .Values.name }}
+      {{- if .Values.podSecurityContext }}
+      securityContext: {{ toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- end }}
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets: {{ toYaml .Values.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Values.name }}
+          image: {{ include "krci-security-operator.image" . }}
+          imagePullPolicy: "{{ .Values.imagePullPolicy }}"
+          command:
+            - /manager
+          args:
+            - --leader-elect
+            - --health-probe-bind-address=:8081
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: DEFECTDOJO_SECRET_NAME
+              value: {{ .Values.defectdojo.secretName | quote }}
+            - name: DEFECTDOJO_PRODUCT_TYPE
+              value: {{ .Values.defectdojo.productType | quote }}
+            - name: DEFECTDOJO_PLATFORM_PRODUCT
+              value: {{ .Values.defectdojo.platformProduct | quote }}
+            - name: CLUSTER_NAME
+              value: {{ .Values.clusterName | quote }}
+            - name: SCOPE_STAGE
+              value: {{ .Values.scopes.stage | quote }}
+            - name: SCOPE_TENANT
+              value: {{ .Values.scopes.tenant | quote }}
+            - name: SCOPE_PLATFORM
+              value: {{ .Values.scopes.platform | quote }}
+            - name: EXCLUDE_NAMESPACES
+              value: {{ join "," .Values.excludeNamespaces | quote }}
+            - name: COMPONENT_PREFIXES
+              value: {{ join "," .Values.componentPrefixes | quote }}
+            - name: RESYNC_PERIOD
+              value: {{ .Values.resyncPeriod | quote }}
+            - name: CONCURRENCY
+              value: {{ .Values.concurrency | quote }}
+            - name: REPORT_KINDS
+              value: {{ join "," .Values.reportKinds | quote }}
+          ports:
+            - containerPort: 8081
+              name: health
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- if .Values.securityContext }}
+          securityContext: {{ toYaml .Values.securityContext | nindent 12 }}
+          {{- end }}
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+          {{- with .Values.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
