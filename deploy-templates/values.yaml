@@ -86,13 +86,13 @@ excludeNamespaces: []
 componentPrefixes:
   - in-cluster-
 
-# -- Interval of the periodic re-check of every namespace (Go duration)
+# -- Interval of the periodic re-check of every namespace (Go duration, at least 1m)
 resyncPeriod: 30m
 
 # -- Number of namespaces reconciled in parallel
 concurrency: 2
 
-# -- Trivy Operator report kinds to import. Supported: `VulnerabilityReport`, `ExposedSecretReport`
+# -- Trivy Operator report kinds to import. Supported: `VulnerabilityReport`, `ExposedSecretReport`. The tests of a kind the cluster does not serve stay open; remove the kind to close them
 reportKinds:
   - VulnerabilityReport
   - ExposedSecretReport

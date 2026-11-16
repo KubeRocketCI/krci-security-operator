@@ -44,6 +44,7 @@ const (
 	defaultClusterName     = "in-cluster"
 	defaultComponentPrefix = "in-cluster-"
 	defaultResyncPeriod    = 30 * time.Minute
+	minResyncPeriod        = time.Minute
 	defaultConcurrency     = 2
 	listSeparator          = ","
 	errInvalidConfig       = "invalid configuration"
@@ -110,7 +111,7 @@ func LoadConfig(lookup func(string) (string, bool)) (Config, error) {
 	}
 
 	if len(env.errs) > 0 {
-		return Config{}, fmt.Errorf("%s: %w", errInvalidConfig, errors.Join(env.errs...))
+		return Config{}, invalidConfig(env.errs)
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -167,10 +168,15 @@ func parseEnv[T any](e *envReader, key string, def T, parse func(string) (T, err
 func (c Config) Validate() error {
 	errs := slices.Concat(c.identityErrors(), c.nameErrors(), c.tuningErrors(), c.reportKindErrors(), c.excludeErrors())
 	if len(errs) > 0 {
-		return fmt.Errorf("%s: %w", errInvalidConfig, errors.Join(errs...))
+		return invalidConfig(errs)
 	}
 
 	return nil
+}
+
+// invalidConfig joins the violations of the configuration into one error.
+func invalidConfig(errs []error) error {
+	return fmt.Errorf("%s: %w", errInvalidConfig, errors.Join(errs...))
 }
 
 // identityErrors checks the operator namespace, the credentials Secret and the cluster name.
@@ -220,8 +226,9 @@ func (c Config) nameErrors() []error {
 func (c Config) tuningErrors() []error {
 	var errs []error
 
-	if c.ResyncPeriod <= 0 {
-		errs = append(errs, fmt.Errorf("%s must be positive, got %s", EnvResyncPeriod, c.ResyncPeriod))
+	// A shorter period requeues every namespace almost at once, without the backoff of a failed pass.
+	if c.ResyncPeriod < minResyncPeriod {
+		errs = append(errs, fmt.Errorf("%s must be at least %s, got %s", EnvResyncPeriod, minResyncPeriod, c.ResyncPeriod))
 	}
 
 	if c.Concurrency < 1 {

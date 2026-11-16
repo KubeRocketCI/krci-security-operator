@@ -3,6 +3,7 @@ package trivy
 
 import (
 	"maps"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -78,6 +79,13 @@ func ComponentTag(component string) string { return tagPrefixComponent + ":" + c
 // It is unique per namespace, so tests of equally named workloads of two namespaces never meet.
 func ImportTitle(reportKind, namespace string, workload Workload, container string) string {
 	return reportKind + " " + namespace + "/" + workload.String() + "/" + container
+}
+
+// TitleKind returns the report kind of a title written by ImportTitle.
+func TitleKind(title string) string {
+	kind, _, _ := strings.Cut(title, " ")
+
+	return kind
 }
 
 // EnvTag is the tag that ties a DefectDojo test to a Stage.

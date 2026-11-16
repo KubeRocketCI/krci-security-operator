@@ -12,16 +12,18 @@ The unit of work is a namespace. The operator reconciles a namespace when a `Vul
    - **platform**: everything else, including the KubeRocketCI install namespace when it has no tenant label.
 2. **Skip** namespaces that match `excludeNamespaces` or belong to a scope that is switched off.
 3. **Import**: list the namespace's reports, resolve each to its stable workload (a ReplicaSet to its Deployment, a Job to its CronJob; a StatefulSet, DaemonSet or Pod is its own workload), and re-import only the reports whose UID or resourceVersion changed since the last import. The state is in memory, so a restart re-imports once. Imports into one test are serialized.
-4. **Close**, after each pass over an in-scope namespace, the owned tests tagged `krci-namespace:<ns>` that the pass did not import. That covers removed workloads and a namespace that changed its scope, for example from tenant to stage. The findings of other services in a test are closed once per test. A namespace that is gone or out of scope has all its owned tests closed, once.
+4. **Close**, after each pass over an in-scope namespace, the owned tests tagged `krci-namespace:<ns>` that the pass did not import, of the report kinds it listed completely. That covers removed workloads and a namespace that changed its scope, for example from tenant to stage. The findings of other services in a test are closed once per test. A namespace that is gone or out of scope has all its owned tests closed, once.
 5. **Sweep**: at start and every 6 hours, find the namespaces that own owned tests although the namespace no longer exists or is out of scope, and hand them to the controller. The sweeper closes nothing itself: the controller does, so all closing of a namespace is serialized with its imports.
 
 ### Errors, requeues and API load
 
 - A transient failure (a Kubernetes read, a DefectDojo call, closing a test) is returned from the reconcile, so the workqueue backs off exponentially (30 seconds up to 10 minutes) and `controller_runtime_reconcile_errors_total` counts it.
 - DefectDojo calls: a re-import is never retried after a timeout, a transport error or a 5xx, because DefectDojo may still be processing it and a second import into the same test duplicates findings; only a 429 is retried. Reads and the finding close call, which is idempotent, are retried with backoff. A re-import may take 10 minutes, every other call 2 minutes. The manager never stops for it.
-- An absent optional dependency is not an error: while the credentials Secret is missing or has no `url` or `token`, or a report CRD is not served, the namespace is requeued after at most 5 minutes. The missing Secret is logged once per process at Info and then at debug level.
-- A report that DefectDojo rejects with a client error (4xx) is permanent for that version: the version (UID and `resourceVersion`) is remembered and not uploaded again until the report changes. It does not fail the pass, so stale tests are still closed, and an earlier import of the same workload stays open. Each newly rejected version is logged at Error once and counted in the metric `krci_security_operator_rejected_reports_total{kind}`.
+- An absent optional dependency is not an error. While the credentials Secret is missing or has no `url` or `token`, the namespace is requeued after at most 5 minutes; the missing Secret is logged once per process at Info and then at debug level. While no report CRD is served, the namespace is requeued every `resyncPeriod`.
+- A report that DefectDojo rejects with a client error (4xx) is permanent for that version: the version (UID and `resourceVersion`) is remembered at once and not uploaded again until the report changes, also when the pass fails later. It does not fail the pass, so stale tests are still closed, and an earlier import of the same workload stays open. Each newly rejected version is logged at Error once and counted in the metric `krci_security_operator_rejected_reports_total{kind}`.
 - Every namespace is requeued every `resyncPeriod`, spread by up to 10% either way.
+- Tests are closed per report kind. While a configured kind is not served, also when it stops being served while its pages are listed, its tests and what the operator remembers about its reports stay as they are, and the pass logs the kind at Info. To close the tests of a kind that is no longer used, remove it from `reportKinds`.
+- An expired continue token (HTTP 410) starts the listing of the kind again, up to 3 times. The reports imported or rejected before are skipped as unchanged, and a report deleted in between no longer counts as live. After the third restart the pass fails and closes nothing; the retry skips the reports imported so far, so a large namespace converges over a few passes.
 - The credentials Secret is read at most once per minute. Report events that change no `resourceVersion` (informer resyncs) are dropped.
 - Report and Stage kinds are discovered at start. A CRD installed later needs an operator restart to be watched; its namespaces still catch up on the next resync.
 
@@ -71,7 +73,7 @@ The chart maps its values to environment variables of the manager. The full list
 | `scopes.stage`, `scopes.tenant`, `scopes.platform` | `SCOPE_STAGE`, `SCOPE_TENANT`, `SCOPE_PLATFORM` | `true` |
 | `excludeNamespaces` | `EXCLUDE_NAMESPACES` (comma-separated globs) | none |
 | `componentPrefixes` | `COMPONENT_PREFIXES` (comma-separated) | `in-cluster-` |
-| `resyncPeriod` | `RESYNC_PERIOD` | `30m` |
+| `resyncPeriod` | `RESYNC_PERIOD` | `30m`, at least `1m` |
 | `concurrency` | `CONCURRENCY` | `2` |
 | `reportKinds` | `REPORT_KINDS` (comma-separated) | `VulnerabilityReport`, `ExposedSecretReport` |
 

@@ -89,7 +89,8 @@ func TestLoadConfig_Errors(t *testing.T) {
 		{"missing secret name", func(e map[string]string) { delete(e, EnvDefectDojoSecretName) }, EnvDefectDojoSecretName},
 		{"bad bool", func(e map[string]string) { e[EnvScopeTenant] = "maybe" }, EnvScopeTenant},
 		{"bad duration", func(e map[string]string) { e[EnvResyncPeriod] = "soon" }, EnvResyncPeriod},
-		{"zero duration", func(e map[string]string) { e[EnvResyncPeriod] = "0s" }, "must be positive"},
+		{"zero duration", func(e map[string]string) { e[EnvResyncPeriod] = "0s" }, "must be at least 1m0s"},
+		{"duration just below the minimum", func(e map[string]string) { e[EnvResyncPeriod] = "59s" }, "must be at least 1m0s, got 59s"},
 		{"bad concurrency", func(e map[string]string) { e[EnvConcurrency] = "many" }, EnvConcurrency},
 		{"zero concurrency", func(e map[string]string) { e[EnvConcurrency] = "0" }, "at least 1"},
 		{"no report kinds", func(e map[string]string) { e[EnvReportKinds] = "" }, "at least one report kind"},
@@ -160,4 +161,13 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	cfg, err := LoadConfigFromEnv()
 	require.NoError(t, err)
 	assert.Equal(t, "ns", cfg.OperatorNamespace)
+}
+
+func TestLoadConfig_MinimumResyncPeriodIsAccepted(t *testing.T) {
+	env := requiredEnv()
+	env[EnvResyncPeriod] = "1m"
+
+	cfg, err := LoadConfig(lookupFrom(env))
+	require.NoError(t, err)
+	assert.Equal(t, minResyncPeriod, cfg.ResyncPeriod)
 }
