@@ -25,7 +25,7 @@ The unit of work is a namespace. The operator reconciles a namespace when a `Vul
 - The credentials Secret is read at most once per minute. Report events that change no `resourceVersion` (informer resyncs) are dropped.
 - Report and Stage kinds are discovered at start. A CRD installed later needs an operator restart to be watched; its namespaces still catch up on the next resync.
 
-The manager serves `controller_runtime_reconcile_errors_total` and `krci_security_operator_rejected_reports_total` only when it runs with `--metrics-bind-address`. The chart does not set it, so a chart install serves no metrics.
+The manager serves `controller_runtime_reconcile_errors_total` and `krci_security_operator_rejected_reports_total` when `metrics.enabled` is true: plain HTTP on `metrics.port` (8080) of the pod. The chart creates no Service for them.
 
 ### Sizing
 

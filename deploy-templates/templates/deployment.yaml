@@ -34,6 +34,9 @@ spec:
           args:
             - --leader-elect
             - --health-probe-bind-address=:8081
+            {{- if .Values.metrics.enabled }}
+            - --metrics-bind-address=:{{ .Values.metrics.port }}
+            {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:
@@ -67,6 +70,11 @@ spec:
             - containerPort: 8081
               name: health
               protocol: TCP
+            {{- if .Values.metrics.enabled }}
+            - containerPort: {{ .Values.metrics.port }}
+              name: metrics
+              protocol: TCP
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

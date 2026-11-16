@@ -78,6 +78,8 @@ One instance runs per cluster with cluster-wide read-only access and writes only
 | image.tag | string | `nil` | krci-security-operator Docker image tag. The released image can be found on [Dockerhub](https://hub.docker.com/r/epamedp/krci-security-operator). If not defined then .Chart.AppVersion is used |
 | imagePullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | imagePullSecrets | list | `[]` | Optional array of imagePullSecrets containing private registry credentials # Ref: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry |
+| metrics.enabled | bool | `false` | Serve the Prometheus metrics of the manager over plain HTTP on `metrics.port` of the pod. The chart creates no Service for them |
+| metrics.port | int | `8080` | Container port of the metrics endpoint |
 | name | string | `"krci-security-operator"` | component name |
 | nodeSelector | object | `{}` | Node labels for pod assignment |
 | podSecurityContext | object | `{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod-level security context # Ref: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/ |

@@ -8,8 +8,8 @@
 | `internal/controller/trivy/` | the Trivy module: `Config` (environment parsing and validation), `SetupWithManager` (controller and sweeper), `Reconciler` (pass over a namespace), classification, closing, event mapping |
 | `pkg/defectdojo/` | minimal DefectDojo API v2 client with a per-test import lock |
 | `pkg/trivy/` | Trivy report parsing, image and workload resolution, DefectDojo names, tags and ownership per scope, component tag |
-| `deploy-templates/` | Helm chart, the shipped artifact |
-| `config/` | kustomize for the manager and RBAC, for development |
+| `deploy-templates/` | Helm chart, the only deployment artifact |
+| `test/deploy/` | chart render tests: `helm template` checked against the configuration the code reads and the read-only access |
 | `ct-configs/` | chart-testing configuration used by CI |
 
 ## Rules for a module
@@ -20,7 +20,7 @@
 - A module returns transient errors from `Reconcile`; only an absent optional dependency requeues with a nil error.
 - Background work that must change state wakes the controller through a channel source instead of acting itself, so the workqueue serializes it per key.
 - A module watches the metadata of large objects only and reads everything else through the API reader, so big objects never sit in the cache.
-- The ClusterRole stays read-only and lists exactly what the code calls. A new module that needs more access adds its rules to `deploy-templates/templates/role.yaml` and `config/rbac/role.yaml`, and to the access table of [trivy.md](trivy.md#access).
+- The ClusterRole stays read-only and lists exactly what the code calls. A new module that needs more access adds its rules to `deploy-templates/templates/role.yaml` and to the access table of [trivy.md](trivy.md#access); `test/deploy` fails on a write verb in the ClusterRole.
 
 ## The Trivy module
 
@@ -37,10 +37,10 @@ The unit tests use the fake client and a fake DefectDojo. The event wiring in `S
 ## Checks
 
 ```bash
-make test           # fmt, vet, unit tests
+make test           # fmt, vet, unit tests, and the chart render tests when helm is installed
 make lint           # golangci-lint
 make validate-docs  # chart README is current
 helm lint deploy-templates
 ```
 
-CI runs the same checks plus `ct lint` and hadolint, and checks the commit message format `EPMDEDP-<id>: <type>: <subject>`.
+CI runs the same checks with helm installed, plus `ct lint`, hadolint and CodeQL, and checks the commit message format `EPMDEDP-<id>: <type>: <subject>`.

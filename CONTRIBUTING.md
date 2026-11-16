@@ -11,7 +11,7 @@ Never report a vulnerability in an issue: see [SECURITY.md](SECURITY.md).
 ## Pull requests
 
 1. One pull request, one commit, branched from `main`.
-2. Run the checks of CI: `make lint test validate-docs`. After a change of `deploy-templates/values.yaml` or `README.md.gotmpl`, run `make helm-docs` first.
+2. Run the checks of CI: `make lint test validate-docs`; `make test` also renders the chart when `helm` is installed. After a change of `deploy-templates/values.yaml` or `README.md.gotmpl`, run `make helm-docs` first.
 3. Write the commit title as `EPMDEDP-<ID>: <type>: <Subject>`, at most 85 characters, with the type `feat`, `fix`, `docs`, `style`, `refactor`, `test` or `chore`, and `!` after it for a breaking change.
 4. Fill in the pull request template.
 

@@ -45,11 +45,11 @@ Chart values: [deploy-templates/README.md](deploy-templates/README.md). Classifi
 
 - One DefectDojo per cluster: two clusters that write into one DefectDojo overwrite each other's tests of the same names.
 - A report CRD installed after the operator started is imported on each resync (30 minutes by default) until a restart makes the operator watch it.
-- The chart serves no metrics.
+- Metrics are off by default; `metrics.enabled=true` serves them over plain HTTP on port 8080 of the pod.
 
 ## Develop
 
-See [docs/development.md](docs/development.md) and [CONTRIBUTING.md](CONTRIBUTING.md). `make test` runs the unit tests, `make lint` the linter, and `make build` produces `dist/manager-<arch>`.
+See [docs/development.md](docs/development.md) and [CONTRIBUTING.md](CONTRIBUTING.md). `make test` runs the unit tests and, with helm installed, the chart render tests; `make lint` runs the linter and `make build` produces `dist/manager-<arch>`.
 
 ## Security
 

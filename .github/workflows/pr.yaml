@@ -88,10 +88,10 @@ jobs:
 
       - name: Run chart-testing (lint)
         run: |
-          ct lint --target-branch ${{ github.event.repository.default_branch }} \
-            --charts ${CHART_DIR}/ \
-            --config ${CT_CONFIGS_DIR}/${CT_FILE_PATH} \
-            --lint-conf ${CT_CONFIGS_DIR}/${LINTCONF_FILE_PATH}
+          ct lint --target-branch "${{ github.event.repository.default_branch }}" \
+            --charts "${CHART_DIR}/" \
+            --config "${CT_CONFIGS_DIR}/${CT_FILE_PATH}" \
+            --lint-conf "${CT_CONFIGS_DIR}/${LINTCONF_FILE_PATH}"
 
   build-lint-test:
     needs: [helm-lint]
@@ -111,6 +111,9 @@ jobs:
 
       - name: Make Lint
         run: make lint
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
 
       - name: Run tests
         run: make test
