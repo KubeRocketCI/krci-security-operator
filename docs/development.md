@@ -43,10 +43,10 @@ The operator depends on DefectDojo and Trivy Operator behavior that no API docum
 
 | Project | Supported | Contract unchanged across |
 |---|---|---|
-| DefectDojo | 2.55 or later; 3.5.200 is the version the platform targets and the tests follow; verified with 2.55.2 and 3.5.200 | 2.55.2 to 3.5.200, except that only 3.4.200 and later serialize two imports into one test, and that 3.5.200 has no Product Type roles (see [trivy.md](trivy.md#defectdojo-requirements)) |
+| DefectDojo | 3.5.200 (see [trivy.md](trivy.md#defectdojo-requirements)) | 3.5.200 |
 | Trivy Operator | 0.34.0 or later, verified with 0.36.1 | 0.34.0 to 0.36.1 |
 
-Supported means the releases of the last three months. On a new upstream release, compare the files below between the old and the new tag, update the fake and this table, and move the lower bound.
+Trivy Operator: supported means the releases of the last three months. On a new Trivy Operator release, compare the files below between the old and the new tag, update the fake and this table, and move the lower bound.
 
 ```bash
 git clone --filter=blob:none https://github.com/defectdojo/django-defectdojo "$TMPDIR/django-defectdojo"
@@ -61,17 +61,17 @@ DefectDojo files that define the reimport contract:
 |---|---|
 | `dojo/tools/trivy_operator/` | parser: title, severity, vulnerability ids, description and service of each finding; a report without labels or result list gives no findings |
 | `dojo/settings/settings.dist.py` | `HASHCODE_FIELDS_PER_SCANNER["Trivy Operator Scan"]`, `HASH_CODE_FIELDS_ALWAYS` (service) |
-| `dojo/finding/models.py` (`dojo/models.py` in 2.55) | `hash_fields`, `get_vulnerability_ids`: how the hash is built; `Finding.service` (200 characters) |
-| `dojo/test/models.py` (`dojo/models.py` in 2.55) | `Test.title` (255 characters), `Test.version` (100 characters) |
+| `dojo/finding/models.py` | `hash_fields`, `get_vulnerability_ids`: how the hash is built; `Finding.service` (200 characters) |
+| `dojo/test/models.py` | `Test.title` (255 characters), `Test.version` (100 characters) |
 | `dojo/validators.py` | `TAG_PATTERN`: a tag has no space, comma or quote |
 | `dojo/db_migrations/0066_django_tagulous.py` | tag `name` column (255 characters) |
 | `dojo/importers/default_reimporter.py` | `get_original_findings` (close set by service), `process_matched_finding` (reactivation, kept triage states), `close_old_findings` |
 | `dojo/importers/base_importer.py` | `update_test_meta` (version), `update_test_tags`, `mitigate_finding` (risk acceptance removed) |
 | `dojo/importers/auto_create_context.py` | product type conflict, last engagement and test by name |
 | `dojo/api_v2/serializers.py` | `ReImportScanSerializer`: form validation, context and test created before the parser runs |
-| `dojo/filters.py` `ApiProductFilter` (`dojo/product/api/filters.py` in 3.5) | `name_exact`, an `iexact` match on the product name: the product lookup by exact name uses it; verified in 2.55.2 and 3.5.200 |
-| `dojo/api_v2/permissions.py` `check_auto_create_permission` (`dojo/authorization/api_permissions.py` in 3.5) | permissions of a reimport that creates the Product Type, product and engagement |
-| `dojo/authorization/authorization.py`, `roles_permissions.py` | 2.55: roles per Product Type and product, global roles. 3.5: staff, superuser and `authorized_users` only, no roles |
+| `dojo/product/api/filters.py` `ApiProductFilter` | `name_exact`, an `iexact` match on the product name: the product lookup by exact name uses it |
+| `dojo/authorization/api_permissions.py` `check_auto_create_permission` | permissions of a reimport that creates the Product Type, product and engagement |
+| `dojo/authorization/authorization.py`, `roles_permissions.py` | staff, superuser and `authorized_users` only; role assignments are not read |
 
 Trivy Operator files: `pkg/trivyoperator/constants.go` (report labels), `pkg/apis/aquasecurity/v1alpha1/` (report types, `report-ttl` annotation).
 

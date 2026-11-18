@@ -129,7 +129,7 @@ func (p parsedFinding) hash() string {
 	return hex.EncodeToString(sum[:])
 }
 
-// fakeDefectDojo models the DefectDojo 3.5 contract of the client calls the controller makes:
+// fakeDefectDojo models the DefectDojo 3.5.200 contract of the client calls the controller makes:
 //   - reimport-scan as the client sends it: auto_create_context, close_old_findings, active=true, verified=false
 //     and minimum_severity=Info are applied on every reimport, not read from the request;
 //   - the test is the latest one of the engagement with the scan type and title, else a new one;

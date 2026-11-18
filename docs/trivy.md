@@ -154,17 +154,16 @@ The operator also reads `POD_NAMESPACE`, which the chart sets from the pod's nam
 
 ### DefectDojo requirements
 
-- DefectDojo 2.55 or later. 3.5.200 is the version the platform targets and the tests follow; use it or later.
-- Known limit before 3.4.200: DefectDojo does not serialize two uploads into one test on the server. An upload that overlaps a slow earlier upload of the same test, whose client call timed out, can create duplicate findings; the next reimport closes them. An overlapping first import can create a second test with the same title, which stays open. From 3.4.200 the server serializes them.
-- The API token needs these permissions, by DefectDojo version:
+- DefectDojo 3.5.200.
+- The API token user is a superuser, a staff user, or an authorized user of the Product Type or of the product. DefectDojo 3.5.200 checks the superuser and staff flags and the authorized users only, and does not read role assignments.
 
-| Used for | 2.55 | 3.5.200 |
-|---|---|---|
-| lookups, the active findings of a test, reimport, product tags, close | Product Type role Maintainer or Owner on the Product Type, which grants view, import scan results, edit products and edit findings | a staff user, or a user in the authorized users of the Product Type (or of the product) |
-| creation of products and engagements on first use | the same role of an existing Product Type; a Product Type created in advance removes the global permission | a staff user, or an authorized user of a Product Type created in advance |
-| creation of the Product Type on first use | the global Product Type add permission: a superuser, the Django permission `dojo.add_product_type`, or a global role Maintainer or Owner | a staff user; a non-staff user with the Django permission `dojo.add_product_type` can create it, but DefectDojo 3.5.200 does not make that user a member of it, so the token cannot use it afterwards |
+| Used for | Token user |
+|---|---|
+| lookups, the active findings of a test, reimport, product tags, close | a superuser, a staff user, or an authorized user of the Product Type (or of the product) |
+| creation of products and engagements on first use | a superuser, a staff user, or an authorized user of a Product Type created in advance |
+| creation of the Product Type on first use | a superuser or a staff user; a non-staff user with the Django permission `dojo.add_product_type` can create it, but DefectDojo 3.5.200 does not make that user a member of it, so the token cannot use it afterwards |
 
-DefectDojo 3.5.200 has no Product Type roles: it checks the superuser and staff flags and the authorized users of the Product Type and product, and does not read role assignments. Create the Product Type in advance and add the token user to its authorized users when the token is not a staff user.
+Create the Product Type in advance and add the token user to its authorized users when the token is not a staff user.
 
 ### Access
 

@@ -14,7 +14,7 @@ import (
 	"github.com/KubeRocketCI/krci-security-operator/pkg/trivy"
 )
 
-// The tests of this file check that the fake DefectDojo follows the DefectDojo 3.5 reimport contract.
+// The tests of this file check that the fake DefectDojo follows the DefectDojo 3.5.200 reimport contract.
 
 const (
 	contractService = "ns/Deployment/app/app"
