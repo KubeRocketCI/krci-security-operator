@@ -8,6 +8,13 @@ Go operator (controller-runtime), one module per security integration; the Trivy
 - Before changing reconcile, watches, closing or error handling: the module rules in `docs/development.md#rules-for-a-module`, then the behavior in `docs/trivy.md`.
 - DefectDojo or Trivy Operator behavior (reimport rules, parser, report labels, the fake DefectDojo): `docs/development.md#upstream-sources`, checked in the upstream source at the supported versions.
 
+## Design
+
+- The operator reads only Kubernetes and Trivy Operator objects. No KubeRocketCI resource or label is read, and no KubeRocketCI name is written, except the default Product Type `KubeRocketCI` (ADR 0001).
+- Every report of every namespace goes to the product `<cluster name>/<namespace>` under the Product Type setting, engagement `trivy-operator`, test `<ReportKind> <kind>/<name>/<container>` (ADR 0002). The layout is a contract other systems read: change it only with its ADR.
+- The cluster name has no default: the operator does not start and the chart does not render without it.
+- The only namespace filter is `excludeNamespaces`. There are no scopes, scope switches or platform product.
+
 ## Generated files
 
 Edit the source: `deploy-templates/README.md` comes from `README.md.gotmpl` and the `# --` comments of `values.yaml` (`make helm-docs`); `CHANGELOG.md` comes from `make changelog`.

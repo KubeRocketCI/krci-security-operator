@@ -22,7 +22,7 @@ func (h *harness) reconcileLogged() string {
 
 	log := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{Verbosity: 0})
 
-	_, err := h.reconciler.Reconcile(ctrl.LoggerInto(context.Background(), log), namespaceRequest(stageNS))
+	_, err := h.reconciler.Reconcile(ctrl.LoggerInto(context.Background(), log), namespaceRequest(appNS))
 	require.NoError(h.t, err)
 
 	return strings.Join(lines, "\n")
@@ -240,8 +240,8 @@ func TestReconcile_BrokenReportOfAWorkloadThatIsGoneDoesNotKeepItsTestOpen(t *te
 	h.reconcile()
 
 	h.setReport(withoutField(t, goApp(t), "report", "vulnerabilities"))
-	h.remove(objects[5])
-	h.remove(objects[6])
+	h.remove(objects[goAppDeployment])
+	h.remove(objects[goAppDeployment+1])
 
 	h.reconcile()
 
@@ -275,8 +275,6 @@ func (h *harness) activeFindingsOf(title string) int {
 }
 
 func TestReconcile_ReportWithoutLabelsHoldsOnlyTheTestsOfItsKind(t *testing.T) {
-	const secretsTitle = "ExposedSecretReport krci-demo-dev/deployment/test-go-app/test-go-app"
-
 	tests := map[string]struct {
 		unlabelled func(*testing.T) *unstructured.Unstructured
 		held       string
@@ -296,8 +294,8 @@ func TestReconcile_ReportWithoutLabelsHoldsOnlyTheTestsOfItsKind(t *testing.T) {
 			require.NotZero(t, h.activeFindingsOf(tc.closed))
 
 			h.setReport(withoutField(t, tc.unlabelled(t), "metadata", "labels"))
-			h.remove(objects[5])
-			h.remove(objects[6])
+			h.remove(objects[goAppDeployment])
+			h.remove(objects[goAppDeployment+1])
 
 			h.reconcile()
 

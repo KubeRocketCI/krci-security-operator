@@ -64,11 +64,10 @@ One instance runs per cluster with cluster-wide read-only access and writes only
 |-----|------|---------|-------------|
 | affinity | object | `{}` | Affinity for pod assignment |
 | annotations | object | `{}` | Annotations to add to the deployment |
-| clusterName | string | `"in-cluster"` | Cluster name. Every imported test carries the tag `krci-cluster:<clusterName>`, and the operator closes only the tests that carry it |
+| clusterName | string | `""` | Required, no default. Unique name of this cluster in the DefectDojo: a lowercase RFC 1123 DNS label. Every namespace product is named `<clusterName>/<namespace>`, and the operator closes only the tests of its own cluster |
 | componentPrefixes | list | `["in-cluster-"]` | Prefixes stripped from the Argo CD application name when the component tag is derived |
 | concurrency | int | `2` | Number of namespaces reconciled in parallel |
-| defectdojo.platformProduct | string | `"platform"` | DefectDojo product of the platform scope |
-| defectdojo.productType | string | `"KubeRocketCI"` | DefectDojo product type of the products the operator creates |
+| defectdojo.productType | string | `"KubeRocketCI"` | DefectDojo Product Type of the namespace products. Use one value for every operator that writes to the same DefectDojo; a product that exists under another Product Type fails its reimports |
 | defectdojo.secretName | string | `"defectdojo-credentials"` | Secret in the release namespace with the keys `url` and `token` of the cluster's DefectDojo. The operator reads it at runtime and never writes it |
 | excludeNamespaces | list | `[]` | Glob patterns of namespaces that are skipped |
 | extraVolumeMounts | list | `[]` | Additional volume mounts to add to the manager container |
@@ -86,8 +85,5 @@ One instance runs per cluster with cluster-wide read-only access and writes only
 | reportKinds | list | `["VulnerabilityReport","ExposedSecretReport"]` | Trivy Operator report kinds to import. Supported: `VulnerabilityReport`, `ExposedSecretReport`. The tests of a kind the cluster does not serve stay open; remove the kind to close them |
 | resources | object | `{"limits":{"memory":"512Mi"},"requests":{"cpu":"50m","memory":"128Mi"}}` | Resource requests/limits for the manager container. Memory scales with `concurrency` multiplied by one page of 10 full Trivy reports (a report can reach 3 MB), plus the metadata of all reports in the cluster: raise the memory limit when `concurrency` or the report sizes grow. # Ref: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/ |
 | resyncPeriod | string | `"30m"` | Interval of the periodic re-check of every namespace (Go duration, at least 1m) |
-| scopes.platform | bool | `true` | Import the reports of the remaining (platform) namespaces |
-| scopes.stage | bool | `true` | Import the reports of namespaces that belong to a Stage |
-| scopes.tenant | bool | `true` | Import the reports of tenant namespaces (label `app.edp.epam.com/tenant`) that belong to no Stage |
 | securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}` | Container-level security context # Ref: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/ |
 | tolerations | list | `[]` | Tolerations for pod assignment |

@@ -60,16 +60,3 @@ rules:
   verbs:
   - list
   - watch
-- apiGroups:
-  - v2.edp.epam.com
-  resources:
-  - stages
-  verbs:
-  - list
-  - watch
-- apiGroups:
-  - v2.edp.epam.com
-  resources:
-  - codebaseimagestreams
-  verbs:
-  - list

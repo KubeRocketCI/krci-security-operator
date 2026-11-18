@@ -98,9 +98,9 @@ type credentials struct{ url, token string }
 // the sweeper only wakes namespaces up.
 // The reconciler adds no finalizer and writes nothing to the cluster.
 type Reconciler struct {
-	// cache serves the watched Namespaces and Stages.
+	// cache serves the watched Namespaces.
 	cache client.Reader
-	// reader reads without a cache: reports, workloads, CodebaseImageStreams and the credentials Secret.
+	// reader reads without a cache: reports, workloads and the credentials Secret.
 	reader  client.Reader
 	config  Config
 	connect Connector
@@ -120,7 +120,7 @@ type Reconciler struct {
 	healed map[string]map[int]struct{}
 	// rejectedVersions holds, per namespace, the report versions DefectDojo rejected; they are not uploaded again.
 	rejectedVersions map[string]map[importKey]reportVersion
-	// released holds the namespaces whose owned tests were closed because the namespace left the scope.
+	// released holds the namespaces whose owned tests were closed because the namespace is gone or excluded.
 	released map[string]struct{}
 
 	credMu       sync.Mutex
@@ -130,7 +130,7 @@ type Reconciler struct {
 	secretLogged bool
 }
 
-// NewReconciler returns a Reconciler. cache serves Namespaces and Stages, reader serves everything else.
+// NewReconciler returns a Reconciler. cache serves Namespaces, reader serves everything else.
 func NewReconciler(cache, reader client.Reader, cfg Config, connect Connector) *Reconciler {
 	return &Reconciler{
 		cache:    cache,
@@ -150,7 +150,7 @@ func NewReconciler(cache, reader client.Reader, cfg Config, connect Connector) *
 }
 
 // Reconcile imports the reports of the namespace named by the request, or closes its tests when the namespace
-// is gone or out of scope.
+// is gone, terminating or excluded.
 func (r *Reconciler) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	namespace := request.Name
 	ctx = ctrl.LoggerInto(ctx, ctrl.LoggerFrom(ctx).WithValues("namespace", namespace))
@@ -173,12 +173,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, request reconcile.Request) (
 		return reconcile.Result{}, r.release(ctx, dd, namespace)
 	}
 
-	target, inScope, err := r.classify(ctx, ns)
-	if err != nil {
-		return reconcile.Result{}, err
-	}
-
-	if !inScope {
+	if r.excluded(ns.Name) {
 		if err = r.release(ctx, dd, namespace); err != nil {
 			return reconcile.Result{}, err
 		}
@@ -186,9 +181,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, request reconcile.Request) (
 		return reconcile.Result{RequeueAfter: r.resyncAfter()}, nil
 	}
 
-	r.markInScope(namespace)
+	r.markImportable(namespace)
 
-	if err = r.syncNamespace(ctx, dd, target); err != nil {
+	if err = r.syncNamespace(ctx, dd, r.target(namespace)); err != nil {
 		return reconcile.Result{}, err
 	}
 
@@ -274,9 +269,8 @@ func (r *Reconciler) logSecret(ctx context.Context, msg, secret string) {
 
 // pass holds what one pass over a namespace accumulates across pages of reports.
 type pass struct {
-	target    trivy.Target
-	codebases map[string]string
-	resolver  *trivy.WorkloadResolver
+	target   trivy.Target
+	resolver *trivy.WorkloadResolver
 	// components caches the component tag per workload.
 	components map[trivy.Workload]string
 	// current holds the tests the pass imported or found up to date.
@@ -341,24 +335,12 @@ func (p *pass) forget(kind string) {
 	delete(p.unattributed, kind)
 }
 
-// syncNamespace imports the reports of an in-scope namespace page by page and closes the tests of workloads
+// syncNamespace imports the reports of an imported namespace page by page and closes the tests of workloads
 // that are gone. Tests are closed only after every report was imported: a failed import hides which tests
 // are still alive. The tests of a report kind the pass could not list stay as they are.
 func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target trivy.Target) error {
-	var (
-		codebases map[string]string
-		err       error
-	)
-
-	if target.Scope == trivy.ScopeStage {
-		if codebases, err = r.codebasesByImage(ctx, target.Tenant); err != nil {
-			return err
-		}
-	}
-
 	p := &pass{
 		target:         target,
-		codebases:      codebases,
 		resolver:       trivy.NewWorkloadResolver(r.reader, target.Namespace),
 		components:     map[trivy.Workload]string{},
 		current:        map[importKey]importedReport{},
@@ -366,7 +348,7 @@ func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target tr
 		rejected:       map[importKey]reportVersion{},
 	}
 
-	if err = r.importReports(ctx, dd, p); err != nil {
+	if err := r.importReports(ctx, dd, p); err != nil {
 		return err
 	}
 
@@ -427,7 +409,7 @@ func (r *Reconciler) importOne(ctx context.Context, dd DefectDojo, p *pass, repo
 		return err
 	}
 
-	imp := trivy.ReportImport(p.target, report, workload, p.codebases, component)
+	imp := trivy.ReportImport(p.target, report, workload, component)
 
 	if state == trivy.WorkloadSuperseded {
 		p.keepOpenTitles[imp.TestTitle] = struct{}{}
@@ -476,7 +458,7 @@ func (r *Reconciler) importOne(ctx context.Context, dd DefectDojo, p *pass, repo
 	r.recordImport(p.target.Namespace, key, entry)
 
 	log.Info("Imported a report", "report", report.GetName(), "kind", report.GetKind(),
-		"scope", p.target.Scope, "product", imp.Product, "engagement", imp.Engagement, "test", entry.testID)
+		"product", imp.Product, "engagement", imp.Engagement, "test", entry.testID)
 
 	return nil
 }
@@ -500,7 +482,7 @@ func (r *Reconciler) skipBroken(ctx context.Context, p *pass, report *unstructur
 	}
 
 	if state != trivy.WorkloadGone {
-		p.keepOpenTitles[trivy.ReportTitle(p.target.Namespace, report, workload)] = struct{}{}
+		p.keepOpenTitles[trivy.ReportTitle(report, workload)] = struct{}{}
 	}
 
 	return nil
@@ -679,38 +661,6 @@ func continueExpired(err error) bool {
 	return k8sErrors.IsResourceExpired(err) || k8sErrors.IsGone(err)
 }
 
-// codebasesByImage maps the normalised image of each CodebaseImageStream of the tenant namespace to its codebase.
-func (r *Reconciler) codebasesByImage(ctx context.Context, tenant string) (map[string]string, error) {
-	streams := &unstructured.UnstructuredList{}
-	streams.SetGroupVersionKind(imageStreamGVK.GroupVersion().WithKind(imageStreamGVK.Kind + "List"))
-
-	if err := r.reader.List(ctx, streams, client.InNamespace(tenant)); err != nil {
-		if meta.IsNoMatchError(err) {
-			return nil, nil
-		}
-
-		return nil, fmt.Errorf("failed to list CodebaseImageStreams: %w", err)
-	}
-
-	codebases := make(map[string]string, len(streams.Items))
-
-	for i := range streams.Items {
-		imageName, _, _ := unstructured.NestedString(streams.Items[i].Object, "spec", "imageName")
-		codebase, _, _ := unstructured.NestedString(streams.Items[i].Object, "spec", "codebase")
-
-		if imageName == "" || codebase == "" {
-			continue
-		}
-
-		image := trivy.NormalizeImage(imageName)
-		if _, ok := codebases[image]; !ok {
-			codebases[image] = codebase
-		}
-	}
-
-	return codebases, nil
-}
-
 func (r *Reconciler) lastImport(namespace string, key importKey) (importedReport, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -847,7 +797,8 @@ func (r *Reconciler) markReleased(namespace string) {
 	delete(r.healed, namespace)
 }
 
-func (r *Reconciler) markInScope(namespace string) {
+// markImportable clears the released mark of a namespace that the pass imports.
+func (r *Reconciler) markImportable(namespace string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

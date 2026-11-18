@@ -46,16 +46,8 @@ spec:
               value: {{ .Values.defectdojo.secretName | quote }}
             - name: DEFECTDOJO_PRODUCT_TYPE
               value: {{ .Values.defectdojo.productType | quote }}
-            - name: DEFECTDOJO_PLATFORM_PRODUCT
-              value: {{ .Values.defectdojo.platformProduct | quote }}
             - name: CLUSTER_NAME
-              value: {{ .Values.clusterName | quote }}
-            - name: SCOPE_STAGE
-              value: {{ .Values.scopes.stage | quote }}
-            - name: SCOPE_TENANT
-              value: {{ .Values.scopes.tenant | quote }}
-            - name: SCOPE_PLATFORM
-              value: {{ .Values.scopes.platform | quote }}
+              value: {{ include "krci-security-operator.clusterName" . | quote }}
             - name: EXCLUDE_NAMESPACES
               value: {{ join "," .Values.excludeNamespaces | quote }}
             - name: COMPONENT_PREFIXES

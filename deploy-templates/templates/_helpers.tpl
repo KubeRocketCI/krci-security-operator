@@ -61,3 +61,14 @@ Fully qualified image reference.
 {{- printf "%s:%s" .Values.image.repository $tag }}
 {{- end }}
 {{- end }}
+
+{{/*
+Cluster name: required, a lowercase RFC 1123 DNS label of at most 63 characters (the rule of the operator).
+*/}}
+{{- define "krci-security-operator.clusterName" -}}
+{{- $name := required "clusterName is required: the unique name of this cluster in DefectDojo" .Values.clusterName }}
+{{- if and $name (or (gt (len $name) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $name))) }}
+{{- fail (printf "clusterName must be a lowercase RFC 1123 DNS label of at most 63 characters, got %q" $name) }}
+{{- end }}
+{{- $name }}
+{{- end }}

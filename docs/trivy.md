@@ -4,16 +4,14 @@ The `trivy` module (`internal/controller/trivy`) imports Trivy Operator `Vulnera
 
 ## How it works
 
-The unit of work is a namespace. The operator reconciles a namespace when a `VulnerabilityReport` or `ExposedSecretReport` in it changes, when the namespace or a KubeRocketCI `Stage` that points at it changes, and every `resyncPeriod`.
+The operator reads only Kubernetes and Trivy Operator objects: Namespaces, workloads, reports and its credentials Secret. It reads no KubeRocketCI resource or label, so it works the same on a cluster without KubeRocketCI.
 
-1. **Classify** the namespace, on every pass:
-   - **stage**: a `Stage` in any namespace has `spec.namespace` equal to the namespace, its `cdPipeline`, `name` and `namespace` are RFC 1123 DNS labels, and the namespace carries the label `app.edp.epam.com/tenant` equal to the Stage's namespace. When several Stages match, the first by Stage namespace and name wins and the others are logged.
-   - **tenant**: the namespace has a non-empty `app.edp.epam.com/tenant` label and no Stage matches.
-   - **platform**: everything else, including the KubeRocketCI install namespace when it has no tenant label.
-2. **Skip** namespaces that match `excludeNamespaces` or belong to a scope that is switched off.
-3. **Import**: list the namespace's reports, resolve each to its stable workload (a ReplicaSet to its Deployment, a Job to its CronJob; a StatefulSet, DaemonSet or Pod is its own workload), and re-import only the reports whose UID or resourceVersion changed since the last import. The state is in memory, so a restart re-imports once. Imports into one test are serialized.
-4. **Close**, after each pass over an in-scope namespace, the owned tests tagged `krci-namespace:<ns>` that the pass did not import, of the report kinds it listed completely. That covers removed workloads and a namespace that changed its scope, for example from tenant to stage. The findings of other services in a test are closed once per test. A namespace that is gone or out of scope has all its owned tests closed, once.
-5. **Sweep**: at start and every 6 hours, find the namespaces that own owned tests although the namespace no longer exists or is out of scope, and hand them to the controller. The sweeper closes nothing itself: the controller does, so all closing of a namespace is serialized with its imports.
+The unit of work is a namespace. The operator reconciles a namespace when a `VulnerabilityReport` or `ExposedSecretReport` in it changes, when the namespace is created, deleted or starts terminating, and every `resyncPeriod`.
+
+1. **Skip** namespaces that match `excludeNamespaces`.
+2. **Import**: list the namespace's reports, resolve each to its stable workload (a ReplicaSet to its Deployment, a Job to its CronJob; a StatefulSet, DaemonSet or Pod is its own workload), and re-import only the reports whose UID or resourceVersion changed since the last import. The state is in memory, so a restart re-imports once. Imports into one test are serialized.
+3. **Close**, after each pass over an imported namespace, the owned tests tagged `krci-namespace:<ns>` that the pass did not import, of the report kinds it listed completely. That covers removed workloads. The findings of other services in a test are closed once per test. A namespace that is gone or excluded has all its owned tests closed, once.
+4. **Sweep**: at start and every 6 hours, find the namespaces that own owned tests although the namespace no longer exists or is excluded, and hand them to the controller. The sweeper closes nothing itself: the controller does, so all closing of a namespace is serialized with its imports.
 
 ### Errors, requeues and API load
 
@@ -26,7 +24,7 @@ The unit of work is a namespace. The operator reconciles a namespace when a `Vul
 - Tests are closed per report kind. While a configured kind is not served, also when it stops being served while its pages are listed, its tests and what the operator remembers about its reports stay as they are, and the pass logs the kind at Info. To close the tests of a kind that is no longer used, remove it from `reportKinds`.
 - An expired continue token (HTTP 410) starts the listing of the kind again, up to 3 times. The reports imported or rejected before are skipped as unchanged, and a report deleted in between no longer counts as live. After the third restart the pass fails and closes nothing; the retry skips the reports imported so far, so a large namespace converges over a few passes.
 - The credentials Secret is read at most once per minute. Report events that change no `resourceVersion` (informer resyncs) are dropped.
-- Report and Stage kinds are discovered at start. A CRD installed later needs an operator restart to be watched; its namespaces still catch up on the next resync.
+- Report kinds are discovered at start. A CRD installed later needs an operator restart to be watched; its namespaces still catch up on the next resync.
 
 The manager serves `controller_runtime_reconcile_errors_total` and `krci_security_operator_rejected_reports_total` when `metrics.enabled` is true: plain HTTP on `metrics.port` (8080) of the pod. The chart creates no Service for them.
 
@@ -37,22 +35,34 @@ Reports are listed 10 at a time (`reportsPageSize` in `internal/controller/trivy
 ### Watches and reads
 
 - The controller watches the metadata of `VulnerabilityReport` and `ExposedSecretReport` only (`metav1.PartialObjectMetadata`), because a report can reach 3 MB. Each event enqueues the namespace of the report.
-- It also watches Namespaces (creation, deletion, label changes) and `Stage` objects. A Stage event enqueues `spec.namespace`, and for an update the previous value too.
-- Everything else is read without a cache, through the API reader: the full reports of a namespace, ReplicaSets, Jobs, the labels and annotations of the top workload, `CodebaseImageStream`s and the credentials Secret.
-
-The tenant of a namespace is its `app.edp.epam.com/tenant` label, never what a Stage claims: a Stage that points at a namespace labeled for another tenant does not make it a stage namespace. A deleting Stage still counts until it is gone. A scope switch takes effect on the next pass: the reports are imported under the new names and the tests of the old names are closed.
+- It also watches Namespaces (creation, deletion and the start of the termination).
+- Everything else is read without a cache, through the API reader: the full reports of a namespace, ReplicaSets, Jobs, the labels and annotations of the top workload and the credentials Secret.
 
 ### DefectDojo naming
 
-| Scope | Product | Engagement | Test title | Tags |
-|---|---|---|---|---|
-| stage | the codebase (via `CodebaseImageStream` in the tenant namespace), else `env:<cdPipeline>-<stage>` | `runtime:<cdPipeline>-<stage>` | `<ReportKind> <ns>/<kind>/<name>/<container>` | `krci-scope:runtime`, `krci-tenant:<tenant>`, `krci-env:<cdp>.<stage>`, `krci-codebase:<cb>` when mapped |
-| tenant | `tenant:<tenant>` | `namespace:<ns>` | same | `krci-scope:tenant`, `krci-tenant:<tenant>` |
-| platform | `platform` (configurable) | `namespace:<ns>` | same | `krci-scope:platform` |
+Every report of every namespace goes to the namespace product of its cluster:
 
-- Every test also carries `krci-namespace:<ns>`, `krci-workload:<kind>.<name>`, `krci-container:<c>`, `krci-component:<component>` and `krci-cluster:<clusterName>`.
-- The product type is `KubeRocketCI` (configurable). Products and engagements are created on demand. Imports use `reimport-scan` with `close_old_findings`, `deduplication_on_engagement`, `environment=Development` and `push_to_jira=false`.
-- **Ownership.** The operator touches (closes) only tests that carry its `krci-cluster:<clusterName>` tag and a `krci-scope` of `runtime`, `tenant` or `platform`.
+| Level | Name |
+|---|---|
+| Product Type | `defectdojo.productType`, default `KubeRocketCI` |
+| Product | `<clusterName>/<namespace>` |
+| Engagement | `trivy-operator`, created with deduplication on the engagement |
+| Test | `<ReportKind> <kind>/<name>/<container>`, without the namespace |
+
+```
+KubeRocketCI
+└── in-cluster/payments
+    └── trivy-operator
+        ├── VulnerabilityReport deployment/api/api
+        ├── VulnerabilityReport deployment/api/istio-proxy
+        └── ExposedSecretReport deployment/api/api
+```
+
+- Every test carries `krci-namespace:<ns>`, `krci-workload:<kind>.<name>`, `krci-container:<c>`, `krci-component:<component>` and `krci-cluster:<clusterName>`.
+- The same namespace name in two clusters gives two products, because the cluster name is part of the product name. The cluster name is required and must be unique per DefectDojo; two clusters with one name write into the same products.
+- Use one Product Type value for every operator that writes to the same DefectDojo. A reimport fails when the product already exists under another Product Type, so changing the value later leaves the existing products under the old one.
+- Products, engagements and tests are created on demand. Imports use `reimport-scan` with `close_old_findings`, `deduplication_on_engagement`, `environment=Development` and `push_to_jira=false`.
+- **Ownership.** The operator touches (closes) only tests that carry its `krci-cluster:<clusterName>` tag.
 - **Component tag.** It is derived from the top workload object (Deployment, StatefulSet, DaemonSet, CronJob, Job or Pod, read with a metadata `get`) and lower-cased into a tag-safe value: spaces and commas become `-`. The first source present wins:
   1. the app part of the annotation `argocd.argoproj.io/tracking-id` (the text before the first `:`, after the last `_`), with the configured `componentPrefixes` stripped;
   2. the label `argocd.argoproj.io/instance`;
@@ -69,16 +79,27 @@ The chart maps its values to environment variables of the manager. The full list
 |---|---|---|
 | `defectdojo.secretName` | `DEFECTDOJO_SECRET_NAME` | `defectdojo-credentials` |
 | `defectdojo.productType` | `DEFECTDOJO_PRODUCT_TYPE` | `KubeRocketCI` |
-| `defectdojo.platformProduct` | `DEFECTDOJO_PLATFORM_PRODUCT` | `platform` |
-| `clusterName` | `CLUSTER_NAME` | `in-cluster` |
-| `scopes.stage`, `scopes.tenant`, `scopes.platform` | `SCOPE_STAGE`, `SCOPE_TENANT`, `SCOPE_PLATFORM` | `true` |
+| `clusterName` | `CLUSTER_NAME` | none, required: a lowercase RFC 1123 DNS label |
 | `excludeNamespaces` | `EXCLUDE_NAMESPACES` (comma-separated globs) | none |
 | `componentPrefixes` | `COMPONENT_PREFIXES` (comma-separated) | `in-cluster-` |
 | `resyncPeriod` | `RESYNC_PERIOD` | `30m`, at least `1m` |
 | `concurrency` | `CONCURRENCY` | `2` |
 | `reportKinds` | `REPORT_KINDS` (comma-separated) | `VulnerabilityReport`, `ExposedSecretReport` |
 
-The operator also reads `POD_NAMESPACE`, which the chart sets from the pod's namespace. Invalid values stop the manager at start with a message that names the variable.
+The operator also reads `POD_NAMESPACE`, which the chart sets from the pod's namespace. Invalid values and a missing `CLUSTER_NAME` stop the manager at start with a message that names the variable. The chart does not render without `clusterName`.
+
+### DefectDojo requirements
+
+- DefectDojo 2.55 or later; 3.4.200 or later recommended. Only 3.4.200 and later serialize two imports into one test on the server.
+- The API token needs these permissions:
+
+| Permission | Used for |
+|---|---|
+| read products, engagements, tests and findings | lookups and the open findings of a test |
+| import scans | reimport |
+| edit products | product tags |
+| edit findings | close |
+| add Product Type, product and engagement | creation on first use; a Product Type created in advance removes the global add permission |
 
 ### Access
 
@@ -90,8 +111,6 @@ The ClusterRole is read-only and grants what the code calls:
 | `replicasets` (`apps`) | `list` | workload resolution |
 | `deployments` (`apps`), `jobs` (`batch`) | `get`, `list` | workload resolution and the component tag |
 | `statefulsets`, `daemonsets` (`apps`), `cronjobs` (`batch`), `pods` | `get` | the component tag |
-| `namespaces` | `list`, `watch` | classification |
-| `stages` (`v2.edp.epam.com`) | `list`, `watch` | classification |
-| `codebaseimagestreams` (`v2.edp.epam.com`) | `list` | the codebase product of the stage scope |
+| `namespaces` | `list`, `watch` | the reconcile key, deleted and excluded namespaces |
 
 In its own namespace the operator can `get` the credentials Secret, use `leases` for leader election and `create` events. It writes nothing else to the cluster.

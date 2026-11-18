@@ -5,9 +5,9 @@
 | Path | Contents |
 |---|---|
 | `cmd/main.go` | manager setup: metrics, health probes, leader election; loads the module configuration and registers the module |
-| `internal/controller/trivy/` | the Trivy module: `Config` (environment parsing and validation), `SetupWithManager` (controller and sweeper), `Reconciler` (pass over a namespace), classification, closing, event mapping |
+| `internal/controller/trivy/` | the Trivy module: `Config` (environment parsing and validation), `SetupWithManager` (controller and sweeper), `Reconciler` (pass over a namespace), namespace exclusion, closing, event mapping |
 | `pkg/defectdojo/` | minimal DefectDojo API v2 client with a per-test import lock |
-| `pkg/trivy/` | Trivy report parsing, image and workload resolution, DefectDojo names, tags and ownership per scope, component tag |
+| `pkg/trivy/` | Trivy report parsing, image and workload resolution, the namespace product, engagement, test title, tags and ownership, component tag |
 | `deploy-templates/` | Helm chart, the only deployment artifact |
 | `test/deploy/` | chart render tests: `helm template` checked against the configuration the code reads and the read-only access |
 | `ct-configs/` | chart-testing configuration used by CI |
@@ -16,7 +16,7 @@
 
 - A module lives in its own package under `internal/controller/` and exposes `Config`, `LoadConfig` and `SetupWithManager`.
 - The module reads its configuration from environment variables that the chart sets from its values. `cmd/main.go` only loads and passes it on.
-- The operator reads `Stage` and `CodebaseImageStream` (`v2.edp.epam.com`) and the Trivy reports as unstructured objects, so the repository depends on no other KubeRocketCI operator module.
+- The operator reads Kubernetes objects and the Trivy reports (as unstructured objects) only: no KubeRocketCI resource or label (ADR 0001), so the repository depends on no other KubeRocketCI operator module.
 - A module returns transient errors from `Reconcile`; only an absent optional dependency requeues with a nil error.
 - Background work that must change state wakes the controller through a channel source instead of acting itself, so the workqueue serializes it per key.
 - A module watches the metadata of large objects only and reads everything else through the API reader, so big objects never sit in the cache.
@@ -27,11 +27,11 @@
 
 | File | Contents |
 |---|---|
-| `trivy.go` | `SetupWithManager`: the controller keyed by namespace, the metadata watches of the reports, the Namespace and Stage watches, the sweeper |
+| `trivy.go` | `SetupWithManager`: the controller keyed by namespace, the metadata watches of the reports, the Namespace watch, the sweeper |
 | `reconciler.go` | `Reconcile`, the import of a namespace, the in-memory state of imported reports |
-| `classify.go` | the scope of a namespace: Stage matching, tenant label, `excludeNamespaces`, scope switches |
+| `namespace.go` | the live namespace and `excludeNamespaces` |
 | `closing.go` | closing of stale and released tests; the sweeper that wakes namespaces for the controller |
-| `watch.go` | mapping of report and Stage events to namespaces |
+| `watch.go` | mapping of report events to namespaces |
 
 The unit tests use the fake client and a fake DefectDojo (`defectdojo_fake_test.go`) that models the DefectDojo reimport contract; `defectdojo_fake_contract_test.go` has one test per rule. There is no envtest suite. The event wiring in `SetupWithManager` is not unit-tested; the kind testbed covers it.
 
@@ -41,7 +41,7 @@ The operator depends on DefectDojo and Trivy Operator behavior that no API docum
 
 | Project | Supported | Contract unchanged across |
 |---|---|---|
-| DefectDojo | 3.2.200 or later, verified with 3.5.200 | 3.2.200 to 3.5.200 |
+| DefectDojo | 2.55 or later, 3.4.200 or later recommended; verified with 2.55.2 and 3.5.200 | 2.55.2 to 3.5.200, except that only 3.4.200 and later serialize two imports into one test |
 | Trivy Operator | 0.34.0 or later, verified with 0.36.1 | 0.34.0 to 0.36.1 |
 
 Supported means the releases of the last three months. On a new upstream release, compare the files below between the old and the new tag, update the fake and this table, and move the lower bound.
@@ -76,4 +76,4 @@ make validate-docs  # chart README is current
 helm lint deploy-templates
 ```
 
-CI runs the same checks with helm installed, plus `ct lint`, hadolint and CodeQL, and checks the commit message format (`AGENTS.md#commits`).
+`helm lint` without `clusterName` passes with the warning `missing required values`; `helm template` fails. CI runs the same checks with helm installed, plus `ct lint`, hadolint and CodeQL, and checks the commit message format (`AGENTS.md#commits`).
