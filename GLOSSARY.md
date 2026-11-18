@@ -88,6 +88,22 @@ _Avoid_: importer, client
 An upload of one current report into its runtime test, which matches existing findings and closes the ones the report no longer holds.
 _Avoid_: import, sync (for one upload)
 
+**Workload report**:
+A report whose resource is the stable workload itself, not a ReplicaSet or Job of it.
+_Avoid_: own report
+
+**Chosen report**:
+The current report a runtime test is reimported from when several current reports give one test title: the workload report first, then the lowest report name.
+_Avoid_: claimed report, winning report
+
+**Rejected report version**:
+A version of a report (its UID and resourceVersion) that DefectDojo rejected with a client error. It is uploaded again once per `resyncPeriod`, and logged at Error and counted once.
+_Avoid_: failed report, bad report
+
+**Released namespace**:
+A namespace that is gone, terminating or excluded and whose owned tests the operator closed. Its product and tests stay.
+_Avoid_: deleted namespace, cleaned namespace
+
 **Close**:
 Mark a finding mitigated. A closed finding stays in DefectDojo and can be reactivated.
 _Avoid_: delete, remove, resolve

@@ -37,14 +37,14 @@ func TestReportImport(t *testing.T) {
 		fixture   string
 		workload  Workload
 		component string
-		want      Import
+		want      Reimport
 	}{
 		{
 			name:      "vulnerability report of a Deployment container",
 			fixture:   "vulnerabilityreport_replicaset.json",
 			workload:  Workload{"deployment", "test-go-app"},
 			component: "go-app",
-			want: Import{
+			want: Reimport{
 				Product:    "in-cluster/krci-demo-dev",
 				Engagement: "trivy-operator",
 				TestTitle:  "VulnerabilityReport deployment/test-go-app/test-go-app",
@@ -62,7 +62,7 @@ func TestReportImport(t *testing.T) {
 			fixture:   "vulnerabilityreport_dockerhub.json",
 			workload:  Workload{"deployment", "defectdojo-primary"},
 			component: "go-app",
-			want: Import{
+			want: Reimport{
 				Product:    "in-cluster/krci-demo-dev",
 				Engagement: "trivy-operator",
 				TestTitle:  "VulnerabilityReport deployment/defectdojo-primary/postgres",
@@ -79,7 +79,7 @@ func TestReportImport(t *testing.T) {
 			name:     "whole image reference in the tag is versioned by its tag, no app tag without a component",
 			fixture:  "vulnerabilityreport_fullref_tag.json",
 			workload: Workload{"statefulset", "defectdojo-valkey"},
-			want: Import{
+			want: Reimport{
 				Product:    "in-cluster/krci-demo-dev",
 				Engagement: "trivy-operator",
 				TestTitle:  "VulnerabilityReport statefulset/defectdojo-valkey/valkey",
@@ -97,7 +97,7 @@ func TestReportImport(t *testing.T) {
 			fixture:   "exposedsecretreport_replicaset.json",
 			workload:  Workload{"deployment", "test-go-app"},
 			component: "go-app",
-			want: Import{
+			want: Reimport{
 				Product:    "in-cluster/krci-demo-dev",
 				Engagement: "trivy-operator",
 				TestTitle:  "ExposedSecretReport deployment/test-go-app/test-go-app",
@@ -114,7 +114,7 @@ func TestReportImport(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ReportImport(testTarget(), loadFixture(t, tt.fixture), tt.workload, tt.component)
+			got := NewReimport(testTarget(), loadFixture(t, tt.fixture), tt.workload, tt.component)
 
 			assert.Equal(t, tt.want, got)
 		})
@@ -124,7 +124,7 @@ func TestReportImport(t *testing.T) {
 func TestReportImport_TagValuesAreTagSafe(t *testing.T) {
 	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
 
-	got := ReportImport(Target{Namespace: "Team A,B", Cluster: "Prod EU"}, report, Workload{"deployment", "app"}, "My,App x")
+	got := NewReimport(Target{Namespace: "Team A,B", Cluster: "Prod EU"}, report, Workload{"deployment", "app"}, "My,App x")
 
 	assert.Contains(t, got.Tags, "k8s-cluster:prod-eu")
 	assert.Contains(t, got.Tags, "k8s-namespace:team-a-b")
@@ -132,7 +132,7 @@ func TestReportImport_TagValuesAreTagSafe(t *testing.T) {
 }
 
 func TestReportImport_OneTagPerKey(t *testing.T) {
-	got := ReportImport(testTarget(), loadFixture(t, "vulnerabilityreport_replicaset.json"), Workload{"deployment", "app"}, "x")
+	got := NewReimport(testTarget(), loadFixture(t, "vulnerabilityreport_replicaset.json"), Workload{"deployment", "app"}, "x")
 
 	keys := map[string]int{}
 
@@ -150,8 +150,8 @@ func TestReportImport_ProductNamesTheClusterAndTheNamespace(t *testing.T) {
 	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
 	workload := Workload{"deployment", "test-go-app"}
 
-	a := ReportImport(Target{Namespace: "payments", Cluster: "prod-eu"}, report, workload, "x")
-	b := ReportImport(Target{Namespace: "payments", Cluster: "prod-us"}, report, workload, "x")
+	a := NewReimport(Target{Namespace: "payments", Cluster: "prod-eu"}, report, workload, "x")
+	b := NewReimport(Target{Namespace: "payments", Cluster: "prod-us"}, report, workload, "x")
 
 	assert.Equal(t, "prod-eu/payments", a.Product)
 	assert.Equal(t, "prod-us/payments", b.Product, "the same namespace name in two clusters gives two products")
@@ -178,7 +178,7 @@ func TestReportImport_Version(t *testing.T) {
 			require.NoError(t, unstructured.SetNestedField(report.Object, tt.tag, "report", "artifact", "tag"))
 			require.NoError(t, unstructured.SetNestedField(report.Object, tt.digest, "report", "artifact", "digest"))
 
-			got := ReportImport(testTarget(), report, Workload{"deployment", "app"}, "app")
+			got := NewReimport(testTarget(), report, Workload{"deployment", "app"}, "app")
 
 			assert.Equal(t, tt.want, got.Version)
 			assert.LessOrEqual(t, len(got.Version), MaxVersionLen)
@@ -196,12 +196,12 @@ func TestReportImport_LongNamesKeepTheirLimits(t *testing.T) {
 	labels[LabelResourceName] = name
 	report.SetLabels(labels)
 
-	got := ReportImport(testTarget(), report, workload, "app")
+	got := NewReimport(testTarget(), report, workload, "app")
 
 	assert.Len(t, got.Service, MaxServiceLen)
 	assert.Len(t, got.TestTitle, MaxTitleLen)
 	assert.True(t, strings.HasPrefix(got.TestTitle, "VulnerabilityReport deployment/nnn"))
-	assert.Equal(t, got, ReportImport(testTarget(), report, workload, "app"), "the same input gives the same values")
+	assert.Equal(t, got, NewReimport(testTarget(), report, workload, "app"), "the same input gives the same values")
 	assert.Equal(t, ReportTitle(report, workload), got.TestTitle)
 	assert.Equal(t, KindVulnerabilityReport, TitleKind(got.TestTitle))
 }
@@ -211,7 +211,7 @@ func TestReportImport_TagOverTheLimitIsShortenedKeepingItsKey(t *testing.T) {
 	name := strings.Repeat("n", 240)
 	value := "deployment." + name
 
-	got := ReportImport(testTarget(), report, Workload{"deployment", name}, "app")
+	got := NewReimport(testTarget(), report, Workload{"deployment", name}, "app")
 
 	want := TagKeyWorkload + ":" + Shorten(value, MaxTagLen-len(TagKeyWorkload)-1)
 	assert.Contains(t, got.Tags, want)
@@ -222,7 +222,7 @@ func TestReportImport_TagOverTheLimitIsShortenedKeepingItsKey(t *testing.T) {
 		assert.LessOrEqual(t, len(tag), MaxTagLen, tag)
 	}
 
-	assert.Equal(t, got.Tags, ReportImport(testTarget(), report, Workload{"deployment", name}, "app").Tags,
+	assert.Equal(t, got.Tags, NewReimport(testTarget(), report, Workload{"deployment", name}, "app").Tags,
 		"the same input gives the same tags")
 }
 
@@ -230,7 +230,7 @@ func TestReportImport_TagAtTheLimitIsKept(t *testing.T) {
 	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
 	name := strings.Repeat("n", MaxTagLen-len(TagKeyWorkload)-1-len("deployment."))
 
-	got := ReportImport(testTarget(), report, Workload{"deployment", name}, "app")
+	got := NewReimport(testTarget(), report, Workload{"deployment", name}, "app")
 
 	assert.Contains(t, got.Tags, "k8s-workload:deployment."+name)
 }
@@ -238,7 +238,7 @@ func TestReportImport_TagAtTheLimitIsKept(t *testing.T) {
 func TestReportImport_TagsHoldNoCharacterDefectDojoRejects(t *testing.T) {
 	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
 
-	got := ReportImport(Target{Namespace: "ns", Cluster: `c'1"x`}, report, Workload{"deployment", "app"}, `My'App "x"`)
+	got := NewReimport(Target{Namespace: "ns", Cluster: `c'1"x`}, report, Workload{"deployment", "app"}, `My'App "x"`)
 
 	assert.Contains(t, got.Tags, "k8s-cluster:c-1-x")
 	assert.Contains(t, got.Tags, "app:my-app--x-")
@@ -251,7 +251,7 @@ func TestReportImport_TagsHoldNoCharacterDefectDojoRejects(t *testing.T) {
 
 func TestImport_Request(t *testing.T) {
 	scanDate := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
-	i := Import{Product: "p", Engagement: "e", TestTitle: "t", Service: "s", Version: "v", Tags: []string{"a"}}
+	i := Reimport{Product: "p", Engagement: "e", TestTitle: "t", Service: "s", Version: "v", Tags: []string{"a"}}
 
 	req := i.Request("KubeRocketCI", scanDate, []byte("{}"))
 
@@ -391,9 +391,9 @@ func TestReportGVK(t *testing.T) {
 
 func TestImportTitle(t *testing.T) {
 	assert.Equal(t, "VulnerabilityReport deployment/app/web",
-		ImportTitle("VulnerabilityReport", Workload{"deployment", "app"}, "web"))
+		TestTitle("VulnerabilityReport", Workload{"deployment", "app"}, "web"))
 	assert.Equal(t, "ExposedSecretReport cronjob/nightly/job",
-		ImportTitle("ExposedSecretReport", Workload{"cronjob", "nightly"}, "job"))
+		TestTitle("ExposedSecretReport", Workload{"cronjob", "nightly"}, "job"))
 }
 
 func TestReportTitle_IsTheTitleOfTheImport(t *testing.T) {
@@ -402,7 +402,7 @@ func TestReportTitle_IsTheTitleOfTheImport(t *testing.T) {
 	for _, fixture := range []string{"vulnerabilityreport_replicaset.json", "exposedsecretreport_replicaset.json"} {
 		report := loadFixture(t, fixture)
 
-		assert.Equal(t, ReportImport(testTarget(), report, workload, "go-app").TestTitle, ReportTitle(report, workload))
+		assert.Equal(t, NewReimport(testTarget(), report, workload, "go-app").TestTitle, ReportTitle(report, workload))
 	}
 }
 
@@ -410,7 +410,7 @@ func TestTitleKind(t *testing.T) {
 	w := Workload{"deployment", "app"}
 
 	for _, kind := range ReportKinds {
-		assert.Equal(t, kind, TitleKind(ImportTitle(kind, w, "web")))
+		assert.Equal(t, kind, TitleKind(TestTitle(kind, w, "web")))
 	}
 
 	assert.Equal(t, "Trivy", TitleKind("Trivy Scan"), "a title written elsewhere yields its first word")

@@ -462,7 +462,7 @@ func TestWorkloadResolver_StableWorkloads_ListsEachKindOnceInPages(t *testing.T)
 				"*v1.StatefulSetList", "*v1.DaemonSetList", "*v1.CronJobList", "*v1.PartialObjectMetadataList",
 			} {
 				for _, limit := range spy.limits[kind] {
-					assert.Equal(t, int64(listPageSize), limit, kind)
+					assert.Equal(t, int64(workloadPageSize), limit, kind)
 				}
 			}
 
@@ -512,6 +512,49 @@ func TestWorkloadResolver_StableWorkloads_ErrorOnALaterPage(t *testing.T) {
 			require.Error(t, err)
 			assert.True(t, k8sErrors.IsResourceExpired(err))
 			assert.Empty(t, workloads, "a list that fails halfway yields no workloads")
+		})
+	}
+}
+
+func TestWorkloadResolver_StableWorkloads_ExpiredContinueTokenStartsTheListAgain(t *testing.T) {
+	objMeta := func(name string) metav1.ObjectMeta { return metav1.ObjectMeta{Name: name, Namespace: testNamespace} }
+
+	objects := []client.Object{
+		newDeployment("web", "1"), newDeployment("api", "1"), newReplicaSet("rs-1", "", "", 1), newReplicaSet("rs-2", "", "", 1),
+		newJob("job-1", "", 0), newJob("job-2", "", 0),
+		&appsv1.StatefulSet{ObjectMeta: objMeta("db-1")}, &appsv1.StatefulSet{ObjectMeta: objMeta("db-2")},
+		&appsv1.DaemonSet{ObjectMeta: objMeta("agent-1")}, &appsv1.DaemonSet{ObjectMeta: objMeta("agent-2")},
+		&batchv1.CronJob{ObjectMeta: objMeta("cron-1")}, &batchv1.CronJob{ObjectMeta: objMeta("cron-2")},
+		&corev1.Pod{ObjectMeta: objMeta("pod-1")}, &corev1.Pod{ObjectMeta: objMeta("pod-2")},
+	}
+
+	for _, kind := range listedKinds {
+		t.Run(kind, func(t *testing.T) {
+			paged := newCalls().funcs(1)
+			expired := 0
+
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: paged.Get,
+					List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						lo := &client.ListOptions{}
+						lo.ApplyOptions(opts)
+
+						if fmt.Sprintf("%T", list) == kind && lo.Continue != "" && expired < MaxListRestarts {
+							expired++
+
+							return k8sErrors.NewResourceExpired("the continue token is too old")
+						}
+
+						return paged.List(ctx, cl, list, opts...)
+					},
+				}).Build()
+
+			workloads, err := NewWorkloadResolver(c, testNamespace).StableWorkloads(context.Background())
+
+			require.NoError(t, err)
+			assert.Len(t, workloads, 14, "every workload once")
+			assert.Equal(t, MaxListRestarts, expired)
 		})
 	}
 }

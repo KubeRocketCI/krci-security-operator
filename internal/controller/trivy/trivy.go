@@ -27,7 +27,7 @@ import (
 const (
 	controllerName = "trivy"
 
-	// retryBaseDelay and retryMaxDelay bound the backoff of a failed namespace. A failed re-import is not retried
+	// retryBaseDelay and retryMaxDelay bound the backoff of a failed namespace. A failed reimport is not retried
 	// within seconds: DefectDojo may still be processing it.
 	retryBaseDelay = 30 * time.Second
 	retryMaxDelay  = 10 * time.Minute
@@ -64,7 +64,7 @@ func SetupWithManager(mgr ctrl.Manager, cfg Config) error {
 		}
 
 		if !served {
-			log.Info("Report kind is not served by the cluster, its events are not watched", "kind", kind)
+			log.Info("Skipped the watch of a report kind that the cluster does not serve", "kind", kind)
 
 			continue
 		}

@@ -247,8 +247,7 @@ func (c *Client) Reimport(ctx context.Context, r ReimportRequest) (ReimportResul
 // CloseTest mitigates every active finding of the test and keeps the test. A test without active findings
 // is closed. It takes the lock of the re-import of the same test.
 func (c *Client) CloseTest(ctx context.Context, test Test) error {
-	// The lock is keyed by the names the re-import of the test uses; without them it would be a lock no
-	// re-import shares.
+	// The lock key is the product, engagement and title that Reimport uses.
 	if test.Product == "" || test.Engagement == "" || test.Title == "" {
 		return fmt.Errorf("%w: test %d", ErrTestNotNamed, test.ID)
 	}
@@ -345,7 +344,7 @@ func (c *Client) closeFinding(ctx context.Context, findingID int) error {
 		return fmt.Errorf("failed to encode close request: %w", err)
 	}
 
-	// Mitigating a finding twice is harmless, so the close call is retried like a read.
+	// Idempotent: retried like a read.
 	_, err = c.do(ctx, retryAll, defaultRequestTimeout, func(ctx context.Context) (*http.Request, error) {
 		return c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s%d/close/", findingsPath, findingID),
 			bytes.NewReader(payload), "application/json")
@@ -509,8 +508,7 @@ func (c *Client) postReport(ctx context.Context, fields [][2]string, report []by
 		return ReimportResult{}, err
 	}
 
-	// A re-import is not idempotent: a retry while DefectDojo still processes the first request would import
-	// into the same test concurrently and duplicate findings.
+	// Only 429 is retried: a retry after a timeout, a transport error or a 5xx can overlap the first upload.
 	resp, err := c.do(ctx, retryThrottled, reimportTimeout, func(ctx context.Context) (*http.Request, error) {
 		return c.newRequest(ctx, http.MethodPost, reimportPath, bytes.NewReader(body), contentType)
 	})

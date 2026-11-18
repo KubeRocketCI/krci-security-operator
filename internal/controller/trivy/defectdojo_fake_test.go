@@ -507,6 +507,14 @@ func (f *fakeDefectDojo) productTags(product string) []string {
 	return slices.Clone(f.productNamed(product).tags)
 }
 
+// moveProduct puts the product under the product type, as a DefectDojo user does.
+func (f *fakeDefectDojo) moveProduct(product, productType string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.productNamed(product).productType = f.ensureProductType(productType)
+}
+
 // hasProduct reports whether the product exists.
 func (f *fakeDefectDojo) hasProduct(product string) bool {
 	f.mu.Lock()

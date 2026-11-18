@@ -19,7 +19,7 @@ import (
 // A test listed through the client and the request built for its report must name the same test, or the close
 // and the reimport of the test do not wait for each other.
 func TestImport_ReimportAndCloseOfTheListedTestShareALock(t *testing.T) {
-	imp := ReportImport(testTarget(), loadFixture(t, "vulnerabilityreport_replicaset.json"),
+	imp := NewReimport(testTarget(), loadFixture(t, "vulnerabilityreport_replicaset.json"),
 		Workload{"deployment", "test-go-app"}, "go-app")
 
 	var (

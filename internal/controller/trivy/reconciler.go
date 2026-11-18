@@ -14,7 +14,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -23,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
@@ -33,8 +33,6 @@ import (
 const (
 	// reportsPageSize is the number of full reports held in memory at a time.
 	reportsPageSize = 10
-	// maxListRestarts is how often the listing of a report kind starts again after its continue token expired.
-	maxListRestarts = 3
 	// dependencyRetry is the longest wait before a namespace is retried while an optional dependency is absent.
 	dependencyRetry = 5 * time.Minute
 	// secretTTL is how long the credentials are used before the Secret is read again.
@@ -84,23 +82,33 @@ type reportVersion struct {
 	resourceVersion string
 }
 
-// importKey identifies a DefectDojo test inside a namespace.
-type importKey struct {
+// versionOf returns the version of a report.
+func versionOf(report metav1.Object) reportVersion {
+	return reportVersion{uid: report.GetUID(), resourceVersion: report.GetResourceVersion()}
+}
+
+// testKey identifies a DefectDojo test inside a namespace.
+type testKey struct {
 	product    string
 	engagement string
 	title      string
 }
 
-// importedReport is the report version a DefectDojo test currently reflects.
-type importedReport struct {
-	uid             types.UID
-	resourceVersion string
-	testID          int
+// reimportedReport is the report version a DefectDojo test currently reflects.
+type reimportedReport struct {
+	reportVersion
+	testID int
+}
+
+// rejection is a report version that DefectDojo rejected and the time of the last upload of it.
+type rejection struct {
+	version reportVersion
+	at      time.Time
 }
 
 type credentials struct{ url, token string }
 
-// Reconciler imports the Trivy Operator reports of one namespace per request into DefectDojo.
+// Reconciler reimports the Trivy Operator reports of one namespace per request into DefectDojo.
 //
 // The credentials Secret and the Trivy Operator CRDs are optional: while one is missing the namespace is
 // requeued without an error. Every other failure is returned, so the workqueue backs off and counts it.
@@ -121,13 +129,14 @@ type Reconciler struct {
 	wake chan event.GenericEvent
 
 	mu sync.Mutex
-	// imported holds, per namespace, the report each test was last imported from.
-	// It is lost on restart; the next pass re-imports every report and converges.
-	imported map[string]map[importKey]importedReport
+	// reimported holds, per namespace, the report each test was last reimported from.
+	// It is lost on restart; the next pass reimports every report.
+	reimported map[string]map[testKey]reimportedReport
 	// closed holds, per namespace, the tests closed by the operator that DefectDojo still lists.
 	closed map[string]map[int]struct{}
-	// rejectedVersions holds, per namespace, the report versions DefectDojo rejected; they are not uploaded again.
-	rejectedVersions map[string]map[importKey]reportVersion
+	// rejectedVersions holds, per namespace, the report versions DefectDojo rejected; each is uploaded again once
+	// per resyncPeriod.
+	rejectedVersions map[string]map[testKey]rejection
 	// released holds the namespaces whose owned tests were closed because the namespace is gone or excluded.
 	released map[string]struct{}
 
@@ -144,22 +153,22 @@ type Reconciler struct {
 // NewReconciler returns a Reconciler. cache serves Namespaces, reader serves everything else.
 func NewReconciler(cache, reader client.Reader, cfg Config, connect Connector) *Reconciler {
 	return &Reconciler{
-		cache:    cache,
-		reader:   reader,
-		config:   cfg,
-		connect:  connect,
-		now:      time.Now,
-		random:   rand.Float64,
-		wake:     make(chan event.GenericEvent, wakeBuffer),
-		imported: map[string]map[importKey]importedReport{},
-		closed:   map[string]map[int]struct{}{},
+		cache:      cache,
+		reader:     reader,
+		config:     cfg,
+		connect:    connect,
+		now:        time.Now,
+		random:     rand.Float64,
+		wake:       make(chan event.GenericEvent, wakeBuffer),
+		reimported: map[string]map[testKey]reimportedReport{},
+		closed:     map[string]map[int]struct{}{},
 
-		rejectedVersions: map[string]map[importKey]reportVersion{},
+		rejectedVersions: map[string]map[testKey]rejection{},
 		released:         map[string]struct{}{},
 	}
 }
 
-// Reconcile imports the reports of the namespace named by the request, or closes its tests when the namespace
+// Reconcile reimports the reports of the namespace named by the request, or closes its tests when the namespace
 // is gone, terminating or excluded.
 func (r *Reconciler) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	namespace := request.Name
@@ -224,7 +233,7 @@ func (r *Reconciler) defectDojo(ctx context.Context) (dd DefectDojo, available b
 	key := client.ObjectKey{Namespace: r.config.OperatorNamespace, Name: r.config.SecretName}
 	if err = r.reader.Get(ctx, key, secret); err != nil {
 		if k8sErrors.IsNotFound(err) {
-			r.logSecret(ctx, "DefectDojo credentials Secret is absent, reports are not imported", key.Name)
+			r.logSecret(ctx, "Could not find the DefectDojo credentials Secret", key.Name)
 
 			return nil, false, nil
 		}
@@ -234,7 +243,7 @@ func (r *Reconciler) defectDojo(ctx context.Context) (dd DefectDojo, available b
 
 	c := credentials{url: string(secret.Data[SecretKeyURL]), token: string(secret.Data[SecretKeyToken])}
 	if c.url == "" || c.token == "" {
-		r.logSecret(ctx, "DefectDojo credentials Secret has no url or token, reports are not imported", key.Name)
+		r.logSecret(ctx, "Found no url or token in the DefectDojo credentials Secret", key.Name)
 
 		return nil, false, nil
 	}
@@ -283,19 +292,19 @@ type pass struct {
 	resolver *trivy.WorkloadResolver
 	// components caches the component tag per workload.
 	components map[trivy.Workload]string
-	// current holds the tests the pass imported or found up to date.
-	current map[importKey]importedReport
-	// claimed holds, per test, the report the pass takes it from.
-	claimed map[importKey]claim
+	// current holds the tests the pass reimported or found up to date.
+	current map[testKey]reimportedReport
+	// chosen holds, per test, the chosen report.
+	chosen map[testKey]choice
 	// rejected holds the versions of the reports of this pass that DefectDojo rejected, in this pass or before.
-	rejected map[importKey]reportVersion
+	rejected map[testKey]rejection
 	// unlisted holds the configured report kinds the pass could not list completely.
 	unlisted []string
 	// uploadErrors holds the uploads that failed in this pass; the reports are tried again in the next pass.
 	uploadErrors []error
-	// ownReports holds, per report kind, the metadata of its reports by resource and container. It is listed at the
+	// reportIndex holds, per report kind, the metadata of its reports by resource and container. It is listed at the
 	// first report that needs it.
-	ownReports map[string]map[ownKey][]ownCandidate
+	reportIndex map[string]map[containerKey][]indexedReport
 	// ignored holds the reports whose ignoring the pass logged.
 	ignored map[ignoredReport]struct{}
 }
@@ -306,28 +315,39 @@ type ignoredReport struct {
 	report string
 }
 
-// claim ranks the current reports of one test: the report on the stable workload itself comes first (the CronJob
-// before its Jobs), then the lowest report name.
-type claim struct {
+// choice ranks the current reports of one test: the workload report comes first (the CronJob before its Jobs), then
+// the lowest report name.
+type choice struct {
 	report string
-	// own is true when the report names the stable workload, not a ReplicaSet or Job of it.
-	own bool
+	// onWorkload is true when the report names the stable workload, not a ReplicaSet or Job of it.
+	onWorkload bool
 }
 
-func (c claim) before(other claim) bool {
-	if c.own != other.own {
-		return c.own
+func (c choice) before(other choice) bool {
+	if c.onWorkload != other.onWorkload {
+		return c.onWorkload
 	}
 
 	return c.report < other.report
 }
 
-// reject records a report version DefectDojo rejected: its test keeps reflecting the earlier import.
-func (p *pass) reject(key importKey, version reportVersion, prev importedReport, hasPrev bool) {
-	p.rejected[key] = version
+// reportUpload is a report that is about to be uploaded, with what is known about its test.
+type reportUpload struct {
+	report  *unstructured.Unstructured
+	key     testKey
+	version reportVersion
+	// prev is the report the test reflects; nil when none is known.
+	prev *reimportedReport
+	// rejection is the remembered rejection of this version; nil when there is none.
+	rejection *rejection
+}
 
-	if hasPrev {
-		p.current[key] = prev
+// reject records a report version DefectDojo rejected: its test keeps reflecting the earlier reimport.
+func (p *pass) reject(u reportUpload, rec rejection) {
+	p.rejected[u.key] = rec
+
+	if u.prev != nil {
+		p.current[u.key] = *u.prev
 	}
 }
 
@@ -341,40 +361,39 @@ func (p *pass) listed(title string) bool {
 func (p *pass) forget(kind string) {
 	ofKind := func(title string) bool { return trivy.TitleKind(title) == kind }
 
-	maps.DeleteFunc(p.current, func(key importKey, _ importedReport) bool { return ofKind(key.title) })
-	maps.DeleteFunc(p.claimed, func(key importKey, _ claim) bool { return ofKind(key.title) })
-	maps.DeleteFunc(p.rejected, func(key importKey, _ reportVersion) bool { return ofKind(key.title) })
+	maps.DeleteFunc(p.current, func(key testKey, _ reimportedReport) bool { return ofKind(key.title) })
+	maps.DeleteFunc(p.chosen, func(key testKey, _ choice) bool { return ofKind(key.title) })
+	maps.DeleteFunc(p.rejected, func(key testKey, _ rejection) bool { return ofKind(key.title) })
 }
 
-// syncNamespace imports the reports of an imported namespace page by page, closes the tests of workloads and
+// syncNamespace reimports the reports of a namespace page by page, closes the tests of workloads and
 // containers that are gone and makes sure the namespace product has its tags.
 // A report that is missing closes nothing. A failed upload keeps its report for the next pass and does not stop
 // the other uploads and the closing; its error is returned with the others.
 func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target trivy.Target) error {
 	p := &pass{
-		target:     target,
-		resolver:   trivy.NewWorkloadResolver(r.reader, target.Namespace),
-		components: map[trivy.Workload]string{},
-		current:    map[importKey]importedReport{},
-		claimed:    map[importKey]claim{},
-		rejected:   map[importKey]reportVersion{},
-		ownReports: map[string]map[ownKey][]ownCandidate{},
-		ignored:    map[ignoredReport]struct{}{},
+		target:      target,
+		resolver:    trivy.NewWorkloadResolver(r.reader, target.Namespace),
+		components:  map[trivy.Workload]string{},
+		current:     map[testKey]reimportedReport{},
+		chosen:      map[testKey]choice{},
+		rejected:    map[testKey]rejection{},
+		reportIndex: map[string]map[containerKey][]indexedReport{},
+		ignored:     map[ignoredReport]struct{}{},
 	}
 
-	if err := r.importReports(ctx, dd, p); err != nil {
+	if err := r.reimportReports(ctx, dd, p); err != nil {
 		return err
 	}
 
 	// The close builds its own lists, see expectedTitles.
-	p.resolver, p.ownReports = nil, nil
+	p.resolver, p.reportIndex = nil, nil
 
 	if len(p.unlisted) > 0 {
-		ctrl.LoggerFrom(ctx).Info("Report kinds are not served by the cluster, their reports are not imported",
-			"kinds", p.unlisted)
+		ctrl.LoggerFrom(ctx).Info("Skipped the report kinds that the cluster does not serve", "kinds", p.unlisted)
 	}
 
-	r.keepImports(target.Namespace, p)
+	r.keepReimported(target.Namespace, p)
 
 	product, found, err := r.namespaceProduct(ctx, dd, target.Namespace)
 	if err != nil && !r.productTypeMissing(ctx, err) {
@@ -392,13 +411,13 @@ func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target tr
 	return errors.Join(append(p.uploadErrors, closeErr, r.setProductTags(ctx, dd, target.Namespace, product))...)
 }
 
-// importPage resolves and imports the reports of one page.
-// A report version DefectDojo rejects is remembered, not uploaded again, and does not fail the pass.
-func (r *Reconciler) importPage(ctx context.Context, dd DefectDojo, p *pass, page []unstructured.Unstructured) error {
+// reimportPage reimports the reports of one page.
+// A report version DefectDojo rejects is remembered, see Reconciler.rejectedVersions, and does not fail the pass.
+func (r *Reconciler) reimportPage(ctx context.Context, dd DefectDojo, p *pass, page []unstructured.Unstructured) error {
 	for i := range page {
-		err := r.importOne(ctx, dd, p, &page[i])
+		err := r.reimportOne(ctx, dd, p, &page[i])
 
-		// The report is not needed after its pass: free it before the rest of the page is imported.
+		// The report is not needed after its pass: free it before the rest of the page is reimported.
 		page[i].Object = nil
 
 		if err != nil {
@@ -409,25 +428,13 @@ func (r *Reconciler) importPage(ctx context.Context, dd DefectDojo, p *pass, pag
 	return nil
 }
 
-// importOne resolves and imports one report. A report is not imported when it is broken, marked for deletion,
+// reimportOne reimports one report. A report is not reimported when it is broken, marked for deletion,
 // of a workload that is gone, superseded or of a kind the operator does not read, of a container that is not in the
 // pod template of its workload, or when another current report of the same test comes first.
-func (r *Reconciler) importOne(ctx context.Context, dd DefectDojo, p *pass, report *unstructured.Unstructured) error {
+func (r *Reconciler) reimportOne(ctx context.Context, dd DefectDojo, p *pass, report *unstructured.Unstructured) error {
 	log := ctrl.LoggerFrom(ctx).WithValues("report", report.GetName(), "kind", report.GetKind())
 
-	if report.GetDeletionTimestamp() != nil {
-		return nil
-	}
-
-	if reason := trivy.BrokenReport(report); reason != "" {
-		log.Info("Skipped a broken report", "reason", reason)
-
-		return nil
-	}
-
-	if trivy.ExpiredReport(report) {
-		log.V(1).Info("Skipped a report that Trivy Operator deletes at once")
-
+	if skipReport(log, report) {
 		return nil
 	}
 
@@ -441,42 +448,39 @@ func (r *Reconciler) importOne(ctx context.Context, dd DefectDojo, p *pass, repo
 		return err
 	}
 
-	imp := trivy.ReportImport(p.target, report, workload, component)
-	key := importKey{product: imp.Product, engagement: imp.Engagement, title: imp.TestTitle}
-	mine := claim{report: report.GetName(), own: namesWorkload(report, workload)}
+	dest := trivy.NewReimport(p.target, report, workload, component)
+	key := testKey{product: dest.Product, engagement: dest.Engagement, title: dest.TestTitle}
+	mine := choice{report: report.GetName(), onWorkload: namesWorkload(report, workload)}
 
-	version := reportVersion{uid: report.GetUID(), resourceVersion: report.GetResourceVersion()}
-	prev, hasPrev := r.lastImport(p.target.Namespace, key)
-	rejected := r.isRejected(p.target.Namespace, key, version)
+	u := reportUpload{report: report, key: key, version: versionOf(report)}
+	u.prev = r.lastReimport(p.target.Namespace, key)
+	u.rejection = r.rejectionOf(p.target.Namespace, key, u.version)
+	held := u.rejection != nil && !r.retryDue(*u.rejection)
 
-	// A rejected report on the workload itself is not a current report: it does not hold the test against the others.
-	if rejected && mine.own {
-		p.reject(key, version, prev, hasPrev)
-
-		log.V(1).Info("Report version was rejected before, not uploaded again")
-
-		return nil
-	}
-
-	if !p.claim(ctx, key, mine) {
-		return nil
-	}
-
-	if hasPrev && prev.uid == version.uid && prev.resourceVersion == version.resourceVersion {
-		p.current[key] = prev
+	// A workload report of a held rejected version is not a current report: it takes no choice of the test.
+	if held && mine.onWorkload {
+		p.keepRejected(log, u)
 
 		return nil
 	}
 
-	if rejected {
-		p.reject(key, version, prev, hasPrev)
+	if !p.choose(ctx, key, mine) {
+		return nil
+	}
 
-		log.V(1).Info("Report version was rejected before, not uploaded again")
+	if u.prev != nil && u.prev.reportVersion == u.version {
+		p.current[key] = *u.prev
 
 		return nil
 	}
 
-	used, err := r.ownReport(ctx, p, key, report, workload)
+	if held {
+		p.keepRejected(log, u)
+
+		return nil
+	}
+
+	used, err := r.workloadReport(ctx, p, key, report, workload)
 	if err != nil {
 		return err
 	}
@@ -487,22 +491,44 @@ func (r *Reconciler) importOne(ctx context.Context, dd DefectDojo, p *pass, repo
 		return nil
 	}
 
-	entry, err := r.importReport(ctx, dd, imp, report, workload)
+	entry, err := r.uploadReport(ctx, dd, dest, report, workload)
 	if err != nil {
-		return r.uploadFailed(ctx, p, report, key, version, prev, hasPrev, err)
+		return r.uploadFailed(ctx, p, u, err)
 	}
 
 	p.current[key] = entry
 
-	r.recordImport(p.target.Namespace, key, entry)
+	r.recordReimport(p.target.Namespace, key, entry)
 
-	log.Info("Imported a report", "product", imp.Product, "engagement", imp.Engagement, "test", entry.testID)
+	log.Info("Reimported a report", "product", dest.Product, "engagement", dest.Engagement, "test", entry.testID)
 
 	return nil
 }
 
+// skipReport reports whether the fields of the report alone rule out its reimport: it is marked for deletion, broken
+// or expired.
+func skipReport(log logr.Logger, report *unstructured.Unstructured) bool {
+	if report.GetDeletionTimestamp() != nil {
+		return true
+	}
+
+	if reason := trivy.BrokenReport(report); reason != "" {
+		log.Info("Skipped a broken report", "reason", reason)
+
+		return true
+	}
+
+	if trivy.ExpiredReport(report) {
+		log.V(1).Info("Skipped a report that Trivy Operator deletes at once")
+
+		return true
+	}
+
+	return false
+}
+
 // currentWorkload returns the stable workload of a report that describes it as it is now. ok is false, without an
-// error, when the report is not imported for that reason.
+// error, when the report is not reimported for that reason.
 func (r *Reconciler) currentWorkload(
 	ctx context.Context,
 	p *pass,
@@ -537,7 +563,7 @@ func (r *Reconciler) currentWorkload(
 		return trivy.Workload{}, false, fmt.Errorf("failed to read the containers of %s: %w", workload, err)
 	}
 
-	container := report.GetLabels()[trivy.LabelContainerName]
+	container := trivy.ContainerOf(report)
 	if _, in := containers[container]; !in {
 		log.V(1).Info("Skipped a report of a container that is not in the pod template",
 			"workload", workload.String(), "container", container)
@@ -553,16 +579,16 @@ func namesWorkload(report *unstructured.Unstructured, workload trivy.Workload) b
 	return strings.EqualFold(report.GetLabels()[trivy.LabelResourceKind], workload.Kind)
 }
 
-// claim records the report as the one its test is imported from, unless another current report of the same test
-// comes first. The report that loses is logged.
-func (p *pass) claim(ctx context.Context, key importKey, mine claim) bool {
-	held, taken := p.claimed[key]
+// choose makes the report the chosen report of its test, unless another current report of the same test comes
+// first. The report that loses is logged.
+func (p *pass) choose(ctx context.Context, key testKey, mine choice) bool {
+	held, taken := p.chosen[key]
 	if !taken || mine.before(held) {
 		if taken {
 			p.logIgnored(ctx, key.title, mine.report, held.report)
 		}
 
-		p.claimed[key] = mine
+		p.chosen[key] = mine
 
 		return true
 	}
@@ -584,19 +610,18 @@ func (p *pass) logIgnored(ctx context.Context, title, used, ignored string) {
 		"test", title, "used", used, "ignored", ignored)
 }
 
-// uploadFailed handles a failed upload. A rejection by DefectDojo is permanent for the report version: it is
-// remembered and not uploaded again. Any other failure leaves the result in DefectDojo unknown: the operator closes
-// nothing for the report, keeps the error for the end of the pass and uploads the report again in the next pass.
-func (r *Reconciler) uploadFailed(
-	ctx context.Context,
-	p *pass,
-	report *unstructured.Unstructured,
-	key importKey,
-	version reportVersion,
-	prev importedReport,
-	hasPrev bool,
-	err error,
-) error {
+// keepRejected leaves the test of a report version that DefectDojo rejected as it is.
+func (p *pass) keepRejected(log logr.Logger, u reportUpload) {
+	p.reject(u, *u.rejection)
+
+	log.V(1).Info("Skipped a report version that DefectDojo rejected")
+}
+
+// uploadFailed handles a failed upload. A rejection by DefectDojo holds for the report version until the retry after
+// resyncPeriod: it is remembered at once, logged at Error and counted once per version. Any other failure leaves the
+// result in DefectDojo unknown: the operator closes nothing for the report, keeps the error for the end of the pass
+// and uploads the report again in the next pass. The remembered rejection of the version, if any, stays as it is.
+func (r *Reconciler) uploadFailed(ctx context.Context, p *pass, u reportUpload, err error) error {
 	if !defectdojo.IsRejectedReport(err) {
 		if ctx.Err() != nil {
 			return err
@@ -604,41 +629,53 @@ func (r *Reconciler) uploadFailed(
 
 		p.uploadErrors = append(p.uploadErrors, err)
 
+		if u.rejection != nil {
+			p.reject(u, *u.rejection)
+		}
+
 		return nil
 	}
 
-	ctrl.LoggerFrom(ctx).Error(err, "DefectDojo rejected a report version, it is not uploaded again until it changes",
-		"report", report.GetName(), "kind", report.GetKind())
-	rejectedReports.WithLabelValues(report.GetKind()).Inc()
+	log := ctrl.LoggerFrom(ctx)
 
-	r.recordRejection(p.target.Namespace, key, version)
-	p.reject(key, version, prev, hasPrev)
+	if u.rejection == nil {
+		log.Error(err, "DefectDojo rejected a report version", "report", u.report.GetName(), "kind", u.report.GetKind())
+		rejectedReports.WithLabelValues(u.report.GetKind()).Inc()
+	} else {
+		log.V(1).Info("DefectDojo rejected a report version again", "report", u.report.GetName(),
+			"kind", u.report.GetKind())
+	}
+
+	rec := rejection{version: u.version, at: r.now()}
+
+	r.recordRejection(p.target.Namespace, u.key, rec)
+	p.reject(u, rec)
 
 	return nil
 }
 
-func (r *Reconciler) importReport(
+func (r *Reconciler) uploadReport(
 	ctx context.Context,
 	dd DefectDojo,
-	imp trivy.Import,
+	dest trivy.Reimport,
 	report *unstructured.Unstructured,
 	workload trivy.Workload,
-) (importedReport, error) {
+) (reimportedReport, error) {
 	payload, err := json.Marshal(trivy.Payload(report, workload))
 	if err != nil {
-		return importedReport{}, fmt.Errorf("failed to marshal report %s: %w", report.GetName(), err)
+		return reimportedReport{}, fmt.Errorf("failed to marshal report %s: %w", report.GetName(), err)
 	}
 
-	res, err := dd.Reimport(ctx, imp.Request(r.config.ProductType, r.now(), payload))
+	res, err := dd.Reimport(ctx, dest.Request(r.config.ProductType, r.now(), payload))
 	if err != nil {
-		return importedReport{}, fmt.Errorf("failed to import report %s: %w", report.GetName(), err)
+		return reimportedReport{}, fmt.Errorf("failed to import report %s: %w", report.GetName(), err)
 	}
 
 	if res.TestID == 0 {
-		return importedReport{}, fmt.Errorf("defectdojo did not return a test for report %s", report.GetName())
+		return reimportedReport{}, fmt.Errorf("defectdojo did not return a test for report %s", report.GetName())
 	}
 
-	return importedReport{uid: report.GetUID(), resourceVersion: report.GetResourceVersion(), testID: res.TestID}, nil
+	return reimportedReport{reportVersion: versionOf(report), testID: res.TestID}, nil
 }
 
 // component returns the app tag value of a workload: it reads the labels and annotations of the top
@@ -674,11 +711,11 @@ func (r *Reconciler) component(
 	return component, nil
 }
 
-// importReports imports every page of reports of the configured kinds in the namespace; only one page is held at
+// reimportReports reimports every page of reports of the configured kinds in the namespace; only one page is held at
 // a time. The kinds it could not list completely are recorded in the pass.
-func (r *Reconciler) importReports(ctx context.Context, dd DefectDojo, p *pass) error {
+func (r *Reconciler) reimportReports(ctx context.Context, dd DefectDojo, p *pass) error {
 	for _, kind := range r.config.ReportKinds {
-		listed, err := r.importKind(ctx, dd, p, kind)
+		listed, err := r.reimportKind(ctx, dd, p, kind)
 		if err != nil {
 			return err
 		}
@@ -691,99 +728,88 @@ func (r *Reconciler) importReports(ctx context.Context, dd DefectDojo, p *pass) 
 	return nil
 }
 
-// importKind imports every page of the reports of one kind in the namespace. The result is false when the cluster
-// does not serve the kind, also when it stops serving it while its pages are listed. An expired continue token
-// starts the listing again, up to maxListRestarts times: the pass forgets what the earlier listing found, and the
-// reports imported or rejected before are skipped as unchanged.
-func (r *Reconciler) importKind(ctx context.Context, dd DefectDojo, p *pass, kind string) (bool, error) {
+// reimportKind reimports every page of the reports of one kind in the namespace. The result is false when the cluster
+// does not serve the kind, also when it stops serving it while its pages are listed. When the listing starts again
+// (see trivy.ListPages) the pass forgets what the earlier listing found, and the reports reimported or rejected
+// before are skipped as unchanged.
+func (r *Reconciler) reimportKind(ctx context.Context, dd DefectDojo, p *pass, kind string) (bool, error) {
 	gvk := trivy.ReportGVK(kind)
-	base := []client.ListOption{client.InNamespace(p.target.Namespace), client.Limit(reportsPageSize)}
-	opts := base
-	restarts := 0
 
-	for {
-		list := &unstructured.UnstructuredList{}
-		list.SetGroupVersionKind(gvk.GroupVersion().WithKind(kind + "List"))
+	err := trivy.ListPages(ctx, trivy.Listing[*unstructured.UnstructuredList]{
+		Reader:    r.reader,
+		Namespace: p.target.Namespace,
+		What:      kind,
+		PageSize:  reportsPageSize,
 
-		err := r.reader.List(ctx, list, opts...)
+		KindMayBeUnserved: true,
+		NewList: func() *unstructured.UnstructuredList {
+			list := &unstructured.UnstructuredList{}
+			list.SetGroupVersionKind(gvk.GroupVersion().WithKind(kind + "List"))
 
-		switch {
-		case err == nil:
-			// The page is imported below.
-		case meta.IsNoMatchError(err) || k8sErrors.IsNotFound(err):
-			return false, nil
-		case continueExpired(err) && restarts < maxListRestarts:
-			restarts++
-			opts = base
+			return list
+		},
+		Each: func(list *unstructured.UnstructuredList) error {
+			for i := range list.Items {
+				// The item kind is not always set on a list read.
+				list.Items[i].SetGroupVersionKind(gvk)
+			}
 
-			p.forget(kind)
+			return r.reimportPage(ctx, dd, p, list.Items)
+		},
+		Restart: func() { p.forget(kind) },
+	})
 
-			continue
-		case continueExpired(err):
-			return false, fmt.Errorf("failed to list %s after %d restarts: %w", kind, restarts, err)
-		default:
-			return false, fmt.Errorf("failed to list %s: %w", kind, err)
-		}
-
-		for i := range list.Items {
-			// The item kind is not always set on a list read.
-			list.Items[i].SetGroupVersionKind(gvk)
-		}
-
-		if err := r.importPage(ctx, dd, p, list.Items); err != nil {
-			return false, err
-		}
-
-		if list.GetContinue() == "" {
-			return true, nil
-		}
-
-		opts = append(slices.Clone(base), client.Continue(list.GetContinue()))
+	switch {
+	case errors.Is(err, trivy.ErrKindNotServed):
+		return false, nil
+	case err != nil:
+		return false, err
 	}
+
+	return true, nil
 }
 
-// continueExpired reports whether a list failed because its continue token is too old (HTTP 410).
-func continueExpired(err error) bool {
-	return k8sErrors.IsResourceExpired(err) || k8sErrors.IsGone(err)
-}
-
-func (r *Reconciler) lastImport(namespace string, key importKey) (importedReport, bool) {
+// lastReimport returns the report the test reflects; nil when none is known.
+func (r *Reconciler) lastReimport(namespace string, key testKey) *reimportedReport {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	entry, ok := r.imported[namespace][key]
+	entry, ok := r.reimported[namespace][key]
+	if !ok {
+		return nil
+	}
 
-	return entry, ok
+	return &entry
 }
 
-func (r *Reconciler) recordImport(namespace string, key importKey, entry importedReport) {
+func (r *Reconciler) recordReimport(namespace string, key testKey, entry reimportedReport) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	put(r.imported, namespace, key, entry)
+	put(r.reimported, namespace, key, entry)
 	delete(r.closed[namespace], entry.testID)
 }
 
 // recordRejection remembers a rejected report version at once, so a pass that fails later does not upload it again.
-func (r *Reconciler) recordRejection(namespace string, key importKey, version reportVersion) {
+func (r *Reconciler) recordRejection(namespace string, key testKey, rec rejection) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	put(r.rejectedVersions, namespace, key, version)
+	put(r.rejectedVersions, namespace, key, rec)
 }
 
-// keepImports forgets the tests that no current report reflects any more, and the rejected versions of reports that
+// keepReimported forgets the tests that no current report reflects any more, and the rejected versions of reports that
 // are not current. What is remembered about a kind the pass could not list stays.
-func (r *Reconciler) keepImports(namespace string, p *pass) {
+func (r *Reconciler) keepReimported(namespace string, p *pass) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	store(r.imported, namespace, withUnlisted(p, r.imported[namespace], p.current))
+	store(r.reimported, namespace, withUnlisted(p, r.reimported[namespace], p.current))
 	store(r.rejectedVersions, namespace, withUnlisted(p, r.rejectedVersions[namespace], p.rejected))
 }
 
 // store sets the entries of the namespace, and forgets the namespace when it has none.
-func store[V any](m map[string]map[importKey]V, namespace string, entries map[importKey]V) {
+func store[V any](m map[string]map[testKey]V, namespace string, entries map[testKey]V) {
 	if len(entries) == 0 {
 		delete(m, namespace)
 
@@ -794,7 +820,7 @@ func store[V any](m map[string]map[importKey]V, namespace string, entries map[im
 }
 
 // withUnlisted adds to found the remembered entries of the report kinds the pass could not list, and returns found.
-func withUnlisted[V any](p *pass, remembered, found map[importKey]V) map[importKey]V {
+func withUnlisted[V any](p *pass, remembered, found map[testKey]V) map[testKey]V {
 	for key, v := range remembered {
 		if !p.listed(key.title) {
 			found[key] = v
@@ -804,13 +830,30 @@ func withUnlisted[V any](p *pass, remembered, found map[importKey]V) map[importK
 	return found
 }
 
-func (r *Reconciler) isRejected(namespace string, key importKey, version reportVersion) bool {
+// rejectionOf returns the remembered rejection of the version; nil when the test has none or another version of the
+// report was rejected.
+func (r *Reconciler) rejectionOf(namespace string, key testKey, version reportVersion) *rejection {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	v, ok := r.rejectedVersions[namespace][key]
+	rec, ok := r.rejectedVersions[namespace][key]
+	if !ok || rec.version != version {
+		return nil
+	}
 
-	return ok && v == version
+	return &rec
+}
+
+// retryDue reports whether the rejected version is uploaded again: the next periodic pass after the rejection is.
+func (r *Reconciler) retryDue(rec rejection) bool {
+	return r.now().Sub(rec.at) >= time.Duration(float64(r.config.ResyncPeriod)*(1-resyncJitter))
+}
+
+// isRejected reports whether the version was rejected and is not due for a retry.
+func (r *Reconciler) isRejected(namespace string, key testKey, version reportVersion) bool {
+	rec := r.rejectionOf(namespace, key, version)
+
+	return rec != nil && !r.retryDue(*rec)
 }
 
 func (r *Reconciler) isClosed(namespace string, testID int) bool {
@@ -853,7 +896,7 @@ func (r *Reconciler) markReleased(namespace string) {
 
 	r.released[namespace] = struct{}{}
 
-	delete(r.imported, namespace)
+	delete(r.reimported, namespace)
 	delete(r.rejectedVersions, namespace)
 	delete(r.closed, namespace)
 }

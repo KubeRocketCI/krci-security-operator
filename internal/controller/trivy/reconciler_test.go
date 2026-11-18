@@ -476,6 +476,115 @@ func TestReconcile_RejectedVersionIsNotUploadedAgainUntilItChanges(t *testing.T)
 	assert.Empty(t, h.reconciler.rejectedVersions, "an accepted version clears the rejection")
 }
 
+func TestReconcile_RejectedVersionIsUploadedAgainOncePerResyncPeriod(t *testing.T) {
+	before := testutil.ToFloat64(rejectedReports.WithLabelValues(trivy.KindVulnerabilityReport))
+	now := scanDate
+
+	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
+	h.reconciler.now = func() time.Time { return now }
+	h.dd.reimportErr = rejectGoApp
+
+	h.reconcile()
+	require.Len(t, h.dd.reimports, 1)
+
+	now = now.Add(resync / 2)
+
+	h.reconcile()
+	assert.Len(t, h.dd.reimports, 1, "the rejected version is not uploaded again within the period")
+
+	now = now.Add(resync / 2)
+
+	h.reconcile()
+	assert.Len(t, h.dd.reimports, 2, "the rejected version is uploaded again after the period")
+
+	now = now.Add(resync / 2)
+
+	h.reconcile()
+	assert.Len(t, h.dd.reimports, 2, "the period starts again with every upload")
+
+	now = now.Add(resync / 2)
+
+	h.reconcile()
+	assert.Len(t, h.dd.reimports, 3)
+	assert.InDelta(t, before+1, testutil.ToFloat64(rejectedReports.WithLabelValues(trivy.KindVulnerabilityReport)), 0,
+		"the rejection is counted once per version")
+}
+
+func TestReconcile_RejectedVersionIsAcceptedOnTheRetry(t *testing.T) {
+	now := scanDate
+
+	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
+	h.reconciler.now = func() time.Time { return now }
+	h.dd.reimportErr = rejectGoApp
+
+	h.reconcile()
+	require.Len(t, h.dd.reimports, 1)
+
+	h.dd.reimportErr = nil
+	now = now.Add(resync)
+
+	h.reconcile()
+	require.Len(t, h.dd.reimports, 2)
+	assert.Empty(t, h.reconciler.rejectedVersions, "an accepted version clears the rejection")
+
+	now = now.Add(resync)
+
+	h.reconcile()
+	assert.Len(t, h.dd.reimports, 2, "an accepted version is not uploaded again")
+}
+
+func TestReconcile_RejectedVersionWhoseRetryFailsOtherwiseIsNotCountedAgain(t *testing.T) {
+	before := testutil.ToFloat64(rejectedReports.WithLabelValues(trivy.KindVulnerabilityReport))
+	now := scanDate
+
+	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
+	h.reconciler.now = func() time.Time { return now }
+	h.dd.reimportErr = rejectGoApp
+
+	h.reconcile()
+	require.Len(t, h.dd.reimports, 1)
+
+	h.dd.reimportErr = func(defectdojo.ReimportRequest) error {
+		return &defectdojo.APIError{StatusCode: http.StatusServiceUnavailable}
+	}
+	now = now.Add(resync)
+
+	require.Error(t, h.reconcileErr(), "the failed retry fails the pass")
+	require.Len(t, h.dd.reimports, 2)
+
+	h.dd.reimportErr = rejectGoApp
+
+	require.NoError(t, h.reconcileErr())
+	assert.Len(t, h.dd.reimports, 3, "the retry is due again in the next pass")
+	assert.InDelta(t, before+1, testutil.ToFloat64(rejectedReports.WithLabelValues(trivy.KindVulnerabilityReport)), 0,
+		"the rejection is counted once per version")
+}
+
+func TestReconcile_ProductTypeMismatchIsImportedOnTheRetryAfterItIsFixed(t *testing.T) {
+	now := scanDate
+
+	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
+	h.reconciler.now = func() time.Time { return now }
+	h.dd.seedTestsIn(ddContext{productType: "Other", product: goAppContext.product, engagement: goAppContext.engagement},
+		ownedTest(1, goAppTitle))
+
+	h.reconcile()
+	require.Len(t, h.dd.reimports, 1, "DefectDojo rejects a product of another Product Type")
+	assert.Empty(t, h.dd.findingsIn(1))
+
+	h.dd.moveProduct(goAppContext.product, goAppContext.productType)
+
+	h.reconcile()
+	assert.Len(t, h.dd.reimports, 1, "the retry waits for the period")
+
+	now = now.Add(resync)
+
+	h.reconcile()
+	require.Len(t, h.dd.reimports, 2)
+	assert.Equal(t, []int{1}, h.dd.testIDs())
+	assert.Len(t, h.dd.findingsIn(1), 2, "the retry imports into the test")
+}
+
 func TestReconcile_RejectedReportKeepsTheExistingTestOpenWithoutMemory(t *testing.T) {
 	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
 	h.dd.reimportErr = rejectGoApp
@@ -617,7 +726,7 @@ func TestReconcile_NamespaceWithoutReportsKeepsTheTestsOfItsWorkloads(t *testing
 
 	assert.Equal(t, []int{8}, h.dd.closed, "a missing report closes nothing, a missing workload does")
 	assert.Empty(t, h.dd.reimports)
-	assert.NotContains(t, h.reconciler.imported, appNS, "a namespace without reports keeps no memory")
+	assert.NotContains(t, h.reconciler.reimported, appNS, "a namespace without reports keeps no memory")
 }
 
 func TestReconcile_ReopenedTestIsClosedAgainWhenWorkloadGoesAgain(t *testing.T) {
@@ -918,13 +1027,13 @@ func TestReconcile_RejectedVersionIsNotUploadedAgainAfterAFailedPass(t *testing.
 func TestReconcile_ExpiredContinueTokenGivesUpAfterTheRestarts(t *testing.T) {
 	var calls []string
 
-	h := newHarness(t, pagedObjects(), pagedReports(t, &calls, errExpired, maxListRestarts+1))
+	h := newHarness(t, pagedObjects(), pagedReports(t, &calls, errExpired, trivy.MaxListRestarts+1))
 	h.dd.seedTests(ownedTest(7, staleTitle))
 
 	err := h.reconcileErr()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), fmt.Sprintf("after %d restarts", maxListRestarts))
-	assert.Len(t, calls, 2*(1+maxListRestarts), "the first listing and every restart read both pages")
+	assert.Contains(t, err.Error(), fmt.Sprintf("after %d restarts", trivy.MaxListRestarts))
+	assert.Len(t, calls, 2*(1+trivy.MaxListRestarts), "the first listing and every restart read both pages")
 	assert.Empty(t, h.dd.closed, "an incomplete listing closes nothing")
 }
 
@@ -960,6 +1069,23 @@ func TestReconcile_ListErrorOfReportsIsReturned(t *testing.T) {
 	require.Error(t, h.reconcileErr())
 	assert.Empty(t, h.dd.reimports)
 	assert.Empty(t, h.dd.closed, "a failed read hides which workloads are alive")
+}
+
+func TestReconcile_WorkloadListThatIsNotFoundFailsThePass(t *testing.T) {
+	funcs := interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*appsv1.ReplicaSetList); ok {
+				return k8sErrors.NewNotFound(schema.GroupResource{Group: "apps", Resource: "replicasets"}, "")
+			}
+
+			return c.List(ctx, list, opts...)
+		},
+	}
+
+	h := newHarness(t, withReports(goAppObjects(), goApp(t)), funcs)
+
+	require.Error(t, h.reconcileErr(), "a workload list is not a report kind that may be unserved")
+	assert.Empty(t, h.dd.reimports)
 }
 
 func TestReconcile_ConnectsWithSecretCredentials(t *testing.T) {

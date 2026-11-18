@@ -33,8 +33,8 @@ const (
 
 	groupApps  = "apps"
 	groupBatch = "batch"
-	// listPageSize is the number of workload objects or Pod metadata objects read per list call.
-	listPageSize = 500
+	// workloadPageSize is the number of workload objects or Pod metadata objects read per list call.
+	workloadPageSize = 500
 	// revisionAnnotation is set by the Deployment controller on a Deployment and on its current ReplicaSet.
 	revisionAnnotation = "deployment.kubernetes.io/revision"
 )
@@ -291,41 +291,55 @@ func (r *WorkloadResolver) loadTemplates(ctx context.Context, kind string) error
 	}
 
 	var (
-		names []string
+		found []templateWorkload
 		err   error
 	)
 
+	what, restart := kind+" workloads", func() { found = nil }
+
 	switch kind {
 	case workloadStatefulSet:
-		err = listPages(ctx, r.reader, r.namespace, func() *appsv1.StatefulSetList { return &appsv1.StatefulSetList{} },
-			func(list *appsv1.StatefulSetList) {
+		err = ListPages(ctx, workloadListing(r, what, restart,
+			func() *appsv1.StatefulSetList { return &appsv1.StatefulSetList{} },
+			func(list *appsv1.StatefulSetList) error {
 				for i := range list.Items {
-					spec := &list.Items[i].Spec.Template.Spec
-					names = append(names, r.remember(kind, list.Items[i].Name, containerNames(spec)).Name)
+					found = append(found, templateWorkload{list.Items[i].Name, containerNames(&list.Items[i].Spec.Template.Spec)})
 				}
-			})
+
+				return nil
+			}))
 	case workloadDaemonSet:
-		err = listPages(ctx, r.reader, r.namespace, func() *appsv1.DaemonSetList { return &appsv1.DaemonSetList{} },
-			func(list *appsv1.DaemonSetList) {
+		err = ListPages(ctx, workloadListing(r, what, restart,
+			func() *appsv1.DaemonSetList { return &appsv1.DaemonSetList{} },
+			func(list *appsv1.DaemonSetList) error {
 				for i := range list.Items {
-					spec := &list.Items[i].Spec.Template.Spec
-					names = append(names, r.remember(kind, list.Items[i].Name, containerNames(spec)).Name)
+					found = append(found, templateWorkload{list.Items[i].Name, containerNames(&list.Items[i].Spec.Template.Spec)})
 				}
-			})
+
+				return nil
+			}))
 	case workloadCronJob:
-		err = listPages(ctx, r.reader, r.namespace, func() *batchv1.CronJobList { return &batchv1.CronJobList{} },
-			func(list *batchv1.CronJobList) {
+		err = ListPages(ctx, workloadListing(r, what, restart,
+			func() *batchv1.CronJobList { return &batchv1.CronJobList{} },
+			func(list *batchv1.CronJobList) error {
 				for i := range list.Items {
 					spec := &list.Items[i].Spec.JobTemplate.Spec.Template.Spec
-					names = append(names, r.remember(kind, list.Items[i].Name, containerNames(spec)).Name)
+					found = append(found, templateWorkload{list.Items[i].Name, containerNames(spec)})
 				}
-			})
+
+				return nil
+			}))
 	default:
 		return fmt.Errorf("%w: %q", ErrUnsupportedKind, kind)
 	}
 
 	if err != nil {
-		return fmt.Errorf("failed to list %s workloads: %w", kind, err)
+		return err
+	}
+
+	names := make([]string, 0, len(found))
+	for _, w := range found {
+		names = append(names, r.remember(kind, w.name, w.containers).Name)
 	}
 
 	r.templateNames[kind] = names
@@ -333,27 +347,49 @@ func (r *WorkloadResolver) loadTemplates(ctx context.Context, kind string) error
 	return nil
 }
 
+// templateWorkload is a workload of a template kind as the listing delivers it.
+type templateWorkload struct {
+	name       string
+	containers map[string]struct{}
+}
+
+// workloadListing returns the paged listing of the workload objects of the namespace of the resolver.
+func workloadListing[L client.ObjectList](
+	r *WorkloadResolver,
+	what string,
+	restart func(),
+	newList func() L,
+	each func(L) error,
+) Listing[L] {
+	return Listing[L]{
+		Reader: r.reader, Namespace: r.namespace, What: what, PageSize: workloadPageSize,
+		NewList: newList, Each: each, Restart: restart,
+	}
+}
+
 // barePods returns the Pods without a controller. Their metadata is listed in pages; the containers of each are
 // read with a Get.
 func (r *WorkloadResolver) barePods(ctx context.Context) ([]Workload, error) {
 	var names []string
 
-	err := listPages(ctx, r.reader, r.namespace,
+	err := ListPages(ctx, workloadListing(r, "Pods", func() { names = nil },
 		func() *metav1.PartialObjectMetadataList {
 			list := &metav1.PartialObjectMetadataList{}
 			list.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("PodList"))
 
 			return list
 		},
-		func(list *metav1.PartialObjectMetadataList) {
+		func(list *metav1.PartialObjectMetadataList) error {
 			for i := range list.Items {
 				if metav1.GetControllerOf(&list.Items[i]) == nil {
 					names = append(names, list.Items[i].Name)
 				}
 			}
-		})
+
+			return nil
+		}))
 	if err != nil {
-		return nil, fmt.Errorf("failed to list Pods: %w", err)
+		return nil, err
 	}
 
 	var out []Workload
@@ -372,33 +408,6 @@ func (r *WorkloadResolver) barePods(ctx context.Context) ([]Workload, error) {
 	}
 
 	return out, nil
-}
-
-// listPages lists the objects of a namespace page by page and hands each page to each.
-func listPages[L client.ObjectList](
-	ctx context.Context,
-	reader client.Reader,
-	namespace string,
-	newList func() L,
-	each func(L),
-) error {
-	opts := []client.ListOption{client.InNamespace(namespace), client.Limit(listPageSize)}
-
-	for {
-		list := newList()
-		if err := reader.List(ctx, list, opts...); err != nil {
-			return err
-		}
-
-		each(list)
-
-		next := list.GetContinue()
-		if next == "" {
-			return nil
-		}
-
-		opts = []client.ListOption{client.InNamespace(namespace), client.Limit(listPageSize), client.Continue(next)}
-	}
 }
 
 // readContainers reads the container names of a workload that Containers has not seen yet. Deployments, ReplicaSets,
@@ -557,8 +566,9 @@ func (r *WorkloadResolver) loadJobs(ctx context.Context) error {
 	jobs := map[string]jobInfo{}
 	latest := map[string]newestJob{}
 
-	err := listPages(ctx, r.reader, r.namespace, func() *batchv1.JobList { return &batchv1.JobList{} },
-		func(list *batchv1.JobList) {
+	err := ListPages(ctx, workloadListing(r, "Jobs", func() { clear(jobs); clear(latest) },
+		func() *batchv1.JobList { return &batchv1.JobList{} },
+		func(list *batchv1.JobList) error {
 			for i := range list.Items {
 				job := &list.Items[i]
 				info := jobInfo{cronJob: cronJobOwner(job)}
@@ -574,9 +584,11 @@ func (r *WorkloadResolver) loadJobs(ctx context.Context) error {
 
 				jobs[job.Name] = info
 			}
-		})
+
+			return nil
+		}))
 	if err != nil {
-		return fmt.Errorf("failed to list Jobs: %w", err)
+		return err
 	}
 
 	r.jobs, r.latestJob, r.jobsLoaded = jobs, latest, true
@@ -602,8 +614,9 @@ func (r *WorkloadResolver) load(ctx context.Context) error {
 	// ReplicaSets are listed before Deployments, Jobs before CronJobs: the owner of a listed object is in the later list.
 	replicaSets := map[string]replicaSetInfo{}
 
-	err := listPages(ctx, r.reader, r.namespace, func() *appsv1.ReplicaSetList { return &appsv1.ReplicaSetList{} },
-		func(list *appsv1.ReplicaSetList) {
+	err := ListPages(ctx, workloadListing(r, "ReplicaSets", func() { clear(replicaSets) },
+		func() *appsv1.ReplicaSetList { return &appsv1.ReplicaSetList{} },
+		func(list *appsv1.ReplicaSetList) error {
 			for i := range list.Items {
 				rs := &list.Items[i]
 				info := replicaSetInfo{deployment: deploymentOwner(rs), revision: rs.Annotations[revisionAnnotation]}
@@ -614,15 +627,18 @@ func (r *WorkloadResolver) load(ctx context.Context) error {
 
 				replicaSets[rs.Name] = info
 			}
-		})
+
+			return nil
+		}))
 	if err != nil {
-		return fmt.Errorf("failed to list ReplicaSets: %w", err)
+		return err
 	}
 
 	deployments := map[string]deploymentInfo{}
 
-	err = listPages(ctx, r.reader, r.namespace, func() *appsv1.DeploymentList { return &appsv1.DeploymentList{} },
-		func(list *appsv1.DeploymentList) {
+	err = ListPages(ctx, workloadListing(r, "Deployments", func() { clear(deployments) },
+		func() *appsv1.DeploymentList { return &appsv1.DeploymentList{} },
+		func(list *appsv1.DeploymentList) error {
 			for i := range list.Items {
 				d := &list.Items[i]
 				deployments[d.Name] = deploymentInfo{
@@ -630,9 +646,11 @@ func (r *WorkloadResolver) load(ctx context.Context) error {
 					containers: containerNames(&d.Spec.Template.Spec),
 				}
 			}
-		})
+
+			return nil
+		}))
 	if err != nil {
-		return fmt.Errorf("failed to list Deployments: %w", err)
+		return err
 	}
 
 	r.replicaSets, r.deployments, r.loaded = replicaSets, deployments, true
