@@ -101,7 +101,7 @@ func TestReconcile_NeverClosesTheTestsOfAnotherClusterWithTheSameNamespaceName(t
 	}
 }
 
-func TestReconcile_StaleServiceCloseNeverReachesTheTestOfAnotherClusterWithTheSameTitle(t *testing.T) {
+func TestReconcile_ReimportNeverReachesTheTestOfAnotherClusterWithTheSameTitle(t *testing.T) {
 	const (
 		otherService = "krci-demo-dev/ReplicaSet/test-go-app-old/test-go-app"
 		otherFinding = "CVE-2026-14456 libcrypto3 3.5.6-r0"
@@ -113,9 +113,8 @@ func TestReconcile_StaleServiceCloseNeverReachesTheTestOfAnotherClusterWithTheSa
 
 	h.reconcile()
 
-	require.Len(t, h.dd.healCalls, 1)
-	assert.NotEqual(t, 200, h.dd.healCalls[0].test.ID, "the close targets the test of the reimport")
-	assert.Equal(t, goAppProduct, h.dd.healCalls[0].test.Product)
+	require.Len(t, h.dd.reimports, 1)
+	assert.Equal(t, goAppProduct, h.dd.reimports[0].Product)
 	assert.Equal(t, map[string]string{otherFinding: statusActive}, h.dd.statuses(200, otherService),
 		"the finding of another cluster stays active")
 }

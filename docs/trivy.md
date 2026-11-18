@@ -10,7 +10,7 @@ The unit of work is a namespace. The operator reconciles a namespace when a `Vul
 
 1. **Skip** namespaces that match `excludeNamespaces`.
 2. **Import**: list the namespace's reports, resolve each to its stable workload (a ReplicaSet to its Deployment, a Job to its CronJob; a StatefulSet, DaemonSet or Pod is its own workload), and re-import only the reports whose UID or resourceVersion changed since the last import. The state is in memory, so a restart re-imports once. Imports into one test are serialized.
-3. **Close**, after each pass over an imported namespace, the owned tests of the namespace product that the pass did not import, of the report kinds it listed completely. That covers removed workloads. The findings of other services in a test are closed once per test. A namespace that is gone or excluded has every active finding of all its owned tests closed, once per process. Closing mitigates the findings; the product and the tests stay, and a later reimport reactivates the findings. A close and a reimport of one test never run at the same time.
+3. **Close**, after each pass over an imported namespace, the owned tests of the namespace product that the pass did not import, of the report kinds it listed completely. That covers removed workloads. A namespace that is gone or excluded has every active finding of all its owned tests closed, once per process. Closing mitigates the findings; the product and the tests stay, and a later reimport reactivates the findings. A close and a reimport of one test never run at the same time.
 4. **Product tags**: every pass over a namespace, imported, gone or excluded, reads its product and sets the missing or wrong tags (see [DefectDojo naming](#defectdojo-naming)). A failed update fails the pass after the closing, so the workqueue retries it.
 5. **Sweep**: at start and every 6 hours, list the namespace products of the cluster and hand to the controller the namespaces that no longer exist or are excluded and are not closed yet, and the namespaces whose product has wrong or missing tags. The sweeper writes nothing to DefectDojo: the controller closes the tests and sets the tags, so all writes of a namespace are serialized with its imports.
 
@@ -20,7 +20,7 @@ The unit of work is a namespace. The operator reconciles a namespace when a `Vul
 - DefectDojo calls: a re-import is never retried after a timeout, a transport error or a 5xx, because DefectDojo may still be processing it and a second import into the same test duplicates findings; only a 429 is retried. Reads and the finding close call, which is idempotent, are retried with backoff. A re-import may take 10 minutes, every other call 2 minutes. The manager never stops for it.
 - An absent optional dependency is not an error. While the credentials Secret is missing or has no `url` or `token`, the namespace is requeued after at most 5 minutes; the missing Secret is logged once per process at Info and then at debug level. While no report CRD is served, the namespace is requeued every `resyncPeriod`.
 - A report that DefectDojo rejects with a client error (4xx) is permanent for that version: the version (UID and `resourceVersion`) is remembered at once and not uploaded again until the report changes, also when the pass fails later. It does not fail the pass, so stale tests are still closed, and an earlier import of the same workload stays open. Each newly rejected version is logged at Error once and counted in the metric `krci_security_operator_rejected_reports_total{kind}`.
-- A broken report is never uploaded: DefectDojo reads it as a report without findings and closes every finding of its test. A report is broken when it has no `trivy-operator.resource.kind` label, no resource name (the `trivy-operator.resource.name` label, else the annotation of the same name), no `report` block, or no result list: `report.vulnerabilities` for a `VulnerabilityReport`, `report.secrets` for an `ExposedSecretReport`. The pass logs it at Info (`Skipped a broken report`, with the reason) and does not count it as imported. Its test stays open with its findings; when the report has no resource kind or name, the pass keeps every test of its report kind open, because the test is unknown. A broken report does not keep the test of a workload that is gone open. A report with an empty result list is not broken: it is uploaded and closes the findings of its test.
+- A broken report is never uploaded: DefectDojo reads it as a report without findings and closes every finding of its test. A report is broken when it has no `trivy-operator.resource.kind` label, no resource name (the `trivy-operator.resource.name` label, else the annotation of the same name), no `trivy-operator.container.name` label, no `report` block, or no result list: `report.vulnerabilities` for a `VulnerabilityReport`, `report.secrets` for an `ExposedSecretReport`. The pass logs it at Info (`Skipped a broken report`, with the reason) and does not count it as imported. Its test stays open with its findings; when the report has no resource kind, name or container name, the pass keeps every test of its report kind open, because the test is unknown. A broken report does not keep the test of a workload that is gone open. A report with an empty result list is not broken: it is uploaded and closes the findings of its test.
 - Every namespace is requeued every `resyncPeriod`, spread by up to 10% either way.
 - Tests are closed per report kind. While a configured kind is not served, also when it stops being served while its pages are listed, its tests and what the operator remembers about its reports stay as they are, and the pass logs the kind at Info. To close the tests of a kind that is no longer used, remove it from `reportKinds`.
 - An expired continue token (HTTP 410) starts the listing of the kind again, up to 3 times. The reports imported or rejected before are skipped as unchanged, and a report deleted in between no longer counts as live. After the third restart the pass fails and closes nothing; the retry skips the reports imported so far, so a large namespace converges over a few passes.
@@ -60,24 +60,53 @@ KubeRocketCI
         └── ExposedSecretReport deployment/api/api
 ```
 
-- Every test carries `krci-namespace:<ns>`, `krci-workload:<kind>.<name>`, `krci-container:<c>`, `krci-component:<component>` and `krci-cluster:<clusterName>`. The operator does not read them.
+- **Test tags.** Every reimport sends the full tag list of the test; DefectDojo replaces the tags of the test with it. A tag is `<key>:<value>`, the value in lower case with spaces, commas, `'` and `"` replaced by `-`, one tag per key, at most 255 characters (see Length limits):
+
+  | Tag | Value |
+  |---|---|
+  | `k8s-cluster` | `<clusterName>` |
+  | `k8s-namespace` | `<namespace>` |
+  | `k8s-workload` | `<kind>.<name>` of the stable workload, the kind in lower case (`deployment`, `statefulset`, `daemonset`, `cronjob`, `job`, `replicaset`, `pod`), so the kind ends at the first `.` |
+  | `k8s-container` | `<container>` |
+  | `oci-image` | `<registry>/<repository>` of the image, without tag and digest; Docker Hub without host and `library/`. Left out when the report names no image |
+  | `app` | the component, only when a source exists (see Component) |
+
+  The tags are for filtering; the operator never reads them back to identify a test. A `k8s-workload` tag over 255 characters has its value shortened, so it is not the full workload name. Findings carry no operator tags: DefectDojo adds the tags of a request to findings and never removes them, so they would keep old images and apps. Filter findings by the tags of their test (`test__tags`).
 - Every namespace product carries the tags `k8s-cluster:<clusterName>` and `k8s-namespace:<namespace>`. The operator sets them when the product has them wrong or missing, on every pass over the namespace (a sweep wakes the namespaces that need it), and keeps the other tags of the product. An update replaces the tags of a product, so the full list is sent.
 - The same namespace name in two clusters gives two products, because the cluster name is part of the product name. The cluster name is required and must be unique per DefectDojo; two clusters with one name write into the same products.
 - Use one Product Type value for every operator that writes to the same DefectDojo. A reimport fails when the product already exists under another Product Type, so changing the value later leaves the existing products under the old one.
-- Products, engagements and tests are created on demand. Imports use `reimport-scan` with `close_old_findings`, `deduplication_on_engagement`, `environment=Development` and `push_to_jira=false`.
+- Products, engagements and tests are created on demand. Imports use `reimport-scan`; see [Reimport request](#reimport-request).
 - **Ownership.** An owned test is a test whose product name starts with `<clusterName>/` and whose scan type is `Trivy Operator Scan`. The operator closes only owned tests, so it never closes a test of another cluster, also when the namespace names are equal. A product whose name only contains `<clusterName>/` (`x-<clusterName>/<namespace>`), a codebase product of the CI pipeline and a test of another scan type are not owned. Tags are not used for ownership.
 - **Lookups.** The tests of a namespace are found through its product (the exact name `<clusterName>/<namespace>` under the Product Type, asked with the `name_exact` filter, which ignores case, so the operator compares the name again), the engagement `trivy-operator` of the product, and the tests of the engagement with the scan type `Trivy Operator Scan`. The products of the cluster are listed by Product Type and the name `<clusterName>/`; DefectDojo matches names by "contains", so the operator checks the prefix. Lists are read page by page. The ID of the Product Type is kept until a list of products under it comes back empty. A Product Type that DefectDojo does not list (not created yet, or not readable by the token) is logged at Info once per process; no product is looked up, and a gone or excluded namespace is not recorded as released, so the next pass looks again. A close mitigates the findings of the test with `active=true` and `is_mitigated=false`.
 - **Close cases.**
   - The stable workload of a test is gone: the test is closed.
   - The namespace is deleted, terminating or excluded: every owned test of its product is closed, once per process until the namespace is imported again.
-  - A test is imported: once per test and process, the active findings outside the service of the reimport are closed.
-- **Component tag.** It is derived from the top workload object (Deployment, StatefulSet, DaemonSet, CronJob, Job or Pod, read with a metadata `get`) and lower-cased into a tag-safe value: spaces and commas become `-`. The first source present wins:
+
+- **Reimport request.** Every report is sent with these fields; `apply_tags_to_findings` is not sent:
+
+  | Field | Value |
+  |---|---|
+  | `scan_type` | `Trivy Operator Scan` |
+  | `product_type_name`, `product_name`, `engagement_name`, `test_title` | the layout above |
+  | `service` | `<namespace>/<Kind>/<name>/<container>`, the kind and name of the stable workload (`Deployment`, `CronJob`, else the kind of the report). It is the service the Trivy Operator parser builds from the report labels `trivy-operator.resource.namespace`, `.kind`, `.name` and `trivy-operator.container.name`, which the operator rewrites to the stable workload and the namespace before the upload, so a rollout keeps one service; the request service replaces the parser service of every finding, and a value over 200 characters is shortened as described under Length limits. DefectDojo closes, on reimport, only the findings of the request service |
+  | `version` | the image tag, else `sha256:` and the first 12 characters of the digest |
+  | `tags` | one field per tag of the test |
+  | `auto_create_context`, `close_old_findings`, `deduplication_on_engagement`, `active` | `true` |
+  | `verified`, `push_to_jira` | `false` |
+  | `minimum_severity` | `Info` |
+  | `environment` | `Development` |
+  | `scan_date` | today, date only |
+
+  The workload name is the `trivy-operator.resource.name` label, else the annotation of the same name: Trivy Operator writes a name that is not a valid label value only to the annotation. The label rewrite always writes the full name.
+- **Length limits.** DefectDojo stores at most 200 characters of the service, 255 of the test title, of the product name and of a whole tag (`<key>:<value>`), and 100 of the version. A longer service, title, version or tag value is shortened: its start, `~` and the first 12 hex characters of the SHA-256 of the full value, to the limit; a tag keeps its `<key>:` prefix and only the value is shortened. The same value always gives the same result. The product name never reaches its limit: the cluster name and the namespace are DNS labels. A shortened tag value is not parsed back.
+- **Component.** The `app` tag is derived from the top workload object (Deployment, StatefulSet, DaemonSet, CronJob, Job or Pod, read with a metadata `get`) and lower-cased into a tag-safe value: spaces, commas, `'` and `"` become `-`. The first source present wins:
   1. the app part of the annotation `argocd.argoproj.io/tracking-id` (the text before the first `:`, after the last `_`), with the configured `componentPrefixes` stripped;
   2. the label `argocd.argoproj.io/instance`;
   3. the label `app.kubernetes.io/part-of`;
   4. the annotation `meta.helm.sh/release-name`;
-  5. the label `app.kubernetes.io/instance`;
-  6. the namespace name.
+  5. the label `app.kubernetes.io/instance`.
+
+  A workload without a source, or one that no longer exists, has no `app` tag.
 
 ## Configuration
 

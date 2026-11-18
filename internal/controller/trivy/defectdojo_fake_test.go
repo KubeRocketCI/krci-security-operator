@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/KubeRocketCI/krci-security-operator/pkg/defectdojo"
 	"github.com/KubeRocketCI/krci-security-operator/pkg/trivy"
@@ -140,7 +141,9 @@ func (p parsedFinding) hash() string {
 //   - the version is written, empty included; the test tags are replaced when tags are sent;
 //   - the lists are filtered as DefectDojo does: products by product type ID and name (contains, case-insensitive),
 //     engagements by product and name, tests by engagement and scan type; PATCH of product tags replaces them;
-//   - a form value of only whitespace is rejected with 400; invalid JSON gives 400, an unknown severity 500.
+//   - a form value of only whitespace or over its limit (service 200, version 100, test title and product name 255
+//     characters) is rejected with 400; a tag with a space, comma or quote or over 255 characters is rejected with
+//     400 and stored in lower case; invalid JSON gives 400, an unknown severity 500.
 //
 // It also records the calls of the controller. The error hooks fail a call before it changes the state.
 type fakeDefectDojo struct {
@@ -156,20 +159,13 @@ type fakeDefectDojo struct {
 
 	reimports []defectdojo.ReimportRequest
 	closed    []int
-	healCalls []healCall
 	// tagCalls holds the product tag lists the controller sent.
 	tagCalls  []tagCall
 	listCalls int
 
 	reimportErr func(defectdojo.ReimportRequest) error
 	listErr     error
-	healErr     error
 	tagErr      error
-}
-
-type healCall struct {
-	test    defectdojo.Test
-	service string
 }
 
 type tagCall struct {
@@ -236,26 +232,60 @@ func (f *fakeDefectDojo) reimport(r defectdojo.ReimportRequest) (defectdojo.Reim
 }
 
 // validateForm applies the DRF CharField rules to the string fields: an empty value is not sent, a value is
-// stripped, and a value of only whitespace is rejected.
+// stripped, a value of only whitespace is rejected, and a value over max_length characters is rejected.
 func validateForm(r defectdojo.ReimportRequest) (defectdojo.ReimportRequest, error) {
-	for name, field := range map[string]*string{
-		"product_type_name": &r.ProductType,
-		"product_name":      &r.Product,
-		"engagement_name":   &r.Engagement,
-		"test_title":        &r.TestTitle,
-		"service":           &r.Service,
-		"version":           &r.Version,
+	for name, field := range map[string]struct {
+		value *string
+		limit int
+	}{
+		"product_type_name": {&r.ProductType, 0},
+		"product_name":      {&r.Product, 255},
+		"engagement_name":   {&r.Engagement, 0},
+		"test_title":        {&r.TestTitle, 255},
+		"service":           {&r.Service, 200},
+		"version":           {&r.Version, 100},
 	} {
-		if *field == "" {
+		if *field.value == "" {
 			continue
 		}
 
-		if *field = strings.TrimSpace(*field); *field == "" {
+		if *field.value = strings.TrimSpace(*field.value); *field.value == "" {
 			return r, badRequest(fmt.Sprintf(`{%q:["This field may not be blank."]}`, name))
+		}
+
+		if field.limit > 0 && utf8.RuneCountInString(*field.value) > field.limit {
+			return r, badRequest(fmt.Sprintf(`{%q:["Ensure this field has no more than %d characters."]}`, name, field.limit))
 		}
 	}
 
+	tags, err := validateTags(r.Tags)
+	if err != nil {
+		return r, err
+	}
+
+	r.Tags = tags
+
 	return r, nil
+}
+
+// validateTags applies the TagListSerializerField rules: a tag has no space, comma, single quote or double quote
+// (TAG_PATTERN), at most 255 characters (the tag name column), and is stored in lower case.
+func validateTags(tags []string) ([]string, error) {
+	stored := make([]string, 0, len(tags))
+
+	for _, tag := range tags {
+		if strings.ContainsAny(tag, ` ,'"`) {
+			return nil, badRequest(fmt.Sprintf(`{"tags":["Invalid tag %q: it must not contain a space, a comma or a quote."]}`, tag))
+		}
+
+		if utf8.RuneCountInString(tag) > 255 {
+			return nil, badRequest(`{"tags":["Ensure this tag has no more than 255 characters."]}`)
+		}
+
+		stored = append(stored, strings.ToLower(tag))
+	}
+
+	return stored, nil
 }
 
 // targetTest finds the test of the request, or creates it with its missing product type, product and engagement.
@@ -416,22 +446,9 @@ func (f *fakeDefectDojo) CloseTest(_ context.Context, test defectdojo.Test) erro
 	defer f.mu.Unlock()
 
 	f.closed = append(f.closed, test.ID)
-	f.closeActive(test.ID, func(string) bool { return true })
+	f.closeActive(test.ID)
 
 	return nil
-}
-
-func (f *fakeDefectDojo) CloseFindingsOutsideService(_ context.Context, test defectdojo.Test, service string) (int, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.healCalls = append(f.healCalls, healCall{test: test, service: service})
-
-	if f.healErr != nil {
-		return 0, f.healErr
-	}
-
-	return f.closeActive(test.ID, func(s string) bool { return s != service }), nil
 }
 
 // SetProductTags replaces the tags of the product, as PATCH does.
@@ -455,18 +472,12 @@ func (f *fakeDefectDojo) SetProductTags(_ context.Context, productID int, tags [
 	return nil
 }
 
-func (f *fakeDefectDojo) closeActive(testID int, selected func(service string) bool) int {
-	closed := 0
-
+func (f *fakeDefectDojo) closeActive(testID int) {
 	for _, found := range f.findingsOf(testID) {
-		if found.active && selected(found.service) {
+		if found.active {
 			found.mitigate()
-
-			closed++
 		}
 	}
-
-	return closed
 }
 
 // seedTests stores tests in the namespace product of the cluster under test and the namespace appNS, as written
@@ -520,7 +531,7 @@ func (f *fakeDefectDojo) seedScanTest(c ddContext, scanType string, test defectd
 		panic(fmt.Sprintf("test %d is seeded twice", test.ID))
 	}
 
-	f.addTest(f.ensureContext(c).id, test.ID, scanType, test.Title, nil)
+	f.addTest(f.ensureContext(c).id, test.ID, scanType, test.Title, test.Tags)
 	f.lastID["test"] = max(f.lastID["test"], test.ID)
 }
 

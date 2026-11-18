@@ -57,8 +57,6 @@ type DefectDojo interface {
 	ListTests(ctx context.Context, product defectdojo.Product, engagement string) ([]defectdojo.Test, error)
 	// CloseTest mitigates the active findings of the test and keeps the test.
 	CloseTest(ctx context.Context, test defectdojo.Test) error
-	// CloseFindingsOutsideService mitigates the active findings of the test whose service is not the given one.
-	CloseFindingsOutsideService(ctx context.Context, test defectdojo.Test, service string) (int, error)
 	// SetProductTags replaces the tags of the product.
 	SetProductTags(ctx context.Context, productID int, tags []string) error
 }
@@ -127,8 +125,6 @@ type Reconciler struct {
 	imported map[string]map[importKey]importedReport
 	// closed holds, per namespace, the tests closed by the operator that DefectDojo still lists.
 	closed map[string]map[int]struct{}
-	// healed holds, per namespace, the live tests whose findings of stale services were closed.
-	healed map[string]map[int]struct{}
 	// rejectedVersions holds, per namespace, the report versions DefectDojo rejected; they are not uploaded again.
 	rejectedVersions map[string]map[importKey]reportVersion
 	// released holds the namespaces whose owned tests were closed because the namespace is gone or excluded.
@@ -156,7 +152,6 @@ func NewReconciler(cache, reader client.Reader, cfg Config, connect Connector) *
 		wake:     make(chan event.GenericEvent, wakeBuffer),
 		imported: map[string]map[importKey]importedReport{},
 		closed:   map[string]map[int]struct{}{},
-		healed:   map[string]map[int]struct{}{},
 
 		rejectedVersions: map[string]map[importKey]reportVersion{},
 		released:         map[string]struct{}{},
@@ -296,7 +291,8 @@ type pass struct {
 	rejected map[importKey]reportVersion
 	// unlisted holds the configured report kinds the pass could not list completely.
 	unlisted []string
-	// unattributed holds the report kinds with a skipped report that names no resource: no test is known for it.
+	// unattributed holds the report kinds with a skipped report that names no resource or no container: no test is
+	// known for it.
 	unattributed map[string]struct{}
 }
 
@@ -384,7 +380,7 @@ func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target tr
 	}
 
 	if !found {
-		r.pruneTests(target.Namespace, nil, nil)
+		r.pruneTests(target.Namespace, nil)
 
 		return nil
 	}
@@ -465,7 +461,7 @@ func (r *Reconciler) importOne(ctx context.Context, dd DefectDojo, p *pass, repo
 		return nil
 	}
 
-	entry, err := r.importReport(ctx, dd, p.target.Namespace, imp, report, workload)
+	entry, err := r.importReport(ctx, dd, imp, report, workload)
 	if err != nil {
 		if !defectdojo.IsRejectedReport(err) {
 			return err
@@ -492,13 +488,13 @@ func (r *Reconciler) importOne(ctx context.Context, dd DefectDojo, p *pass, repo
 }
 
 // skipBroken logs a report that is not uploaded (see trivy.BrokenReport) and keeps its test open.
-// It is not recorded as imported. A report that names no resource names no test: every test of its report kind
-// stays open.
+// It is not recorded as imported. A report that names no resource or no container names no test: every test of its
+// report kind stays open.
 func (r *Reconciler) skipBroken(ctx context.Context, p *pass, report *unstructured.Unstructured, reason string) error {
 	ctrl.LoggerFrom(ctx).Info("Skipped a broken report",
 		"report", report.GetName(), "kind", report.GetKind(), "reason", reason)
 
-	if !trivy.NamesResource(report) {
+	if !trivy.NamesTest(report) {
 		p.keepOpenKind(report.GetKind())
 
 		return nil
@@ -519,7 +515,6 @@ func (r *Reconciler) skipBroken(ctx context.Context, p *pass, report *unstructur
 func (r *Reconciler) importReport(
 	ctx context.Context,
 	dd DefectDojo,
-	namespace string,
 	imp trivy.Import,
 	report *unstructured.Unstructured,
 	workload trivy.Workload,
@@ -538,51 +533,11 @@ func (r *Reconciler) importReport(
 		return importedReport{}, fmt.Errorf("defectdojo did not return a test for report %s", report.GetName())
 	}
 
-	r.closeStaleServices(ctx, dd, namespace, imp, res.TestID, trivy.Service(report, workload))
-
 	return importedReport{uid: report.GetUID(), resourceVersion: report.GetResourceVersion(), testID: res.TestID}, nil
 }
 
-// closeStaleServices closes, once per test and process, the findings written under another service:
-// reports imported before their labels named the stable workload left one set of findings per ReplicaSet.
-// The test is the one the reimport of imp wrote into, in the namespace product of this cluster.
-// A failure is retried after the next import.
-func (r *Reconciler) closeStaleServices(
-	ctx context.Context,
-	dd DefectDojo,
-	namespace string,
-	imp trivy.Import,
-	testID int,
-	service string,
-) {
-	if r.isHealed(namespace, testID) {
-		return
-	}
-
-	test := defectdojo.Test{
-		ID:         testID,
-		Title:      imp.TestTitle,
-		ScanType:   defectdojo.ScanTypeTrivyOperator,
-		Product:    imp.Product,
-		Engagement: imp.Engagement,
-	}
-
-	closed, err := dd.CloseFindingsOutsideService(ctx, test, service)
-	if err != nil {
-		ctrl.LoggerFrom(ctx).Error(err, "Could not close findings of a stale service", "test", testID)
-
-		return
-	}
-
-	r.markHealed(namespace, testID)
-
-	if closed > 0 {
-		ctrl.LoggerFrom(ctx).Info("Closed findings of a stale service", "test", testID, "findings", closed)
-	}
-}
-
-// component returns the component tag value of a workload: it reads the labels and annotations of the top
-// workload object and falls back to the namespace name when the workload has none or is gone.
+// component returns the app tag value of a workload: it reads the labels and annotations of the top
+// workload object. It is "" when no source names a component or the workload object is gone.
 func (r *Reconciler) component(
 	ctx context.Context,
 	known map[trivy.Workload]string,
@@ -593,7 +548,7 @@ func (r *Reconciler) component(
 		return c, nil
 	}
 
-	component := trivy.TagSafe(namespace)
+	component := ""
 
 	if gvk, ok := workload.GVK(); ok {
 		obj := &metav1.PartialObjectMetadata{}
@@ -603,7 +558,7 @@ func (r *Reconciler) component(
 
 		switch {
 		case err == nil:
-			component = trivy.Component(obj.GetLabels(), obj.GetAnnotations(), namespace, r.config.ComponentPrefixes)
+			component = trivy.Component(obj.GetLabels(), obj.GetAnnotations(), r.config.ComponentPrefixes)
 		case !k8sErrors.IsNotFound(err):
 			return "", fmt.Errorf("failed to get %s %s: %w", gvk.Kind, workload.Name, err)
 		}
@@ -776,29 +731,12 @@ func (r *Reconciler) markOpen(namespace string, testID int) {
 	delete(r.closed[namespace], testID)
 }
 
-func (r *Reconciler) isHealed(namespace string, testID int) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	_, ok := r.healed[namespace][testID]
-
-	return ok
-}
-
-func (r *Reconciler) markHealed(namespace string, testID int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	put(r.healed, namespace, testID, struct{}{})
-}
-
-// pruneTests keeps the closed IDs that DefectDojo still lists for the namespace and the healed IDs of live tests.
-func (r *Reconciler) pruneTests(namespace string, listed, live map[int]struct{}) {
+// pruneTests keeps the closed IDs that DefectDojo still lists for the namespace.
+func (r *Reconciler) pruneTests(namespace string, listed map[int]struct{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	keepIDs(r.closed, namespace, listed)
-	keepIDs(r.healed, namespace, live)
 }
 
 func (r *Reconciler) isReleased(namespace string) bool {
@@ -820,7 +758,6 @@ func (r *Reconciler) markReleased(namespace string) {
 	delete(r.imported, namespace)
 	delete(r.rejectedVersions, namespace)
 	delete(r.closed, namespace)
-	delete(r.healed, namespace)
 }
 
 // markImportable clears the released mark of a namespace that the pass imports.

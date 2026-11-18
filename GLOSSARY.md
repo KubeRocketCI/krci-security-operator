@@ -37,7 +37,7 @@ A current report with zero vulnerabilities or secrets. It means "clean".
 _Avoid_: missing report
 
 **Broken report**:
-A report without the resource kind label, without the resource name (label or annotation), without the `report` block, or without its result list. It is never uploaded.
+A report without the resource kind label, without the resource name (label or annotation), without the container name label, without the `report` block, or without its result list. It is never uploaded.
 _Avoid_: empty report, malformed report, invalid report
 
 ## DefectDojo side
@@ -75,7 +75,7 @@ The finding field that names the stable workload and container: `<namespace>/<Ki
 _Avoid_: component, workload (for the field)
 
 **Tag**:
-A `<key>:<value>` label on a product, test or finding, used only for filters.
+A `<key>:<value>` label on a product or test, used for filters. The operator writes none on findings. On a test, `k8s-workload` and `k8s-container` also name its stable workload and container, and the operator reads them from the listed test.
 _Avoid_: label (for DefectDojo tags)
 
 ## Sync

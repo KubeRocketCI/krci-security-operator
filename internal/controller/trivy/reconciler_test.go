@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -295,8 +296,6 @@ func TestReconcile_SkipsUnchangedReport(t *testing.T) {
 	assert.Len(t, h.dd.reimports, 2, "a changed report is imported")
 }
 
-// TestReconcile_ReportWithOneCVELessClosesThatFinding skips while the reimport request has no service: DefectDojo
-// then closes only findings without a service, and the parser gives every finding one.
 func TestReconcile_ReportWithOneCVELessClosesThatFinding(t *testing.T) {
 	const (
 		kept  = "CVE-2026-14456 libcrypto3 3.5.6-r0"
@@ -322,12 +321,7 @@ func TestReconcile_ReportWithOneCVELessClosesThatFinding(t *testing.T) {
 
 	require.Len(t, h.dd.reimports, 2)
 
-	got := h.dd.statuses(testID, goAppService)
-	if got[fixed] == statusActive {
-		t.Skip("the reimport request does not send the service: the fixed CVE stays active")
-	}
-
-	assert.Equal(t, map[string]string{kept: statusActive, fixed: statusClosed}, got)
+	assert.Equal(t, map[string]string{kept: statusActive, fixed: statusClosed}, h.dd.statuses(testID, goAppService))
 }
 
 func TestReconcile_ImportsAgainWhenAnotherReportOverwroteTheTest(t *testing.T) {
@@ -984,65 +978,7 @@ func TestReconcile_SendsStableWorkloadLabels(t *testing.T) {
 	assert.Equal(t, "Deployment", labels[trivy.LabelResourceKind])
 	assert.Equal(t, "test-go-app", labels[trivy.LabelResourceName])
 	assert.Equal(t, goAppTitle, h.dd.reimports[0].TestTitle)
-	assert.Contains(t, h.dd.reimports[0].Tags, "krci-workload:deployment.test-go-app")
-}
-
-func TestReconcile_ClosesFindingsOfStaleServicesOncePerTest(t *testing.T) {
-	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
-
-	h.reconcile()
-	require.Len(t, h.dd.healCalls, 1)
-	assert.Equal(t, healCall{
-		test: defectdojo.Test{
-			ID: 100, Title: goAppTitle, ScanType: defectdojo.ScanTypeTrivyOperator,
-			Product: goAppProduct, Engagement: "trivy-operator",
-		},
-		service: "krci-demo-dev/Deployment/test-go-app/test-go-app",
-	}, h.dd.healCalls[0], "the lock key of the test is the one of its reimport")
-
-	h.setReport(goApp(t))
-
-	h.reconcile()
-	require.Len(t, h.dd.reimports, 2)
-	assert.Len(t, h.dd.healCalls, 1, "the steady state does not list findings")
-}
-
-func TestReconcile_ClosesFindingsOfAStaleServiceAndKeepsTheImportedOnes(t *testing.T) {
-	const staleService = "krci-demo-dev/ReplicaSet/test-go-app-old/test-go-app"
-
-	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
-	h.dd.seedTestsIn(goAppContext, ownedTest(100, goAppTitle))
-	h.dd.seedFinding(100, "CVE-2026-14456 libcrypto3 3.5.6-r0", staleService)
-
-	h.reconcile()
-
-	assert.Equal(t, map[string]string{"CVE-2026-14456 libcrypto3 3.5.6-r0": statusClosed}, h.dd.statuses(100, staleService))
-	assert.Equal(t, map[string]string{
-		"CVE-2026-14456 libcrypto3 3.5.6-r0": statusActive,
-		"CVE-2026-45447 libcrypto3 3.5.6-r0": statusActive,
-	}, h.dd.statuses(100, goAppService), "the findings of the current service stay active")
-}
-
-func TestReconcile_RetriesStaleServiceCloseAfterFailure(t *testing.T) {
-	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
-	h.dd.healErr = &defectdojo.APIError{StatusCode: 500}
-
-	res := h.reconcile()
-
-	assert.Equal(t, resync, res.RequeueAfter)
-	require.Len(t, h.dd.reimports, 1)
-	require.Len(t, h.dd.healCalls, 1)
-
-	h.dd.healErr = nil
-	h.setReport(goApp(t))
-
-	h.reconcile()
-	assert.Len(t, h.dd.healCalls, 2)
-
-	h.setReport(goApp(t))
-
-	h.reconcile()
-	assert.Len(t, h.dd.healCalls, 2)
+	assert.Equal(t, goAppService, h.dd.reimports[0].Service, "the service is the one the parser builds from the labels")
 }
 
 func cronJob(name string, age time.Duration) *batchv1.Job {
@@ -1087,7 +1023,7 @@ func TestReconcile_CronJobRunsShareOneService(t *testing.T) {
 	labels := sentLabels(t, h.dd.reimports[0].Report)
 	assert.Equal(t, "CronJob", labels[trivy.LabelResourceKind])
 	assert.Equal(t, "nightly", labels[trivy.LabelResourceName])
-	assert.Equal(t, "krci-demo-dev/CronJob/nightly/app", h.dd.healCalls[0].service)
+	assert.Equal(t, "krci-demo-dev/CronJob/nightly/app", h.dd.reimports[0].Service)
 }
 
 func TestReconcile_NamespaceDeletionClosesItsOwnedTestsOnce(t *testing.T) {
@@ -1152,6 +1088,17 @@ func TestReconcile_ExcludeGlobsKeepOtherNamespaces(t *testing.T) {
 	assert.Len(t, h.dd.reimports, 1)
 }
 
+// appTagOf returns the value of the app tag, or "" when there is none.
+func appTagOf(tags []string) string {
+	for _, tag := range tags {
+		if value, ok := strings.CutPrefix(tag, trivy.TagKeyApp+":"); ok {
+			return value
+		}
+	}
+
+	return ""
+}
+
 func TestReconcile_ComponentTag(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1203,7 +1150,7 @@ func TestReconcile_ComponentTag(t *testing.T) {
 			labels: map[string]string{"app.kubernetes.io/instance": "inst,two"},
 			want:   "inst-two",
 		},
-		{name: "namespace name", want: "krci-demo-dev"},
+		{name: "no source gives no app tag"},
 		{
 			name:        "an application that is only a prefix falls through",
 			labels:      map[string]string{"app.kubernetes.io/part-of": "suite"},
@@ -1229,7 +1176,7 @@ func TestReconcile_ComponentTag(t *testing.T) {
 			h.reconcile()
 
 			require.Len(t, h.dd.reimports, 1)
-			assert.Contains(t, h.dd.reimports[0].Tags, "krci-component:"+tt.want)
+			assert.Equal(t, tt.want, appTagOf(h.dd.reimports[0].Tags))
 		})
 	}
 }
@@ -1300,13 +1247,11 @@ func TestReconcile_ComponentOfTopWorkload(t *testing.T) {
 			name:    "workload object is gone",
 			objects: nil,
 			report:  report("StatefulSet", "db"),
-			want:    "krci-demo-dev",
 		},
 		{
 			name:    "kind without a component source",
 			objects: nil,
 			report:  report("ReplicationController", "rc"),
-			want:    "krci-demo-dev",
 		},
 	}
 
@@ -1319,7 +1264,7 @@ func TestReconcile_ComponentOfTopWorkload(t *testing.T) {
 			h.reconcile()
 
 			require.Len(t, h.dd.reimports, 1)
-			assert.Contains(t, h.dd.reimports[0].Tags, "krci-component:"+tt.want)
+			assert.Equal(t, tt.want, appTagOf(h.dd.reimports[0].Tags))
 		})
 	}
 }
@@ -1814,20 +1759,12 @@ func TestReconcile_PrunesTheStateOfTests(t *testing.T) {
 	h.reconcile()
 
 	assert.Contains(t, h.reconciler.closed[appNS], 7)
-	assert.Contains(t, h.reconciler.healed[appNS], 100)
 
 	// DefectDojo no longer lists the closed test: its ID is forgotten.
 	h.dd.deleteTest(7)
 
 	h.reconcile()
 	assert.NotContains(t, h.reconciler.closed, appNS)
-	assert.Contains(t, h.reconciler.healed[appNS], 100, "the live test stays healed")
-
-	// The workload is gone: its test is closed and no longer live, so it is not healed any more.
-	h.deleteReport(goApp(t))
-
-	h.reconcile()
-	assert.NotContains(t, h.reconciler.healed, appNS)
 }
 
 func TestReportPredicate(t *testing.T) {

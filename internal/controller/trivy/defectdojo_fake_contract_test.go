@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -519,19 +520,71 @@ func TestFakeDefectDojo_PatchReplacesTheProductTags(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, apiErr.StatusCode)
 }
 
-func TestFakeDefectDojo_CloseFindingsOutsideService(t *testing.T) {
-	f := newFakeDefectDojo()
-	r := contractRequest(vulnReport(t, appLabels(), vulnA))
-	r.Service = "a"
-	id := reimport(t, f, r).TestID
+func TestFakeDefectDojo_ValidatesTagsLikeTheTagListSerializerField(t *testing.T) {
+	for name, tag := range map[string]string{
+		"space":        "a b:1",
+		"comma":        "a,b:1",
+		"single quote": "a'b:1",
+		"double quote": `a"b:1`,
+		"over 255":     "a:" + strings.Repeat("é", 254),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeDefectDojo()
+			id := reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA))).TestID
 
-	r.Service = "b"
-	reimport(t, f, r)
+			r := contractRequest(vulnReport(t, appLabels(), vulnA))
+			r.Tags = []string{"k:1", tag}
 
-	closed, err := f.CloseFindingsOutsideService(context.Background(), defectdojo.Test{ID: id}, "a")
+			var apiErr *defectdojo.APIError
 
-	require.NoError(t, err)
-	assert.Equal(t, 1, closed)
-	assert.Equal(t, map[string]string{cveA: statusActive}, f.statuses(id, "a"))
-	assert.Equal(t, map[string]string{cveA: statusClosed}, f.statuses(id, "b"))
+			_, err := f.Reimport(context.Background(), r)
+
+			require.ErrorAs(t, err, &apiErr)
+			assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+			assert.Contains(t, apiErr.Body, "tags")
+			assert.Equal(t, []string{"k8s-cluster:c"}, f.test(id).tags, "a rejected request changes nothing")
+		})
+	}
+
+	t.Run("a tag of 255 characters is stored lower case", func(t *testing.T) {
+		f := newFakeDefectDojo()
+		r := contractRequest(vulnReport(t, appLabels(), vulnA))
+		r.Tags = []string{"K8s-Cluster:" + strings.Repeat("É", 255-len("k8s-cluster:"))}
+
+		id := reimport(t, f, r).TestID
+
+		assert.Equal(t, []string{"k8s-cluster:" + strings.Repeat("é", 255-len("k8s-cluster:"))}, f.test(id).tags)
+	})
+}
+
+func TestFakeDefectDojo_RejectsValuesOverTheFieldLimits(t *testing.T) {
+	tests := map[string]struct {
+		set   func(*defectdojo.ReimportRequest, string)
+		limit int
+	}{
+		"service":      {set: func(r *defectdojo.ReimportRequest, v string) { r.Service = v }, limit: 200},
+		"version":      {set: func(r *defectdojo.ReimportRequest, v string) { r.Version = v }, limit: 100},
+		"test_title":   {set: func(r *defectdojo.ReimportRequest, v string) { r.TestTitle = v }, limit: 255},
+		"product_name": {set: func(r *defectdojo.ReimportRequest, v string) { r.Product = v }, limit: 255},
+	}
+
+	for field, tt := range tests {
+		t.Run(field, func(t *testing.T) {
+			f := newFakeDefectDojo()
+			r := contractRequest(vulnReport(t, appLabels(), vulnA))
+
+			tt.set(&r, strings.Repeat("é", tt.limit))
+			reimport(t, f, r)
+
+			tt.set(&r, strings.Repeat("é", tt.limit+1))
+
+			var apiErr *defectdojo.APIError
+
+			_, err := f.Reimport(context.Background(), r)
+
+			require.ErrorAs(t, err, &apiErr)
+			assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+			assert.Contains(t, apiErr.Body, field)
+		})
+	}
 }

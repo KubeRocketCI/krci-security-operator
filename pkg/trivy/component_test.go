@@ -73,7 +73,7 @@ func TestComponent(t *testing.T) {
 			want:        "release",
 		},
 		{name: "instance label", labels: map[string]string{labelInstance: "inst"}, want: "inst"},
-		{name: "namespace", want: "my-ns"},
+		{name: "no source gives no component"},
 		{
 			name:        "empty tracking-id application falls through",
 			labels:      map[string]string{labelPartOf: "suite"},
@@ -92,13 +92,14 @@ func TestComponent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, Component(tt.labels, tt.annotations, "my-ns", tt.prefixes))
+			assert.Equal(t, tt.want, Component(tt.labels, tt.annotations, tt.prefixes))
 		})
 	}
 }
 
 func TestTagSafe(t *testing.T) {
 	assert.Equal(t, "a-b-c-d", TagSafe("A b,C\td"))
+	assert.Equal(t, "a-b-c", TagSafe(`a'b"c`), "quotes are rejected by DefectDojo tags")
 	assert.Empty(t, TagSafe("  "))
 }
 
