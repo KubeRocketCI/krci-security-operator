@@ -10,8 +10,9 @@ The unit of work is a namespace. The operator reconciles a namespace when a `Vul
 
 1. **Skip** namespaces that match `excludeNamespaces`.
 2. **Import**: list the namespace's reports, resolve each to its stable workload (a ReplicaSet to its Deployment, a Job to its CronJob; a StatefulSet, DaemonSet or Pod is its own workload), and re-import only the reports whose UID or resourceVersion changed since the last import. The state is in memory, so a restart re-imports once. Imports into one test are serialized.
-3. **Close**, after each pass over an imported namespace, the owned tests tagged `krci-namespace:<ns>` that the pass did not import, of the report kinds it listed completely. That covers removed workloads. The findings of other services in a test are closed once per test. A namespace that is gone or excluded has all its owned tests closed, once.
-4. **Sweep**: at start and every 6 hours, find the namespaces that own owned tests although the namespace no longer exists or is excluded, and hand them to the controller. The sweeper closes nothing itself: the controller does, so all closing of a namespace is serialized with its imports.
+3. **Close**, after each pass over an imported namespace, the owned tests of the namespace product that the pass did not import, of the report kinds it listed completely. That covers removed workloads. The findings of other services in a test are closed once per test. A namespace that is gone or excluded has every active finding of all its owned tests closed, once per process. Closing mitigates the findings; the product and the tests stay, and a later reimport reactivates the findings. A close and a reimport of one test never run at the same time.
+4. **Product tags**: every pass over a namespace, imported, gone or excluded, reads its product and sets the missing or wrong tags (see [DefectDojo naming](#defectdojo-naming)). A failed update fails the pass after the closing, so the workqueue retries it.
+5. **Sweep**: at start and every 6 hours, list the namespace products of the cluster and hand to the controller the namespaces that no longer exist or are excluded and are not closed yet, and the namespaces whose product has wrong or missing tags. The sweeper writes nothing to DefectDojo: the controller closes the tests and sets the tags, so all writes of a namespace are serialized with its imports.
 
 ### Errors, requeues and API load
 
@@ -25,6 +26,7 @@ The unit of work is a namespace. The operator reconciles a namespace when a `Vul
 - An expired continue token (HTTP 410) starts the listing of the kind again, up to 3 times. The reports imported or rejected before are skipped as unchanged, and a report deleted in between no longer counts as live. After the third restart the pass fails and closes nothing; the retry skips the reports imported so far, so a large namespace converges over a few passes.
 - The credentials Secret is read at most once per minute. Report events that change no `resourceVersion` (informer resyncs) are dropped.
 - Report kinds are discovered at start. A CRD installed later needs an operator restart to be watched; its namespaces still catch up on the next resync.
+- Every pass over a namespace, also one over a gone or excluded namespace, reads its product by exact name: one product, with its tags. A sweep lists the namespace products of the cluster once.
 
 The manager serves `controller_runtime_reconcile_errors_total` and `krci_security_operator_rejected_reports_total` when `metrics.enabled` is true: plain HTTP on `metrics.port` (8080) of the pod. The chart creates no Service for them.
 
@@ -58,11 +60,17 @@ KubeRocketCI
         └── ExposedSecretReport deployment/api/api
 ```
 
-- Every test carries `krci-namespace:<ns>`, `krci-workload:<kind>.<name>`, `krci-container:<c>`, `krci-component:<component>` and `krci-cluster:<clusterName>`.
+- Every test carries `krci-namespace:<ns>`, `krci-workload:<kind>.<name>`, `krci-container:<c>`, `krci-component:<component>` and `krci-cluster:<clusterName>`. The operator does not read them.
+- Every namespace product carries the tags `k8s-cluster:<clusterName>` and `k8s-namespace:<namespace>`. The operator sets them when the product has them wrong or missing, on every pass over the namespace (a sweep wakes the namespaces that need it), and keeps the other tags of the product. An update replaces the tags of a product, so the full list is sent.
 - The same namespace name in two clusters gives two products, because the cluster name is part of the product name. The cluster name is required and must be unique per DefectDojo; two clusters with one name write into the same products.
 - Use one Product Type value for every operator that writes to the same DefectDojo. A reimport fails when the product already exists under another Product Type, so changing the value later leaves the existing products under the old one.
 - Products, engagements and tests are created on demand. Imports use `reimport-scan` with `close_old_findings`, `deduplication_on_engagement`, `environment=Development` and `push_to_jira=false`.
-- **Ownership.** The operator touches (closes) only tests that carry its `krci-cluster:<clusterName>` tag.
+- **Ownership.** An owned test is a test whose product name starts with `<clusterName>/` and whose scan type is `Trivy Operator Scan`. The operator closes only owned tests, so it never closes a test of another cluster, also when the namespace names are equal. A product whose name only contains `<clusterName>/` (`x-<clusterName>/<namespace>`), a codebase product of the CI pipeline and a test of another scan type are not owned. Tags are not used for ownership.
+- **Lookups.** The tests of a namespace are found through its product (the exact name `<clusterName>/<namespace>` under the Product Type, asked with the `name_exact` filter, which ignores case, so the operator compares the name again), the engagement `trivy-operator` of the product, and the tests of the engagement with the scan type `Trivy Operator Scan`. The products of the cluster are listed by Product Type and the name `<clusterName>/`; DefectDojo matches names by "contains", so the operator checks the prefix. Lists are read page by page. The ID of the Product Type is kept until a list of products under it comes back empty. A Product Type that DefectDojo does not list (not created yet, or not readable by the token) is logged at Info once per process; no product is looked up, and a gone or excluded namespace is not recorded as released, so the next pass looks again. A close mitigates the findings of the test with `active=true` and `is_mitigated=false`.
+- **Close cases.**
+  - The stable workload of a test is gone: the test is closed.
+  - The namespace is deleted, terminating or excluded: every owned test of its product is closed, once per process until the namespace is imported again.
+  - A test is imported: once per test and process, the active findings outside the service of the reimport are closed.
 - **Component tag.** It is derived from the top workload object (Deployment, StatefulSet, DaemonSet, CronJob, Job or Pod, read with a metadata `get`) and lower-cased into a tag-safe value: spaces and commas become `-`. The first source present wins:
   1. the app part of the annotation `argocd.argoproj.io/tracking-id` (the text before the first `:`, after the last `_`), with the configured `componentPrefixes` stripped;
   2. the label `argocd.argoproj.io/instance`;
@@ -95,7 +103,7 @@ The operator also reads `POD_NAMESPACE`, which the chart sets from the pod's nam
 
 | Permission | Used for |
 |---|---|
-| read products, engagements, tests and findings | lookups and the open findings of a test |
+| read product types, products, engagements, tests and findings | lookups and the active findings of a test |
 | import scans | reimport |
 | edit products | product tags |
 | edit findings | close |

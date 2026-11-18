@@ -242,12 +242,70 @@ func TestNamespaceTag(t *testing.T) {
 }
 
 func TestIsOwned(t *testing.T) {
-	test := func(tags ...string) defectdojo.Test { return defectdojo.Test{Tags: tags} }
+	test := func(product, scanType string) defectdojo.Test {
+		return defectdojo.Test{Product: product, ScanType: scanType}
+	}
 
-	assert.True(t, IsOwned(test("krci-cluster:c1"), "c1"))
-	assert.True(t, IsOwned(test("krci-cluster:c1", "krci-namespace:ns"), "c1"))
-	assert.False(t, IsOwned(test("krci-cluster:c2"), "c1"), "another cluster")
-	assert.False(t, IsOwned(test("krci-namespace:ns"), "c1"), "no cluster")
+	const trivyScan = defectdojo.ScanTypeTrivyOperator
+
+	assert.True(t, IsOwned(test("c1/ns", trivyScan), "c1"))
+	assert.False(t, IsOwned(test("c2/ns", trivyScan), "c1"), "another cluster")
+	assert.False(t, IsOwned(test("x-c1/ns", trivyScan), "c1"), "the product name contains the prefix but does not start with it")
+	assert.False(t, IsOwned(test("c1", trivyScan), "c1"), "a codebase product named like the cluster")
+	assert.False(t, IsOwned(test("c1/ns", "Trivy Scan"), "c1"), "another scan type")
+	assert.False(t, IsOwned(defectdojo.Test{ScanType: trivyScan}, "c1"), "no product")
+}
+
+func TestNamespaceOfProduct(t *testing.T) {
+	ns, ok := NamespaceOfProduct("c1", "c1/payments")
+	assert.True(t, ok)
+	assert.Equal(t, "payments", ns)
+
+	for _, name := range []string{"c1/", "c1", "c2/payments", "x-c1/payments", "c1/a/b", "payments"} {
+		_, ok = NamespaceOfProduct("c1", name)
+		assert.False(t, ok, name)
+	}
+}
+
+func TestWithProductTags(t *testing.T) {
+	tests := []struct {
+		name        string
+		have        []string
+		want        []string
+		wantChanged bool
+	}{
+		{
+			name:        "no tags",
+			want:        []string{"k8s-cluster:c1", "k8s-namespace:ns"},
+			wantChanged: true,
+		},
+		{
+			name: "both tags in any order",
+			have: []string{"k8s-namespace:ns", "k8s-cluster:c1"},
+			want: []string{"k8s-cluster:c1", "k8s-namespace:ns"},
+		},
+		{
+			name:        "other tags are kept",
+			have:        []string{"owner:team-a", "k8s-cluster:c1"},
+			want:        []string{"owner:team-a", "k8s-cluster:c1", "k8s-namespace:ns"},
+			wantChanged: true,
+		},
+		{
+			name:        "a wrong value is replaced, one tag per key",
+			have:        []string{"k8s-cluster:old", "k8s-cluster:c1", "k8s-namespace:other", "owner:team-a"},
+			want:        []string{"owner:team-a", "k8s-cluster:c1", "k8s-namespace:ns"},
+			wantChanged: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, changed := WithProductTags(tt.have, "c1", "ns")
+
+			assert.ElementsMatch(t, tt.want, got)
+			assert.Equal(t, tt.wantChanged, changed)
+		})
+	}
 }
 
 func TestPayload_DoesNotModifyTheReport(t *testing.T) {

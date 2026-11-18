@@ -11,9 +11,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-
-	"github.com/KubeRocketCI/krci-security-operator/pkg/defectdojo"
-	"github.com/KubeRocketCI/krci-security-operator/pkg/trivy"
 )
 
 const secretsTitle = "ExposedSecretReport deployment/test-go-app/test-go-app"
@@ -145,7 +142,8 @@ func TestReconcile_ExcludedNamespaceClosesItsOwnedTestsOnce(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, withReports(goAppObjects(), goApp(t)))
 			h.reconciler.config.ExcludeNamespaces = tc.patterns
-			h.dd.seedTests(ownedTest(1, goAppTitle), testIn(2, "other", appNS))
+			h.dd.seedTests(ownedTest(1, goAppTitle))
+			h.dd.seedNamespace("other", appNS, ownedTest(2, goAppTitle))
 
 			res := h.reconcile()
 
@@ -186,7 +184,6 @@ func TestReconcile_ReleasePrunesTheNamespaceAndImportingForgetsIt(t *testing.T) 
 
 	h.reconcile()
 	require.Contains(t, h.reconciler.imported, appNS)
-	require.Contains(t, h.reconciler.healed, appNS)
 
 	h.reconciler.config.ExcludeNamespaces = []string{appNS}
 
@@ -194,7 +191,6 @@ func TestReconcile_ReleasePrunesTheNamespaceAndImportingForgetsIt(t *testing.T) 
 	assert.True(t, h.reconciler.isReleased(appNS))
 	assert.NotContains(t, h.reconciler.imported, appNS)
 	assert.NotContains(t, h.reconciler.closed, appNS)
-	assert.NotContains(t, h.reconciler.healed, appNS)
 
 	h.reconciler.config.ExcludeNamespaces = nil
 
@@ -205,16 +201,17 @@ func TestReconcile_ReleasePrunesTheNamespaceAndImportingForgetsIt(t *testing.T) 
 func TestRelease_OnlyOwnedTests(t *testing.T) {
 	h := newHarness(t, goAppObjects())
 
-	foreign := testIn(5, "other", appNS)
-	noCluster := defectdojo.Test{ID: 7, Tags: []string{trivy.NamespaceTag(appNS)}}
+	title := "VulnerabilityReport deployment/a/a"
 
-	h.dd.seedTests(foreign, noCluster)
+	h.dd.seedNamespace("other", appNS, ownedTest(5, title))
+	h.dd.seedNamespace("x-"+cluster, appNS, ownedTest(6, title))
+	h.dd.seedScanTest(goAppContext, "Trivy Scan", ownedTest(7, title))
 
 	require.NoError(t, h.reconciler.release(context.Background(), h.dd, appNS))
-	assert.Empty(t, h.dd.closed)
+	assert.Empty(t, h.dd.closed, "no test of another cluster, another prefix or another scan type is closed")
 
 	h.reconciler.markImportable(appNS)
-	h.dd.seedTests(testIn(10, cluster, appNS))
+	h.dd.seedTests(ownedTest(10, title))
 
 	require.NoError(t, h.reconciler.release(context.Background(), h.dd, appNS))
 	assert.Equal(t, []int{10}, h.dd.closed)

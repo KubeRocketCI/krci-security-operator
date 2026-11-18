@@ -3,6 +3,7 @@ package trivy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math/rand/v2"
@@ -46,10 +47,20 @@ const (
 // DefectDojo is the part of the DefectDojo client the controller uses.
 type DefectDojo interface {
 	Reimport(ctx context.Context, r defectdojo.ReimportRequest) (defectdojo.ReimportResult, error)
-	GetTest(ctx context.Context, testID int) (defectdojo.Test, error)
-	ListTests(ctx context.Context, tag string) ([]defectdojo.Test, error)
-	CloseTest(ctx context.Context, testID int) error
-	CloseFindingsOutsideService(ctx context.Context, testID int, service string) (int, error)
+	// ListProducts returns the products of the product type whose name contains name, or
+	// defectdojo.ErrProductTypeNotFound.
+	ListProducts(ctx context.Context, productType, name string) ([]defectdojo.Product, error)
+	// ListProductsByName returns the products of the product type whose name equals name, ignoring case, or
+	// defectdojo.ErrProductTypeNotFound.
+	ListProductsByName(ctx context.Context, productType, name string) ([]defectdojo.Product, error)
+	// ListTests returns the Trivy Operator Scan tests of the engagement of the product.
+	ListTests(ctx context.Context, product defectdojo.Product, engagement string) ([]defectdojo.Test, error)
+	// CloseTest mitigates the active findings of the test and keeps the test.
+	CloseTest(ctx context.Context, test defectdojo.Test) error
+	// CloseFindingsOutsideService mitigates the active findings of the test whose service is not the given one.
+	CloseFindingsOutsideService(ctx context.Context, test defectdojo.Test, service string) (int, error)
+	// SetProductTags replaces the tags of the product.
+	SetProductTags(ctx context.Context, productID int, tags []string) error
 }
 
 // Connector returns a DefectDojo client for the given credentials.
@@ -122,6 +133,9 @@ type Reconciler struct {
 	rejectedVersions map[string]map[importKey]reportVersion
 	// released holds the namespaces whose owned tests were closed because the namespace is gone or excluded.
 	released map[string]struct{}
+
+	// productTypeLogged guards the one Info log of a Product Type that DefectDojo does not list.
+	productTypeLogged sync.Once
 
 	credMu       sync.Mutex
 	creds        credentials
@@ -335,9 +349,10 @@ func (p *pass) forget(kind string) {
 	delete(p.unattributed, kind)
 }
 
-// syncNamespace imports the reports of an imported namespace page by page and closes the tests of workloads
-// that are gone. Tests are closed only after every report was imported: a failed import hides which tests
-// are still alive. The tests of a report kind the pass could not list stay as they are.
+// syncNamespace imports the reports of an imported namespace page by page, closes the tests of workloads
+// that are gone and makes sure the namespace product has its tags. Tests are closed only after every report was
+// imported: a failed import hides which tests are still alive. The tests of a report kind the pass could not list
+// stay as they are.
 func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target trivy.Target) error {
 	p := &pass{
 		target:         target,
@@ -363,7 +378,20 @@ func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target tr
 
 	r.keepImports(target.Namespace, p)
 
-	return r.closeStaleTests(ctx, dd, target, p)
+	product, found, err := r.namespaceProduct(ctx, dd, target.Namespace)
+	if err != nil && !r.productTypeMissing(ctx, err) {
+		return err
+	}
+
+	if !found {
+		r.pruneTests(target.Namespace, nil, nil)
+
+		return nil
+	}
+
+	closeErr := r.closeStaleTests(ctx, dd, target, p, product)
+
+	return errors.Join(closeErr, r.setProductTags(ctx, dd, target.Namespace, product))
 }
 
 // importPage resolves and imports the reports of one page.
@@ -510,9 +538,47 @@ func (r *Reconciler) importReport(
 		return importedReport{}, fmt.Errorf("defectdojo did not return a test for report %s", report.GetName())
 	}
 
-	r.closeStaleServices(ctx, dd, namespace, res.TestID, trivy.Service(report, workload))
+	r.closeStaleServices(ctx, dd, namespace, imp, res.TestID, trivy.Service(report, workload))
 
 	return importedReport{uid: report.GetUID(), resourceVersion: report.GetResourceVersion(), testID: res.TestID}, nil
+}
+
+// closeStaleServices closes, once per test and process, the findings written under another service:
+// reports imported before their labels named the stable workload left one set of findings per ReplicaSet.
+// The test is the one the reimport of imp wrote into, in the namespace product of this cluster.
+// A failure is retried after the next import.
+func (r *Reconciler) closeStaleServices(
+	ctx context.Context,
+	dd DefectDojo,
+	namespace string,
+	imp trivy.Import,
+	testID int,
+	service string,
+) {
+	if r.isHealed(namespace, testID) {
+		return
+	}
+
+	test := defectdojo.Test{
+		ID:         testID,
+		Title:      imp.TestTitle,
+		ScanType:   defectdojo.ScanTypeTrivyOperator,
+		Product:    imp.Product,
+		Engagement: imp.Engagement,
+	}
+
+	closed, err := dd.CloseFindingsOutsideService(ctx, test, service)
+	if err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "Could not close findings of a stale service", "test", testID)
+
+		return
+	}
+
+	r.markHealed(namespace, testID)
+
+	if closed > 0 {
+		ctrl.LoggerFrom(ctx).Info("Closed findings of a stale service", "test", testID, "findings", closed)
+	}
 }
 
 // component returns the component tag value of a workload: it reads the labels and annotations of the top
@@ -546,46 +612,6 @@ func (r *Reconciler) component(
 	known[workload] = component
 
 	return component, nil
-}
-
-// closeStaleServices closes, once per test and process, the findings written under another service:
-// reports imported before their labels named the stable workload left one set of findings per ReplicaSet.
-// Only a test of this operator is touched.
-// A failure is retried after the next import.
-func (r *Reconciler) closeStaleServices(
-	ctx context.Context,
-	dd DefectDojo,
-	namespace string,
-	testID int,
-	service string,
-) {
-	if r.isHealed(namespace, testID) {
-		return
-	}
-
-	test, err := dd.GetTest(ctx, testID)
-	if err != nil {
-		ctrl.LoggerFrom(ctx).Error(err, "Could not read the test of stale services", "test", testID)
-
-		return
-	}
-
-	if !r.ownsTest(ctx, test) {
-		return
-	}
-
-	closed, err := dd.CloseFindingsOutsideService(ctx, testID, service)
-	if err != nil {
-		ctrl.LoggerFrom(ctx).Error(err, "Could not close findings of a stale service", "test", testID)
-
-		return
-	}
-
-	r.markHealed(namespace, testID)
-
-	if closed > 0 {
-		ctrl.LoggerFrom(ctx).Info("Closed findings of a stale service", "test", testID, "findings", closed)
-	}
 }
 
 // importReports imports every page of reports of the configured kinds in the namespace; only one page is held at
@@ -805,13 +831,13 @@ func (r *Reconciler) markImportable(namespace string) {
 	delete(r.released, namespace)
 }
 
-// pruneReleased forgets the released namespaces that own no test any more.
-func (r *Reconciler) pruneReleased(withTests map[string]struct{}) {
+// pruneReleased forgets the released namespaces that have no product any more.
+func (r *Reconciler) pruneReleased(withProduct map[string]struct{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	for namespace := range r.released {
-		if _, ok := withTests[namespace]; !ok {
+		if _, ok := withProduct[namespace]; !ok {
 			delete(r.released, namespace)
 		}
 	}

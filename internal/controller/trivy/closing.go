@@ -18,19 +18,78 @@ import (
 // sweepInterval is the period of the check for tests of namespaces that are gone or excluded.
 const sweepInterval = 6 * time.Hour
 
-// closeStaleTests closes the owned tests of the namespace that no longer reflect a running workload container.
+// namespaceProduct returns the namespace product of the cluster, found by its exact name. found is false while
+// no import has created it. DefectDojo matches the name without regard to case, so the name is compared here.
+func (r *Reconciler) namespaceProduct(
+	ctx context.Context,
+	dd DefectDojo,
+	namespace string,
+) (product defectdojo.Product, found bool, err error) {
+	name := trivy.ProductName(r.config.ClusterName, namespace)
+
+	products, err := dd.ListProductsByName(ctx, r.config.ProductType, name)
+	if err != nil {
+		return defectdojo.Product{}, false,
+			fmt.Errorf("failed to list DefectDojo products of namespace %s: %w", namespace, err)
+	}
+
+	for _, p := range products {
+		if p.Name == name {
+			return p, true, nil
+		}
+	}
+
+	return defectdojo.Product{}, false, nil
+}
+
+// productTypeMissing reports whether err says that DefectDojo does not list the configured Product Type: it does
+// not exist yet, or the token cannot read it. It logs that at Info once per process.
+func (r *Reconciler) productTypeMissing(ctx context.Context, err error) bool {
+	if !errors.Is(err, defectdojo.ErrProductTypeNotFound) {
+		return false
+	}
+
+	r.productTypeLogged.Do(func() {
+		ctrl.LoggerFrom(ctx).Info("Could not find the Product Type in DefectDojo, no product is looked up until it exists",
+			"productType", r.config.ProductType)
+	})
+
+	return true
+}
+
+// productTests returns the tests of the Trivy engagement of the namespace product.
+func (r *Reconciler) productTests(
+	ctx context.Context,
+	dd DefectDojo,
+	product defectdojo.Product,
+) ([]defectdojo.Test, error) {
+	tests, err := dd.ListTests(ctx, product, trivy.EngagementTrivyOperator)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list DefectDojo tests of product %s: %w", product.Name, err)
+	}
+
+	return tests, nil
+}
+
+// closeStaleTests closes the owned tests of the namespace product that no longer reflect a running workload container.
 // That covers removed workloads.
 // A test whose Deployment has only superseded reports so far (a rollout is in progress), a test whose report
 // was rejected, and a test of a report kind the pass could not list stay open.
-func (r *Reconciler) closeStaleTests(ctx context.Context, dd DefectDojo, target trivy.Target, p *pass) error {
+func (r *Reconciler) closeStaleTests(
+	ctx context.Context,
+	dd DefectDojo,
+	target trivy.Target,
+	p *pass,
+	product defectdojo.Product,
+) error {
 	live := make(map[int]struct{}, len(p.current))
 	for _, entry := range p.current {
 		live[entry.testID] = struct{}{}
 	}
 
-	tests, err := dd.ListTests(ctx, trivy.NamespaceTag(target.Namespace))
+	tests, err := r.productTests(ctx, dd, product)
 	if err != nil {
-		return fmt.Errorf("failed to list DefectDojo tests of namespace %s: %w", target.Namespace, err)
+		return err
 	}
 
 	listed := make(map[int]struct{}, len(tests))
@@ -38,7 +97,7 @@ func (r *Reconciler) closeStaleTests(ctx context.Context, dd DefectDojo, target 
 	for _, test := range tests {
 		listed[test.ID] = struct{}{}
 
-		if !trivy.IsOwned(test, r.config.ClusterName) || !test.HasTag(trivy.NamespaceTag(target.Namespace)) {
+		if !r.ownsTest(ctx, test) {
 			continue
 		}
 
@@ -63,19 +122,51 @@ func (r *Reconciler) closeStaleTests(ctx context.Context, dd DefectDojo, target 
 }
 
 // release closes every owned test of a namespace that is gone or excluded, once per process
-// until the namespace is imported again.
+// until the namespace is imported again, and makes sure its product has its tags. The product and the tests stay.
 func (r *Reconciler) release(ctx context.Context, dd DefectDojo, namespace string) error {
-	if r.isReleased(namespace) {
+	product, found, err := r.namespaceProduct(ctx, dd, namespace)
+	if r.productTypeMissing(ctx, err) {
+		// The lookup cannot tell whether the namespace has tests: the next pass or sweep looks again.
 		return nil
 	}
 
-	tests, err := dd.ListTests(ctx, trivy.NamespaceTag(namespace))
 	if err != nil {
-		return fmt.Errorf("failed to list DefectDojo tests of namespace %s: %w", namespace, err)
+		return err
+	}
+
+	if !found {
+		if !r.isReleased(namespace) {
+			r.markReleased(namespace)
+		}
+
+		return nil
+	}
+
+	if !r.isReleased(namespace) {
+		if err = r.closeOwnedTests(ctx, dd, namespace, product); err != nil {
+			return err
+		}
+
+		r.markReleased(namespace)
+	}
+
+	return r.setProductTags(ctx, dd, namespace, product)
+}
+
+// closeOwnedTests closes every owned test of the namespace product.
+func (r *Reconciler) closeOwnedTests(
+	ctx context.Context,
+	dd DefectDojo,
+	namespace string,
+	product defectdojo.Product,
+) error {
+	tests, err := r.productTests(ctx, dd, product)
+	if err != nil {
+		return err
 	}
 
 	for _, test := range tests {
-		if !test.HasTag(trivy.NamespaceTag(namespace)) || !r.ownsTest(ctx, test) {
+		if !r.ownsTest(ctx, test) {
 			continue
 		}
 
@@ -83,8 +174,6 @@ func (r *Reconciler) release(ctx context.Context, dd DefectDojo, namespace strin
 			return err
 		}
 	}
-
-	r.markReleased(namespace)
 
 	return nil
 }
@@ -95,7 +184,7 @@ func (r *Reconciler) closeTest(ctx context.Context, dd DefectDojo, namespace str
 		return nil
 	}
 
-	if err := dd.CloseTest(ctx, test.ID); err != nil {
+	if err := dd.CloseTest(ctx, test); err != nil {
 		return fmt.Errorf("failed to close DefectDojo test %d: %w", test.ID, err)
 	}
 
@@ -106,15 +195,38 @@ func (r *Reconciler) closeTest(ctx context.Context, dd DefectDojo, namespace str
 	return nil
 }
 
-// ownsTest reports whether the operator of this cluster wrote the test; every other test stays untouched.
+// ownsTest reports whether the operator of this cluster owns the test; every other test stays untouched.
 func (r *Reconciler) ownsTest(ctx context.Context, test defectdojo.Test) bool {
 	if trivy.IsOwned(test, r.config.ClusterName) {
 		return true
 	}
 
-	ctrl.LoggerFrom(ctx).V(1).Info("Test is not owned by this operator, skipping", "test", test.ID, "title", test.Title)
+	ctrl.LoggerFrom(ctx).V(1).Info("Skipped a test of another owner", "test", test.ID, "title", test.Title,
+		"product", test.Product, "scanType", test.ScanType)
 
 	return false
+}
+
+// setProductTags makes sure the namespace product has its two product tags and keeps its other tags. The product
+// comes from a lookup of the same pass. PATCH replaces the tags of a product, so the full list is sent.
+func (r *Reconciler) setProductTags(
+	ctx context.Context,
+	dd DefectDojo,
+	namespace string,
+	product defectdojo.Product,
+) error {
+	tags, changed := trivy.WithProductTags(product.Tags, r.config.ClusterName, namespace)
+	if !changed {
+		return nil
+	}
+
+	if err := dd.SetProductTags(ctx, product.ID, tags); err != nil {
+		return fmt.Errorf("failed to set the tags of DefectDojo product %s: %w", product.Name, err)
+	}
+
+	ctrl.LoggerFrom(ctx).Info("Set the tags of a product", "product", product.Name)
+
+	return nil
 }
 
 // runSweeper looks for namespaces whose tests need closing at start and then periodically,
@@ -138,9 +250,10 @@ func (r *Reconciler) runSweeper(ctx context.Context) error {
 	}
 }
 
-// sweep finds the namespaces that own open tests although the namespace no longer exists or is excluded,
-// and hands them to the controller, which closes the tests. The sweeper closes nothing itself, so the
-// closing of a namespace is serialized with its imports by the workqueue.
+// sweep hands the namespaces that need the controller to it, and writes nothing to DefectDojo: the closing of a
+// namespace and the repair of its product tags are serialized with its imports by the workqueue.
+// A namespace needs it when it has a product although it no longer exists or is excluded and was not released yet,
+// or when its product has wrong or missing product tags.
 // A failure for one namespace does not stop the others; the errors are joined.
 func (r *Reconciler) sweep(ctx context.Context) error {
 	dd, available, err := r.defectDojo(ctx)
@@ -152,60 +265,77 @@ func (r *Reconciler) sweep(ctx context.Context) error {
 		return nil
 	}
 
-	tests, err := dd.ListTests(ctx, trivy.ClusterTag(r.config.ClusterName))
-	if err != nil {
-		return fmt.Errorf("failed to list DefectDojo tests: %w", err)
+	products, err := dd.ListProducts(ctx, r.config.ProductType, r.config.ClusterName+"/")
+	if r.productTypeMissing(ctx, err) {
+		return nil
 	}
 
-	candidates, withTest := r.sweepCandidates(tests)
+	if err != nil {
+		return fmt.Errorf("failed to list DefectDojo products: %w", err)
+	}
+
+	candidates, withProduct := r.sweepCandidates(products)
 
 	var errs []error
 
-	for _, namespace := range candidates {
-		if r.isReleased(namespace) {
-			continue
-		}
-
-		importable, nsErr := r.isImportable(ctx, namespace)
+	for _, candidate := range candidates {
+		importable, nsErr := r.isImportable(ctx, candidate.namespace)
 		if nsErr != nil {
 			errs = append(errs, nsErr)
 
 			continue
 		}
 
-		if importable {
+		if importable && !candidate.tagsWrong {
 			continue
 		}
 
-		if wakeErr := r.wakeNamespace(ctx, namespace); wakeErr != nil {
+		if !importable && !candidate.tagsWrong && r.isReleased(candidate.namespace) {
+			continue
+		}
+
+		if wakeErr := r.wakeNamespace(ctx, candidate.namespace); wakeErr != nil {
 			return errors.Join(append(errs, wakeErr)...)
 		}
 	}
 
-	r.pruneReleased(withTest)
+	r.pruneReleased(withProduct)
 
 	return errors.Join(errs...)
 }
 
-// sweepCandidates returns, in the order of the tests and once each, the namespaces that still have an owned test,
-// as a list and as a set.
-func (r *Reconciler) sweepCandidates(tests []defectdojo.Test) (candidates []string, withTest map[string]struct{}) {
-	withTest = map[string]struct{}{}
+// sweepCandidate is a namespace that has a namespace product of the cluster.
+type sweepCandidate struct {
+	namespace string
+	// tagsWrong is true when the product lacks a product tag or holds one with a wrong value.
+	tagsWrong bool
+}
 
-	for _, test := range tests {
-		namespace, ok := test.TagValue(trivy.TagPrefixNamespace)
-		if !ok || !trivy.IsOwned(test, r.config.ClusterName) {
+// sweepCandidates returns, in the order of the products and once each, the namespaces of the namespace products
+// of the cluster, as a list and as a set. The name filter of the list is a "contains" match, so a product whose
+// name does not start with the cluster prefix is dropped here.
+func (r *Reconciler) sweepCandidates(products []defectdojo.Product) ([]sweepCandidate, map[string]struct{}) {
+	var candidates []sweepCandidate
+
+	withProduct := map[string]struct{}{}
+
+	for _, product := range products {
+		namespace, ok := trivy.NamespaceOfProduct(r.config.ClusterName, product.Name)
+		if !ok {
 			continue
 		}
 
-		if _, seen := withTest[namespace]; !seen {
-			candidates = append(candidates, namespace)
+		if _, seen := withProduct[namespace]; seen {
+			continue
 		}
 
-		withTest[namespace] = struct{}{}
+		withProduct[namespace] = struct{}{}
+
+		_, tagsWrong := trivy.WithProductTags(product.Tags, r.config.ClusterName, namespace)
+		candidates = append(candidates, sweepCandidate{namespace: namespace, tagsWrong: tagsWrong})
 	}
 
-	return candidates, withTest
+	return candidates, withProduct
 }
 
 // wakeNamespace asks the controller to reconcile the namespace.
