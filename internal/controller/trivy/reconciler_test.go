@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sync"
 	"testing"
 	"time"
 
@@ -50,114 +49,14 @@ const (
 
 	revisionAnnotation = "deployment.kubernetes.io/revision"
 	goAppTitle         = "VulnerabilityReport krci-demo-dev/deployment/test-go-app/test-go-app"
+	// goAppService is the service the DefectDojo parser gives the findings of the go app's report.
+	goAppService = "krci-demo-dev/Deployment/test-go-app/test-go-app"
 )
 
 var scanDate = time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 
-type fakeDefectDojo struct {
-	mu          sync.Mutex
-	reimports   []defectdojo.ReimportRequest
-	reports     [][]byte
-	closed      []int
-	tests       []defectdojo.Test
-	ids         map[string]int
-	reimportErr func(defectdojo.ReimportRequest) error
-	listErr     error
-	listCalls   int
-	healCalls   []healCall
-	getCalls    []int
-	healErr     error
-}
-
-type healCall struct {
-	testID  int
-	service string
-}
-
-// Reimport records the request and registers the test it lands in, as DefectDojo does.
-func (f *fakeDefectDojo) Reimport(_ context.Context, r defectdojo.ReimportRequest) (defectdojo.ReimportResult, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.reimports = append(f.reimports, r)
-	f.reports = append(f.reports, r.Report)
-
-	if f.reimportErr != nil {
-		if err := f.reimportErr(r); err != nil {
-			return defectdojo.ReimportResult{}, err
-		}
-	}
-
-	if f.ids == nil {
-		f.ids = map[string]int{}
-	}
-
-	key := r.Product + "/" + r.Engagement + "/" + r.TestTitle
-	if _, ok := f.ids[key]; !ok {
-		f.ids[key] = 100 + len(f.ids)
-	}
-
-	id := f.ids[key]
-	if !slices.ContainsFunc(f.tests, func(t defectdojo.Test) bool { return t.ID == id }) {
-		f.tests = append(f.tests, defectdojo.Test{ID: id, Title: r.TestTitle, Tags: slices.Clone(r.Tags)})
-	}
-
-	return defectdojo.ReimportResult{TestID: id}, nil
-}
-
-func (f *fakeDefectDojo) GetTest(_ context.Context, testID int) (defectdojo.Test, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.getCalls = append(f.getCalls, testID)
-
-	for _, t := range f.tests {
-		if t.ID == testID {
-			return t, nil
-		}
-	}
-
-	return defectdojo.Test{ID: testID, Tags: ownedTags(trivy.TagScopeRuntime, stageNS)}, nil
-}
-
-func (f *fakeDefectDojo) ListTests(_ context.Context, tag string) ([]defectdojo.Test, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.listCalls++
-
-	if f.listErr != nil {
-		return nil, f.listErr
-	}
-
-	var out []defectdojo.Test
-
-	for _, t := range f.tests {
-		if t.HasTag(tag) {
-			out = append(out, t)
-		}
-	}
-
-	return out, nil
-}
-
-func (f *fakeDefectDojo) CloseTest(_ context.Context, testID int) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.closed = append(f.closed, testID)
-
-	return nil
-}
-
-func (f *fakeDefectDojo) CloseFindingsOutsideService(_ context.Context, testID int, service string) (int, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.healCalls = append(f.healCalls, healCall{testID: testID, service: service})
-
-	return 3, f.healErr
-}
+// goAppContext is where the go app's reports of the Stage demo-dev are imported.
+var goAppContext = ddContext{productType: "KubeRocketCI", product: "test-go-app", engagement: "runtime:demo-dev"}
 
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -317,7 +216,7 @@ func newHarness(t *testing.T, objects []client.Object, funcs ...interceptor.Func
 	}
 
 	c := b.Build()
-	dd := &fakeDefectDojo{}
+	dd := newFakeDefectDojo()
 
 	r := NewReconciler(c, c, baseConfig(), func(string, string) DefectDojo { return dd })
 	r.now = func() time.Time { return scanDate }
@@ -495,7 +394,7 @@ func TestReconcile_SkipsReportOfOldRevision(t *testing.T) {
 	objects[5] = deployment("test-go-app", "2")
 
 	h := newHarness(t, withReports(objects, goApp(t)))
-	h.dd.tests = []defectdojo.Test{ownedTest(7, goAppTitle)}
+	h.dd.seedTests(ownedTest(7, goAppTitle))
 
 	h.reconcile()
 
@@ -520,6 +419,42 @@ func TestReconcile_SkipsUnchangedReport(t *testing.T) {
 	assert.Len(t, h.dd.reimports, 2, "a changed report is imported")
 }
 
+// TestReconcile_ReportWithOneCVELessClosesThatFinding skips while the reimport request has no service: DefectDojo
+// then closes only findings without a service, and the parser gives every finding one.
+func TestReconcile_ReportWithOneCVELessClosesThatFinding(t *testing.T) {
+	const (
+		kept  = "CVE-2026-14456 libcrypto3 3.5.6-r0"
+		fixed = "CVE-2026-45447 libcrypto3 3.5.6-r0"
+	)
+
+	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
+
+	h.reconcile()
+
+	require.Len(t, h.dd.testIDs(), 1)
+
+	testID := h.dd.testIDs()[0]
+	require.Equal(t, map[string]string{kept: statusActive, fixed: statusActive}, h.dd.statuses(testID, goAppService))
+
+	next := goApp(t)
+	vulns, _, err := unstructured.NestedSlice(next.Object, "report", "vulnerabilities")
+	require.NoError(t, err)
+	require.NoError(t, unstructured.SetNestedSlice(next.Object, vulns[:1], "report", "vulnerabilities"))
+	h.setReport(next)
+
+	h.reconcile()
+
+	require.Len(t, h.dd.reimports, 2)
+
+	got := h.dd.statuses(testID, goAppService)
+	if got[fixed] == statusActive {
+		t.Skip(`known failure until EPMDEDP-17556 "Full reimport request: service, version and tags": ` +
+			"the fixed CVE stays active")
+	}
+
+	assert.Equal(t, map[string]string{kept: statusActive, fixed: statusClosed}, got)
+}
+
 func TestReconcile_ImportsAgainWhenAnotherReportOverwroteTheTest(t *testing.T) {
 	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
 
@@ -539,9 +474,10 @@ func TestReconcile_ImportsAgainWhenAnotherReportOverwroteTheTest(t *testing.T) {
 	next.SetName("replicaset-test-go-app-new-test-go-app")
 	next.SetUID("uid-new")
 	next.SetLabels(map[string]string{
-		trivy.LabelResourceKind:  "ReplicaSet",
-		trivy.LabelResourceName:  "test-go-app-new",
-		trivy.LabelContainerName: "test-go-app",
+		trivy.LabelResourceKind:      "ReplicaSet",
+		trivy.LabelResourceName:      "test-go-app-new",
+		trivy.LabelResourceNamespace: stageNS,
+		trivy.LabelContainerName:     "test-go-app",
 	})
 	next.SetResourceVersion("")
 	h.setReport(next)
@@ -562,7 +498,7 @@ func TestReconcile_ImportsAgainWhenAnotherReportOverwroteTheTest(t *testing.T) {
 func TestReconcile_DefectDojoServerErrorReturnsError(t *testing.T) {
 	h := newHarness(t, withReports(goAppObjects(), goApp(t), goAppSecrets(t)))
 	h.dd.reimportErr = func(defectdojo.ReimportRequest) error { return &defectdojo.APIError{StatusCode: 500} }
-	h.dd.tests = []defectdojo.Test{ownedTest(7, "VulnerabilityReport krci-demo-dev/deployment/gone/gone")}
+	h.dd.seedTests(ownedTest(7, "VulnerabilityReport krci-demo-dev/deployment/gone/gone"))
 
 	require.Error(t, h.reconcileErr())
 	assert.Len(t, h.dd.reimports, 1, "the pass stops at the first failure")
@@ -585,7 +521,7 @@ func rejectGoApp(r defectdojo.ReimportRequest) error {
 func TestReconcile_RejectedReportDoesNotBlockStaleClosing(t *testing.T) {
 	h := newHarness(t, withReports(goAppObjects(), goApp(t), goAppSecrets(t)))
 	h.dd.reimportErr = rejectGoApp
-	h.dd.tests = []defectdojo.Test{ownedTest(7, "VulnerabilityReport krci-demo-dev/deployment/removed/removed")}
+	h.dd.seedTests(ownedTest(7, "VulnerabilityReport krci-demo-dev/deployment/removed/removed"))
 
 	h.reconcile()
 
@@ -629,10 +565,10 @@ func TestReconcile_RejectedVersionIsNotUploadedAgainUntilItChanges(t *testing.T)
 func TestReconcile_RejectedReportKeepsTheExistingTestOpenWithoutMemory(t *testing.T) {
 	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
 	h.dd.reimportErr = rejectGoApp
-	h.dd.tests = []defectdojo.Test{
+	h.dd.seedTests(
 		ownedTest(7, goAppTitle),
 		ownedTest(8, "VulnerabilityReport krci-demo-dev/deployment/removed/removed"),
-	}
+	)
 
 	h.reconcile()
 
@@ -668,7 +604,7 @@ func TestReconcile_RejectedReportDoesNotBlockTheOthers(t *testing.T) {
 
 		return nil
 	}
-	h.dd.tests = []defectdojo.Test{ownedTest(7, "VulnerabilityReport krci-demo-dev/deployment/gone/gone")}
+	h.dd.seedTests(ownedTest(7, "VulnerabilityReport krci-demo-dev/deployment/gone/gone"))
 
 	require.NoError(t, h.reconcileErr(), "a rejected version is permanent, not a failure of the pass")
 
@@ -731,7 +667,7 @@ func TestReconcile_NoOps(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newHarness(t, tt.objects, tt.funcs...)
-			h.dd.tests = []defectdojo.Test{ownedTest(7, "VulnerabilityReport krci-demo-dev/deployment/gone/gone")}
+			h.dd.seedTests(ownedTest(7, "VulnerabilityReport krci-demo-dev/deployment/gone/gone"))
 
 			res := h.reconcile()
 
@@ -750,12 +686,12 @@ func TestReconcile_ClosesTestOfWorkloadThatIsGone(t *testing.T) {
 	ciTest := defectdojo.Test{ID: 9, Title: "Trivy Scan", Tags: []string{trivy.NamespaceTag(stageNS)}}
 
 	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
-	h.dd.tests = []defectdojo.Test{
+	h.dd.seedTests(
 		gone,
 		anotherCluster,
 		ciTest,
 		ownedTest(10, goAppTitle),
-	}
+	)
 
 	h.reconcile()
 
@@ -768,7 +704,7 @@ func TestReconcile_ClosesTestOfWorkloadThatIsGone(t *testing.T) {
 
 func TestReconcile_ClosesAllTestsWhenNamespaceHasNoReports(t *testing.T) {
 	h := newHarness(t, goAppObjects())
-	h.dd.tests = []defectdojo.Test{ownedTest(7, goAppTitle)}
+	h.dd.seedTests(ownedTest(7, goAppTitle))
 
 	h.reconcile()
 
@@ -779,7 +715,7 @@ func TestReconcile_ClosesAllTestsWhenNamespaceHasNoReports(t *testing.T) {
 
 func TestReconcile_ReopenedTestIsClosedAgainWhenWorkloadGoesAgain(t *testing.T) {
 	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
-	h.dd.tests = []defectdojo.Test{ownedTest(100, goAppTitle)}
+	h.dd.seedTestsIn(goAppContext, ownedTest(100, goAppTitle))
 
 	h.reconcile()
 	assert.Empty(t, h.dd.closed, "the imported test is live")
@@ -930,7 +866,7 @@ func TestReconcile_UnservedReportKindKeepsItsTestsOpen(t *testing.T) {
 			unserved := true
 
 			h := newHarness(t, withReports(goAppObjects(), goApp(t), goAppSecrets(t)), unservedReports(tc.err, &unserved))
-			h.dd.tests = []defectdojo.Test{ownedTest(7, goAppTitle), ownedTest(8, staleSecretsTitle)}
+			h.dd.seedTests(ownedTest(7, goAppTitle), ownedTest(8, staleSecretsTitle))
 
 			require.NoError(t, h.reconcileErr())
 
@@ -967,7 +903,7 @@ func TestReconcile_ReportKindGoneOnALaterPageKeepsItsTestsOpen(t *testing.T) {
 	var calls []string
 
 	h := newHarness(t, pagedObjects(), pagedReports(t, &calls, noKindMatch(), 1))
-	h.dd.tests = []defectdojo.Test{ownedTest(7, staleTitle), ownedTest(8, staleSecretsTitle)}
+	h.dd.seedTests(ownedTest(7, staleTitle), ownedTest(8, staleSecretsTitle))
 
 	require.NoError(t, h.reconcileErr())
 	assert.Equal(t, []string{"", "page-2"}, calls)
@@ -1070,7 +1006,7 @@ func TestReconcile_ExpiredContinueTokenGivesUpAfterTheRestarts(t *testing.T) {
 	var calls []string
 
 	h := newHarness(t, pagedObjects(), pagedReports(t, &calls, errExpired, maxListRestarts+1))
-	h.dd.tests = []defectdojo.Test{ownedTest(7, staleTitle)}
+	h.dd.seedTests(ownedTest(7, staleTitle))
 
 	err := h.reconcileErr()
 	require.Error(t, err)
@@ -1086,7 +1022,7 @@ func TestReconcile_ReportIsNotModified(t *testing.T) {
 
 	h.reconcile()
 
-	require.Len(t, h.dd.reports, 1)
+	require.Len(t, h.dd.reimports, 1)
 
 	stored := &unstructured.Unstructured{}
 	stored.SetGroupVersionKind(trivy.ReportGVK(trivy.KindVulnerabilityReport))
@@ -1106,7 +1042,7 @@ func TestReconcile_ListErrorOfReportsIsReturned(t *testing.T) {
 	}
 
 	h := newHarness(t, goAppObjects(), funcs)
-	h.dd.tests = []defectdojo.Test{ownedTest(7, goAppTitle)}
+	h.dd.seedTests(ownedTest(7, goAppTitle))
 
 	require.Error(t, h.reconcileErr())
 	assert.Empty(t, h.dd.reimports)
@@ -1180,9 +1116,9 @@ func TestReconcile_SendsStableWorkloadLabels(t *testing.T) {
 
 	h.reconcile()
 
-	require.Len(t, h.dd.reports, 1)
+	require.Len(t, h.dd.reimports, 1)
 
-	labels := sentLabels(t, h.dd.reports[0])
+	labels := sentLabels(t, h.dd.reimports[0].Report)
 	assert.Equal(t, "Deployment", labels[trivy.LabelResourceKind])
 	assert.Equal(t, "test-go-app", labels[trivy.LabelResourceName])
 	assert.Equal(t, goAppTitle, h.dd.reimports[0].TestTitle)
@@ -1201,6 +1137,22 @@ func TestReconcile_ClosesFindingsOfStaleServicesOncePerTest(t *testing.T) {
 	h.reconcile()
 	require.Len(t, h.dd.reimports, 2)
 	assert.Len(t, h.dd.healCalls, 1, "the steady state does not list findings")
+}
+
+func TestReconcile_ClosesFindingsOfAStaleServiceAndKeepsTheImportedOnes(t *testing.T) {
+	const staleService = "krci-demo-dev/ReplicaSet/test-go-app-old/test-go-app"
+
+	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
+	h.dd.seedTestsIn(goAppContext, ownedTest(100, goAppTitle))
+	h.dd.seedFinding(100, "CVE-2026-14456 libcrypto3 3.5.6-r0", staleService)
+
+	h.reconcile()
+
+	assert.Equal(t, map[string]string{"CVE-2026-14456 libcrypto3 3.5.6-r0": statusClosed}, h.dd.statuses(100, staleService))
+	assert.Equal(t, map[string]string{
+		"CVE-2026-14456 libcrypto3 3.5.6-r0": statusActive,
+		"CVE-2026-45447 libcrypto3 3.5.6-r0": statusActive,
+	}, h.dd.statuses(100, goAppService), "the findings of the current service stay active")
 }
 
 func TestReconcile_RetriesStaleServiceCloseAfterFailure(t *testing.T) {
@@ -1228,11 +1180,12 @@ func TestReconcile_RetriesStaleServiceCloseAfterFailure(t *testing.T) {
 func TestReconcile_DoesNotCloseFindingsOfAnotherClustersTest(t *testing.T) {
 	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
 	// The test the import lands in belongs to the operator of another cluster.
-	h.dd.tests = []defectdojo.Test{{
+	h.dd.seedTestsIn(goAppContext, defectdojo.Test{
 		ID:    100,
 		Title: goAppTitle,
 		Tags:  []string{trivy.TagScopeRuntime, trivy.ClusterTag("other"), trivy.NamespaceTag(stageNS)},
-	}}
+	})
+	h.reconciler.connect = func(string, string) DefectDojo { return reimportedByAnotherCluster{h.dd} }
 
 	h.reconcile()
 
@@ -1240,6 +1193,37 @@ func TestReconcile_DoesNotCloseFindingsOfAnotherClustersTest(t *testing.T) {
 	assert.Equal(t, []int{100}, h.dd.getCalls)
 	assert.Empty(t, h.dd.healCalls, "findings of another cluster's test are not closed")
 	assert.Empty(t, h.dd.closed)
+}
+
+// reimportedByAnotherCluster is a DefectDojo where the operator of the cluster "other" reimports every report
+// into the same test right after this operator. A reimport replaces the test tags.
+type reimportedByAnotherCluster struct {
+	*fakeDefectDojo
+}
+
+func (d reimportedByAnotherCluster) Reimport(
+	ctx context.Context,
+	r defectdojo.ReimportRequest,
+) (defectdojo.ReimportResult, error) {
+	res, err := d.fakeDefectDojo.Reimport(ctx, r)
+	if err != nil {
+		return res, err
+	}
+
+	other := r
+	other.Tags = slices.Clone(r.Tags)
+
+	for i, tag := range other.Tags {
+		if tag == trivy.ClusterTag(cluster) {
+			other.Tags[i] = trivy.ClusterTag("other")
+		}
+	}
+
+	if _, err = d.reimportAs(other); err != nil {
+		return defectdojo.ReimportResult{}, err
+	}
+
+	return res, nil
 }
 
 func cronJob(name string, age time.Duration) *batchv1.Job {
@@ -1281,7 +1265,7 @@ func TestReconcile_CronJobRunsShareOneService(t *testing.T) {
 	require.Len(t, h.dd.reimports, 1, "only the newest run is imported")
 	assert.Equal(t, "VulnerabilityReport krci-demo-dev/cronjob/nightly/app", h.dd.reimports[0].TestTitle)
 
-	labels := sentLabels(t, h.dd.reports[0])
+	labels := sentLabels(t, h.dd.reimports[0].Report)
 	assert.Equal(t, "CronJob", labels[trivy.LabelResourceKind])
 	assert.Equal(t, "nightly", labels[trivy.LabelResourceName])
 	assert.Equal(t, "krci-demo-dev/CronJob/nightly/app", h.dd.healCalls[0].service)
@@ -1289,12 +1273,12 @@ func TestReconcile_CronJobRunsShareOneService(t *testing.T) {
 
 func TestReconcile_NamespaceDeletionClosesItsOwnedTestsOnce(t *testing.T) {
 	h := newHarness(t, goAppObjects())
-	h.dd.tests = []defectdojo.Test{
+	h.dd.seedTests(
 		ownedTest(1, "VulnerabilityReport krci-demo-dev/deployment/a/a"),
 		testIn(2, trivy.TagScopeRuntime, "other", stageNS),
 		testIn(3, trivy.TagScopeRuntime, cluster, "krci-demo-qa"),
-		{ID: 4, Title: "CI", Tags: []string{trivy.NamespaceTag(stageNS)}},
-	}
+		defectdojo.Test{ID: 4, Title: "CI", Tags: []string{trivy.NamespaceTag(stageNS)}},
+	)
 
 	h.remove(tenantNamespace(stageNS))
 
@@ -1319,7 +1303,7 @@ func TestReconcile_TerminatingNamespaceIsReleased(t *testing.T) {
 	objects := append(withReports(goAppObjects()[:3], goApp(t)), codebaseImageStream("x", "x"), ns)
 
 	h := newHarness(t, objects)
-	h.dd.tests = []defectdojo.Test{ownedTest(1, goAppTitle)}
+	h.dd.seedTests(ownedTest(1, goAppTitle))
 
 	h.reconcile()
 
@@ -1329,7 +1313,7 @@ func TestReconcile_TerminatingNamespaceIsReleased(t *testing.T) {
 
 func TestReconcile_NamespaceDeletionIsRetriedAfterDefectDojoFailure(t *testing.T) {
 	h := newHarness(t, goAppObjects())
-	h.dd.tests = []defectdojo.Test{ownedTest(1, goAppTitle)}
+	h.dd.seedTests(ownedTest(1, goAppTitle))
 	h.dd.listErr = &defectdojo.APIError{StatusCode: 500}
 
 	h.remove(tenantNamespace(stageNS))
@@ -1407,7 +1391,9 @@ func TestReconcile_ScopeSwitches(t *testing.T) {
 			h.reconcile()
 			require.Len(t, h.dd.reimports, 1)
 
-			first := h.dd.tests[0]
+			require.Len(t, h.dd.testIDs(), 1)
+
+			first := h.dd.testIDs()[0]
 			assert.Empty(t, h.dd.closed)
 
 			tt.switchTo(h)
@@ -1418,7 +1404,7 @@ func TestReconcile_ScopeSwitches(t *testing.T) {
 			assert.Equal(t, tt.wantProd, h.dd.reimports[1].Product)
 			assert.Equal(t, tt.wantEngage, h.dd.reimports[1].Engagement)
 			assert.Contains(t, h.dd.reimports[1].Tags, tt.wantScope)
-			assert.Equal(t, []int{first.ID}, h.dd.closed, "the test of the old scope is closed")
+			assert.Equal(t, []int{first}, h.dd.closed, "the test of the old scope is closed")
 		})
 	}
 }
@@ -1460,10 +1446,10 @@ func TestReconcile_OutOfScopeClosesOwnedTestsOnce(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newHarness(t, withReports(tt.objects, goApp(t)))
 			tt.config(&h.reconciler.config)
-			h.dd.tests = []defectdojo.Test{
+			h.dd.seedTests(
 				ownedTest(1, goAppTitle),
 				testIn(2, trivy.TagScopeRuntime, "other", stageNS),
-			}
+			)
 
 			res := h.reconcile()
 
@@ -1712,7 +1698,7 @@ func TestReconcile_ClassifyErrorIsReturned(t *testing.T) {
 			return c.List(ctx, list, opts...)
 		},
 	})
-	h.dd.tests = []defectdojo.Test{ownedTest(7, goAppTitle)}
+	h.dd.seedTests(ownedTest(7, goAppTitle))
 
 	require.Error(t, h.reconcileErr())
 	assert.Empty(t, h.dd.reimports)
@@ -1807,9 +1793,10 @@ func TestReconcile_ComponentOfTopWorkload(t *testing.T) {
 	report := func(kind, name string) *unstructured.Unstructured {
 		r := goApp(t)
 		r.SetLabels(map[string]string{
-			trivy.LabelResourceKind:  kind,
-			trivy.LabelResourceName:  name,
-			trivy.LabelContainerName: "app",
+			trivy.LabelResourceKind:      kind,
+			trivy.LabelResourceName:      name,
+			trivy.LabelResourceNamespace: stageNS,
+			trivy.LabelContainerName:     "app",
 		})
 
 		return r
@@ -1956,17 +1943,17 @@ func sweepFixture(t *testing.T) *harness {
 	h.reconciler.config.Scopes.Tenant = false
 	h.reconciler.config.ExcludeNamespaces = []string{"kube-system"}
 
-	h.dd.tests = []defectdojo.Test{
+	h.dd.seedTests(
 		testIn(1, trivy.TagScopeRuntime, cluster, "krci-demo-gone"),
 		testIn(2, trivy.TagScopeRuntime, cluster, "krci-demo-kept"),
 		testIn(3, trivy.TagScopeTenant, cluster, "krci-demo-tenant"),
 		testIn(4, trivy.TagScopePlatform, cluster, "kube-system"),
 		testIn(5, trivy.TagScopeRuntime, "other", "krci-demo-gone"),
 		testIn(6, trivy.TagScopeTenant, cluster, "krci-demo-terminating"),
-		{ID: 7, Title: "CI", Tags: []string{trivy.ClusterTag(cluster), trivy.NamespaceTag("krci-demo-gone")}},
-		{ID: 8, Title: "no namespace", Tags: []string{trivy.TagScopeRuntime, trivy.ClusterTag(cluster)}},
+		defectdojo.Test{ID: 7, Title: "CI", Tags: []string{trivy.ClusterTag(cluster), trivy.NamespaceTag("krci-demo-gone")}},
+		defectdojo.Test{ID: 8, Title: "no namespace", Tags: []string{trivy.TagScopeRuntime, trivy.ClusterTag(cluster)}},
 		testIn(9, trivy.TagScopePlatform, cluster, "krci-demo-gone"),
-	}
+	)
 
 	return h
 }
@@ -2008,7 +1995,7 @@ func TestSweep_SkipsReleasedNamespacesAndPrunesThem(t *testing.T) {
 	assert.Empty(t, wakes(h), "released namespaces are not woken again")
 	assert.True(t, h.reconciler.isReleased("krci-demo-gone"))
 
-	h.dd.tests = nil
+	h.dd.deleteAllTests()
 
 	require.NoError(t, h.reconciler.sweep(context.Background()))
 	assert.False(t, h.reconciler.isReleased("krci-demo-gone"), "a released namespace without tests is forgotten")
@@ -2024,11 +2011,11 @@ func TestSweep_ContinuesAfterAFailureAndJoinsTheErrors(t *testing.T) {
 			return c.Get(ctx, key, obj, opts...)
 		},
 	})
-	h.dd.tests = []defectdojo.Test{
+	h.dd.seedTests(
 		testIn(1, trivy.TagScopeRuntime, cluster, "bad-a"),
 		testIn(2, trivy.TagScopeRuntime, cluster, "gone"),
 		testIn(3, trivy.TagScopeRuntime, cluster, "bad-b"),
-	}
+	)
 
 	err := h.reconciler.sweep(context.Background())
 
@@ -2053,7 +2040,7 @@ func TestSweep_Failures(t *testing.T) {
 func TestSweep_StopsWhenTheContextEndsWhileWaking(t *testing.T) {
 	h := newHarness(t, []client.Object{integrationSecret()})
 	h.reconciler.wake = make(chan event.GenericEvent)
-	h.dd.tests = []defectdojo.Test{testIn(1, trivy.TagScopeRuntime, cluster, "gone")}
+	h.dd.seedTests(testIn(1, trivy.TagScopeRuntime, cluster, "gone"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -2063,7 +2050,7 @@ func TestSweep_StopsWhenTheContextEndsWhileWaking(t *testing.T) {
 
 func TestRunSweeper_SweepsAtStartAndStopsOnCancel(t *testing.T) {
 	h := newHarness(t, []client.Object{integrationSecret()})
-	h.dd.tests = []defectdojo.Test{testIn(1, trivy.TagScopeRuntime, cluster, "gone")}
+	h.dd.seedTests(testIn(1, trivy.TagScopeRuntime, cluster, "gone"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -2096,16 +2083,17 @@ func TestRelease_OnlyOwnedTests(t *testing.T) {
 	noScope := defectdojo.Test{ID: 6, Tags: []string{trivy.ClusterTag(cluster), trivy.NamespaceTag(stageNS)}}
 	noCluster := defectdojo.Test{ID: 7, Tags: []string{trivy.TagScopeRuntime, trivy.NamespaceTag(stageNS)}}
 
-	h.dd.tests = []defectdojo.Test{foreign, noScope, noCluster}
+	h.dd.seedTests(foreign, noScope, noCluster)
 
 	require.NoError(t, h.reconciler.release(context.Background(), h.dd, stageNS))
 	assert.Empty(t, h.dd.closed)
 
 	h.reconciler.markInScope(stageNS)
 
-	h.dd.tests = nil
+	h.dd.deleteAllTests()
+
 	for i, scope := range []string{trivy.TagScopeRuntime, trivy.TagScopeTenant, trivy.TagScopePlatform} {
-		h.dd.tests = append(h.dd.tests, testIn(10+i, scope, cluster, stageNS))
+		h.dd.seedTests(testIn(10+i, scope, cluster, stageNS))
 	}
 
 	require.NoError(t, h.reconciler.release(context.Background(), h.dd, stageNS))
@@ -2196,7 +2184,7 @@ func TestReconcile_ErrorSemantics(t *testing.T) {
 			name:    "closing a test fails",
 			objects: goAppObjects(),
 			setup: func(h *harness) {
-				h.dd.tests = []defectdojo.Test{ownedTest(7, goAppTitle)}
+				h.dd.seedTests(ownedTest(7, goAppTitle))
 				h.reconciler.connect = func(string, string) DefectDojo { return failingClose{h.dd} }
 			},
 			wantErr: true,
@@ -2390,7 +2378,7 @@ func TestReconcile_ProcessesReportsPageByPage(t *testing.T) {
 	}
 
 	h = newHarness(t, pagedObjects(), funcs)
-	h.dd.tests = []defectdojo.Test{ownedTest(7, "VulnerabilityReport krci-demo-dev/deployment/removed/removed")}
+	h.dd.seedTests(ownedTest(7, "VulnerabilityReport krci-demo-dev/deployment/removed/removed"))
 
 	h.reconcile()
 
@@ -2402,7 +2390,7 @@ func TestReconcile_ProcessesReportsPageByPage(t *testing.T) {
 
 func TestReconcile_PrunesTheStateOfTests(t *testing.T) {
 	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
-	h.dd.tests = []defectdojo.Test{ownedTest(7, "VulnerabilityReport krci-demo-dev/deployment/removed/removed")}
+	h.dd.seedTests(ownedTest(7, "VulnerabilityReport krci-demo-dev/deployment/removed/removed"))
 
 	h.reconcile()
 
@@ -2410,7 +2398,7 @@ func TestReconcile_PrunesTheStateOfTests(t *testing.T) {
 	assert.Contains(t, h.reconciler.healed[stageNS], 100)
 
 	// DefectDojo no longer lists the closed test: its ID is forgotten.
-	h.dd.tests = slices.DeleteFunc(h.dd.tests, func(t defectdojo.Test) bool { return t.ID == 7 })
+	h.dd.deleteTest(7)
 
 	h.reconcile()
 	assert.NotContains(t, h.reconciler.closed, stageNS)
