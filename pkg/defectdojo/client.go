@@ -125,6 +125,8 @@ type Test struct {
 	Tags []string `json:"tags"`
 	// BuildID is the build_id the last reimport stored; empty when none was sent.
 	BuildID string `json:"build_id"`
+	// Version is the version the last reimport stored; empty when none was sent. Closing resends it.
+	Version string `json:"version"`
 	// LastEngagement is true for a test of the last engagement with the listed name, the one a reimport writes into.
 	LastEngagement bool `json:"-"`
 	// Product and Engagement are the names of the product and the engagement the test was listed through.
@@ -257,13 +259,24 @@ func (c *Client) Reimport(ctx context.Context, r ReimportRequest) (ReimportResul
 	return res, nil
 }
 
-// CloseTest mitigates every active finding of the test and keeps the test. A test without active findings
-// is closed. It takes the lock of the re-import of the same test.
-// A test with a build_id has it cleared first, so the report of a closed test is imported again.
-func (c *Client) CloseTest(ctx context.Context, test Test) error {
+// CloseTest mitigates the findings of the test and keeps the test. It takes the lock of the reimport of
+// the same test.
+//
+// It clears the build_id of the test first when the listed test has one, so the report of a closed test is imported
+// again and a close that is cut short leaves no marker.
+// Then it reimports an empty report into the test by ID with the service of one active finding; DefectDojo
+// mitigates the findings of that service in one request. The answer holds the number of findings of the test that
+// are still active; they belong to another service, whose reimport follows, up to maxCloseReimports services. The
+// active findings that remain are closed one by one.
+// A reimport that fails is replaced by closing the active findings one by one, unless the failure is not about this
+// request (see reimportFallsBack): then it is returned.
+//
+// The reimport also mitigates the findings of its service that are not active (false positive, out of scope,
+// duplicate, inactive) and removes their risk acceptances. Closing one by one touches only active findings.
+func (c *Client) CloseTest(ctx context.Context, test Test) (CloseResult, error) {
 	// The lock key is the product, engagement and title that Reimport uses.
 	if test.Product == "" || test.Engagement == "" || test.Title == "" {
-		return fmt.Errorf("%w: test %d", ErrTestNotNamed, test.ID)
+		return CloseResult{}, fmt.Errorf("%w: test %d", ErrTestNotNamed, test.ID)
 	}
 
 	unlock := c.testLocks.lock(testLockKey(c.contextKey(test.Product, test.Engagement), test.Title))
@@ -271,23 +284,161 @@ func (c *Client) CloseTest(ctx context.Context, test Test) error {
 
 	if test.BuildID != "" {
 		if err := c.SetBuildID(ctx, test.ID, ""); err != nil {
-			return err
+			return CloseResult{}, err
 		}
 	}
 
-	// The list is read completely before anything is closed so closing does not shift the pages.
-	ids, err := c.activeFindingIDs(ctx, test.ID)
+	res, done, err := c.closeByReimports(ctx, test)
+	if err != nil || done {
+		return res, err
+	}
+
+	res.OneByOne, err = c.closeActiveFindings(ctx, test.ID)
+
+	return res, err
+}
+
+// CloseResult tells how CloseTest closed a test.
+type CloseResult struct {
+	// Reimports is the number of empty reimports DefectDojo accepted, one per service.
+	Reimports int
+	// OneByOne is the number of findings closed one at a time.
+	OneByOne int
+	// Fallback is the failure of the reimport that the one-by-one close replaced, an *APIError for an answer of
+	// DefectDojo; nil when the reimport was not abandoned.
+	Fallback error
+}
+
+// maxCloseReimports bounds the empty reimports of one close, one per service of the test.
+const maxCloseReimports = 5
+
+// closeByReimports reimports an empty report once per service of the active findings, at most maxCloseReimports
+// times. done is false when the caller has to close the rest one by one: the reimport failed in a way that falls
+// back, a service closed nothing, or the bound is reached.
+func (c *Client) closeByReimports(ctx context.Context, test Test) (res CloseResult, done bool, err error) {
+	tried := map[string]struct{}{}
+
+	for len(tried) < maxCloseReimports {
+		service, found, err := c.firstActiveService(ctx, test.ID)
+		if err != nil || !found {
+			return res, err == nil, err
+		}
+
+		// A service that is first again after its reimport has not been closed.
+		if _, again := tried[service]; again {
+			return res, false, nil
+		}
+
+		tried[service] = struct{}{}
+
+		stillActive, err := c.reimportEmpty(ctx, test, service)
+
+		switch {
+		case err != nil && reimportFallsBack(ctx, err):
+			res.Fallback = err
+
+			return res, false, nil
+		case err != nil:
+			return res, false, err
+		}
+
+		res.Reimports++
+
+		if stillActive == 0 {
+			return res, true, nil
+		}
+	}
+
+	return res, false, nil
+}
+
+// reimportFallsBack reports whether the failure of the empty reimport is replaced by closing one by one. It is,
+// unless the context is done or the answer is not about this request: 401 and 403 (the token), 408 and 429 (time and
+// throttling), 409 (another import into the test is in progress). A transport error, a client timeout and a 5xx leave
+// the result unknown; closing one by one is idempotent and may run beside a reimport that still runs.
+func reimportFallsBack(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return true
+	}
+
+	switch apiErr.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout, http.StatusConflict,
+		http.StatusTooManyRequests:
+		return false
+	}
+
+	return true
+}
+
+// activeUnknown is the number of active findings of a test when DefectDojo did not say.
+const activeUnknown = -1
+
+// reimportEmpty reimports a report without results into the test and returns the number of findings of the test
+// that are active afterwards, or activeUnknown. It does not take the lock of the test.
+func (c *Client) reimportEmpty(ctx context.Context, test Test, service string) (stillActive int, err error) {
+	fields := [][2]string{
+		{"test", strconv.Itoa(test.ID)},
+		{"scan_type", ScanTypeTrivyOperator},
+		{"close_old_findings", boolTrue},
+	}
+
+	// DefectDojo stores an omitted service as none and an omitted version as empty; a blank value is refused.
+	if service != "" {
+		fields = append(fields, [2]string{"service", service})
+	}
+
+	if test.Version != "" {
+		fields = append(fields, [2]string{"version", test.Version})
+	}
+
+	body, err := c.postReportForm(ctx, fields, []byte(emptyReport))
 	if err != nil {
-		return err
+		return activeUnknown, err
+	}
+
+	var answer struct {
+		Statistics struct {
+			After struct {
+				Total struct {
+					Active *int `json:"active"`
+				} `json:"total"`
+			} `json:"after"`
+		} `json:"statistics"`
+	}
+
+	if json.Unmarshal(body, &answer) != nil || answer.Statistics.After.Total.Active == nil {
+		return activeUnknown, nil
+	}
+
+	return *answer.Statistics.After.Total.Active, nil
+}
+
+// emptyReport is a Trivy Operator report without results. The parser of DefectDojo 3.5.200 reads the labels and the
+// result list, not the kind, so one report serves both report kinds.
+const emptyReport = `{"metadata":{"labels":{}},"report":{"vulnerabilities":[]}}`
+
+// closeActiveFindings mitigates every active finding of the test one by one and returns how many it closed.
+func (c *Client) closeActiveFindings(ctx context.Context, testID int) (closed int, err error) {
+	// The list is read completely before anything is closed so closing does not shift the pages.
+	ids, err := c.activeFindingIDs(ctx, testID)
+	if err != nil {
+		return 0, err
 	}
 
 	for _, id := range ids {
 		if err := c.closeFinding(ctx, id); err != nil {
-			return err
+			return closed, err
 		}
+
+		closed++
 	}
 
-	return nil
+	return closed, nil
 }
 
 // testLockKey names one test by its context and title, the way a re-import finds it.
@@ -295,17 +446,25 @@ func testLockKey(contextKey, title string) string { return contextKey + "\x00" +
 
 // findingRef holds the fields of a finding that closing needs.
 type findingRef struct {
-	ID int `json:"id"`
+	ID      int    `json:"id"`
+	Service string `json:"service"`
+}
+
+// activeFindingFilter selects the findings of the test that are active and not mitigated.
+func activeFindingFilter(testID int) url.Values {
+	filter := url.Values{}
+	filter.Set("test", strconv.Itoa(testID))
+	filter.Set("active", boolTrue)
+	filter.Set("is_mitigated", "false")
+
+	return filter
 }
 
 // activeFindingIDs returns the IDs of the findings of the test that are active and not mitigated.
 func (c *Client) activeFindingIDs(ctx context.Context, testID int) ([]int, error) {
 	var ids []int
 
-	filter := url.Values{}
-	filter.Set("test", strconv.Itoa(testID))
-	filter.Set("active", boolTrue)
-	filter.Set("is_mitigated", "false")
+	filter := activeFindingFilter(testID)
 
 	err := listAll(ctx, c, findingsPath, "findings", filter, func(f findingRef) { ids = append(ids, f.ID) })
 	if err != nil {
@@ -313,6 +472,35 @@ func (c *Client) activeFindingIDs(ctx context.Context, testID int) ([]int, error
 	}
 
 	return ids, nil
+}
+
+// firstActiveService returns the service of one finding of the test that is active and not mitigated, "" when it
+// has none. found is false when the test has no such finding. The service is read from the data because the title
+// of the test does not give it back: the kind differs in case, and both are shortened.
+func (c *Client) firstActiveService(ctx context.Context, testID int) (service string, found bool, err error) {
+	q := activeFindingFilter(testID)
+	q.Set("limit", "1")
+
+	body, err := c.do(ctx, retryAll, defaultRequestTimeout, func(ctx context.Context) (*http.Request, error) {
+		return c.newRequest(ctx, http.MethodGet, findingsPath+"?"+q.Encode(), nil, "")
+	})
+	if err != nil {
+		return "", false, err
+	}
+
+	var page struct {
+		Results []findingRef `json:"results"`
+	}
+
+	if err = json.Unmarshal(body, &page); err != nil {
+		return "", false, fmt.Errorf("failed to decode findings list: %w", err)
+	}
+
+	if len(page.Results) == 0 {
+		return "", false, nil
+	}
+
+	return page.Results[0].Service, true, nil
 }
 
 // listAll reads every page of the DefectDojo list endpoint with the filter and calls each with every result.
@@ -544,15 +732,7 @@ func (c *Client) SetProductTags(ctx context.Context, productID int, tags []strin
 }
 
 func (c *Client) postReport(ctx context.Context, fields [][2]string, report []byte) (ReimportResult, error) {
-	body, contentType, err := multipartBody(fields, report)
-	if err != nil {
-		return ReimportResult{}, err
-	}
-
-	// Only 429 is retried: a retry after a timeout, a transport error or a 5xx can overlap the first upload.
-	resp, err := c.do(ctx, retryThrottled, reimportTimeout, func(ctx context.Context) (*http.Request, error) {
-		return c.newRequest(ctx, http.MethodPost, reimportPath, bytes.NewReader(body), contentType)
-	})
+	resp, err := c.postReportForm(ctx, fields, report)
 	if err != nil {
 		return ReimportResult{}, err
 	}
@@ -563,6 +743,19 @@ func (c *Client) postReport(ctx context.Context, fields [][2]string, report []by
 	}
 
 	return res, nil
+}
+
+// postReportForm sends the reimport request and returns the body of the answer.
+func (c *Client) postReportForm(ctx context.Context, fields [][2]string, report []byte) ([]byte, error) {
+	body, contentType, err := multipartBody(fields, report)
+	if err != nil {
+		return nil, err
+	}
+
+	// Only 429 is retried: a retry after a timeout, a transport error or a 5xx can overlap the first upload.
+	return c.do(ctx, retryThrottled, reimportTimeout, func(ctx context.Context) (*http.Request, error) {
+		return c.newRequest(ctx, http.MethodPost, reimportPath, bytes.NewReader(body), contentType)
+	})
 }
 
 func (c *Client) newRequest(

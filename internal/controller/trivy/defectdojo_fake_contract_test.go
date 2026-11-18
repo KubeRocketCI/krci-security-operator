@@ -3,6 +3,7 @@ package trivy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -400,7 +401,7 @@ func TestFakeDefectDojo_ReactivatesAClosedFindingTheReportHoldsAgain(t *testing.
 	id := reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA, vulnB))).TestID
 	before := f.findingsIn(id)
 
-	require.NoError(t, f.CloseTest(context.Background(), defectdojo.Test{ID: id}))
+	closeTest(t, f, defectdojo.Test{ID: id})
 	assert.Equal(t, map[string]string{cveA: statusClosed, cveB: statusClosed}, f.statuses(id, contractService))
 
 	reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA)))
@@ -483,6 +484,16 @@ func TestFakeDefectDojo_WritesTheVersionAndReplacesTheTags(t *testing.T) {
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode, "a version of only whitespace is blank")
 	assert.Equal(t, "2.0", f.test(id).version)
+}
+
+// closeTest closes the test through the fake and returns how it was closed.
+func closeTest(t *testing.T, f *fakeDefectDojo, test defectdojo.Test) defectdojo.CloseResult {
+	t.Helper()
+
+	res, err := f.CloseTest(context.Background(), test)
+	require.NoError(t, err)
+
+	return res
 }
 
 // listedTest returns the test as the list of its engagement returns it.
@@ -574,7 +585,7 @@ func TestFakeDefectDojo_CloseClearsTheBuildID(t *testing.T) {
 	r.BuildID = "uid:100:0123456789ab"
 	id := reimport(t, f, r).TestID
 
-	require.NoError(t, f.CloseTest(context.Background(), listedTest(t, f, id)))
+	closeTest(t, f, listedTest(t, f, id))
 
 	assert.Empty(t, f.test(id).buildID)
 	assert.Equal(t, 1, f.buildIDUpdates)
@@ -585,7 +596,7 @@ func TestFakeDefectDojo_CloseOfATestListedWithoutBuildIDUpdatesNothing(t *testin
 	f := newFakeDefectDojo()
 	id := reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA))).TestID
 
-	require.NoError(t, f.CloseTest(context.Background(), listedTest(t, f, id)))
+	closeTest(t, f, listedTest(t, f, id))
 
 	assert.Zero(t, f.buildIDUpdates)
 }
@@ -651,6 +662,147 @@ func TestFakeDefectDojo_NewTestWithABuildIDOverTheColumnLimitIsNotCreated(t *tes
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
 	assert.Empty(t, f.testIDs())
+}
+
+// findingTitled returns the finding of the test with the title.
+func findingTitled(t *testing.T, f *fakeDefectDojo, testID int, title string) ddFinding {
+	t.Helper()
+
+	for _, found := range f.findingsIn(testID) {
+		if found.title == title {
+			return found
+		}
+	}
+
+	require.Failf(t, "finding not found", "title %q", title)
+
+	return ddFinding{}
+}
+
+// TestFakeContract_Close* pin the close model of fakeDefectDojo.CloseTest, which the controller tests use in place of
+// defectdojo.Client.CloseTest. They run the fake, not the client; a change to the client does not fail them.
+// The request sequence of the client, and the answers it relies on, are tested against an HTTP server in
+// pkg/defectdojo (TestClient_CloseTest_*).
+
+func TestFakeContract_CloseMitigatesTheTriagedFindingsOfTheServiceToo(t *testing.T) {
+	cveC := "CVE-2026-0003 libssl 3.0.0"
+	cveD := "CVE-2026-0004 libssl 3.0.0"
+	vulnC := vuln{id: "CVE-2026-0003", severity: "MEDIUM", fixed: "3.0.3"}
+	vulnD := vuln{id: "CVE-2026-0004", severity: "LOW", fixed: "3.0.4"}
+
+	f := newFakeDefectDojo()
+	id := reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA, vulnB, vulnC, vulnD))).TestID
+	findings := f.findingsIn(id)
+
+	f.triage(findings[1].id, statusFalsePositive)
+	f.triage(findings[2].id, statusRiskAccepted)
+	f.triage(findings[3].id, statusOutOfScope)
+
+	closeTest(t, f, listedTest(t, f, id))
+
+	for _, title := range []string{cveA, cveB, cveC, cveD} {
+		assert.True(t, findingTitled(t, f, id, title).isMitigated, "mitigated: %s", title)
+		assert.False(t, findingTitled(t, f, id, title).active, "inactive: %s", title)
+	}
+
+	assert.True(t, findingTitled(t, f, id, cveB).falsePositive, "a false positive stays one")
+	assert.True(t, findingTitled(t, f, id, cveD).outOfScope, "an out of scope finding stays one")
+	assert.False(t, findingTitled(t, f, id, cveC).riskAccepted, "the risk acceptance is removed")
+	assert.Equal(t, statusClosed, findingTitled(t, f, id, cveC).status())
+}
+
+func TestFakeContract_CloseOfATestWithoutActiveFindingsChangesNoFinding(t *testing.T) {
+	f := newFakeDefectDojo()
+	r := contractRequest(vulnReport(t, appLabels(), vulnA, vulnB))
+	r.BuildID = "uid:100:0123456789ab"
+	id := reimport(t, f, r).TestID
+	findings := f.findingsIn(id)
+
+	f.triage(findings[0].id, statusFalsePositive)
+	f.triage(findings[1].id, statusRiskAccepted)
+
+	closeTest(t, f, listedTest(t, f, id))
+
+	assert.Equal(t, map[string]string{cveA: statusFalsePositive, cveB: statusRiskAccepted},
+		f.statuses(id, contractService), "no active finding: no reimport")
+	assert.False(t, findingTitled(t, f, id, cveA).isMitigated)
+	assert.True(t, findingTitled(t, f, id, cveB).riskAccepted)
+	assert.Empty(t, f.test(id).buildID, "the marker is cleared")
+}
+
+func TestFakeContract_CloseReimportsEachServiceWithActiveFindings(t *testing.T) {
+	f := newFakeDefectDojo()
+	a := contractRequest(vulnReport(t, appLabels(), vulnA))
+	a.Service = "a"
+	id := reimport(t, f, a).TestID
+
+	b := a
+	b.Service = "b"
+	b.Report = vulnReport(t, appLabels(), vulnA, vulnB)
+	reimport(t, f, b)
+
+	for _, item := range f.findingsIn(id) {
+		if item.service == "b" && item.title == cveB {
+			f.triage(item.id, statusFalsePositive)
+		}
+	}
+
+	res := closeTest(t, f, listedTest(t, f, id))
+
+	assert.Equal(t, defectdojo.CloseResult{Reimports: 2}, res)
+	assert.Equal(t, map[string]string{cveA: statusClosed}, f.statuses(id, "a"))
+	assert.Equal(t, map[string]string{cveA: statusClosed, cveB: statusFalsePositive}, f.statuses(id, "b"))
+	assert.True(t, findingTitled(t, f, id, cveB).isMitigated, "the reimport of service b mitigates its false positive")
+}
+
+func TestFakeContract_CloseClosesOneByOneTheServicesBeyondTheBound(t *testing.T) {
+	f := newFakeDefectDojo()
+
+	var id int
+
+	for i := range fakeCloseReimports + 1 {
+		r := contractRequest(vulnReport(t, appLabels(), vulnA, vulnB))
+		r.Service = fmt.Sprintf("s%d", i)
+		id = reimport(t, f, r).TestID
+	}
+
+	for _, item := range f.findingsIn(id) {
+		if item.service == fmt.Sprintf("s%d", fakeCloseReimports) && item.title == cveB {
+			f.triage(item.id, statusFalsePositive)
+		}
+	}
+
+	res := closeTest(t, f, listedTest(t, f, id))
+
+	assert.Equal(t, defectdojo.CloseResult{Reimports: fakeCloseReimports, OneByOne: 1}, res)
+	assert.Equal(t, map[string]string{cveA: statusClosed, cveB: statusFalsePositive},
+		f.statuses(id, fmt.Sprintf("s%d", fakeCloseReimports)),
+		"closing one by one touches only the active finding of the last service")
+}
+
+func TestFakeContract_CloseKeepsTheVersionAndTheTagsOfTheTest(t *testing.T) {
+	f := newFakeDefectDojo()
+	r := contractRequest(vulnReport(t, appLabels(), vulnA))
+	r.Tags = []string{"a:1", "b:2"}
+	r.Version = "2.0"
+	id := reimport(t, f, r).TestID
+
+	listed := listedTest(t, f, id)
+	assert.Equal(t, "2.0", listed.Version)
+
+	closeTest(t, f, listed)
+
+	assert.Equal(t, "2.0", f.test(id).version, "the close sends the version of the listed test")
+	assert.Equal(t, []string{"a:1", "b:2"}, f.test(id).tags)
+}
+
+func TestFakeContract_CloseWithoutTheVersionWritesAnEmptyOne(t *testing.T) {
+	f := newFakeDefectDojo()
+	id := reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA))).TestID
+
+	closeTest(t, f, defectdojo.Test{ID: id})
+
+	assert.Empty(t, f.test(id).version, "a reimport without a version writes an empty one")
 }
 
 func TestFakeDefectDojo_NeverReusesATestID(t *testing.T) {

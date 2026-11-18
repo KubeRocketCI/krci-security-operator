@@ -26,6 +26,7 @@ func TestImport_ReimportAndCloseOfTheListedTestShareALock(t *testing.T) {
 		mu                   sync.Mutex
 		reimporting          bool
 		findingsDuringImport bool
+		startedOnce          sync.Once
 	)
 
 	started := make(chan struct{})
@@ -43,15 +44,21 @@ func TestImport_ReimportAndCloseOfTheListedTestShareALock(t *testing.T) {
 			reimporting = true
 			mu.Unlock()
 
-			close(started)
-			time.Sleep(100 * time.Millisecond)
+			// The first request is the upload; the close of the test sends the second one.
+			startedOnce.Do(func() {
+				close(started)
+				time.Sleep(100 * time.Millisecond)
+			})
 
 			mu.Lock()
 			reimporting = false
 			mu.Unlock()
 
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(defectdojo.ReimportResult{TestID: 42})
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"test_id":    42,
+				"statistics": map[string]any{"after": map[string]any{"total": map[string]any{"active": 0}}},
+			})
 		case r.URL.Path == "/api/v2/engagements/":
 			page(map[string]any{"id": 21, "name": imp.Engagement})
 		case r.URL.Path == "/api/v2/tests/":
@@ -90,7 +97,8 @@ func TestImport_ReimportAndCloseOfTheListedTestShareALock(t *testing.T) {
 
 	<-started
 
-	require.NoError(t, c.CloseTest(ctx, tests[0]))
+	_, err = c.CloseTest(ctx, tests[0])
+	require.NoError(t, err)
 	require.NoError(t, <-done)
 
 	assert.False(t, findingsDuringImport, "the close of the listed test waited for the reimport of its report")

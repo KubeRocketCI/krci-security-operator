@@ -295,13 +295,24 @@ func (r *Reconciler) closeTest(
 		return nil
 	}
 
-	if err := dd.CloseTest(ctx, test); err != nil {
+	res, err := dd.CloseTest(ctx, test)
+	if err != nil {
 		return fmt.Errorf("failed to close DefectDojo test %d: %w", test.ID, err)
 	}
 
 	r.markClosed(namespace, test.ID)
 
-	ctrl.LoggerFrom(ctx).Info("Closed a test", "test", test.ID, "title", test.Title, "reason", reason)
+	kv := []any{
+		"test", test.ID, "title", test.Title, "reason", reason,
+		"reimports", res.Reimports, "closedOneByOne", res.OneByOne,
+	}
+
+	// The failure names the status and the body of an answer of DefectDojo.
+	if res.Fallback != nil {
+		kv = append(kv, "fallback", res.Fallback.Error())
+	}
+
+	ctrl.LoggerFrom(ctx).Info("Closed a test", kv...)
 
 	return nil
 }

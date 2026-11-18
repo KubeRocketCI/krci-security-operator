@@ -155,9 +155,8 @@ func (p parsedFinding) hash() string {
 //     characters) is rejected with 400; a build_id has no limit in the form and fails at the save of the test with 500
 //     over 150 characters (the model limit), after the findings changed; a tag with a space, comma or quote or over
 //     255 characters is rejected with 400 and stored in lower case; invalid JSON gives 400, an unknown severity 500;
-//   - the lists return the build_id of each test and mark the tests of the last engagement with the name;
-//     SetBuildID writes it; closing a test clears its build_id when the test has one as it was listed, as the client
-//     does before it closes the findings.
+//   - the lists return the build_id and the version of each test and mark the tests of the last engagement with the
+//     name; SetBuildID writes the build_id; CloseTest does what the client does, see there.
 //
 // It also records the calls of the controller. The error hooks fail a call before it changes the state.
 type fakeDefectDojo struct {
@@ -494,7 +493,8 @@ func (f *fakeDefectDojo) ListTests(_ context.Context, product defectdojo.Product
 		if e.product == product.ID && e.name == engagement && test.scanType == defectdojo.ScanTypeTrivyOperator {
 			out = append(out, defectdojo.Test{
 				ID: test.id, Title: test.title, ScanType: test.scanType, Tags: slices.Clone(test.tags),
-				BuildID: test.buildID, LastEngagement: e == last, Product: product.Name, Engagement: engagement,
+				BuildID: test.buildID, Version: test.version, LastEngagement: e == last,
+				Product: product.Name, Engagement: engagement,
 			})
 		}
 	}
@@ -502,8 +502,16 @@ func (f *fakeDefectDojo) ListTests(_ context.Context, product defectdojo.Product
 	return out, nil
 }
 
-// CloseTest closes every active finding of the test, as the client does through the findings endpoints.
-func (f *fakeDefectDojo) CloseTest(_ context.Context, test defectdojo.Test) error {
+// CloseTest closes the test as the client does:
+//   - a listed test with a build_id has it cleared by an update of the test;
+//   - a test without an active finding is not reimported;
+//   - else an empty report is reimported by test ID with the service of the first active finding and the version
+//     of the listed test: every finding of that service that is not mitigated is mitigated, active or not, and loses
+//     its risk acceptance; false positive and out of scope stay set; the build_id and, when the listed test has no
+//     version, the version are written empty; the tags stay;
+//   - the reimport repeats with the service of the next active finding, for at most fakeCloseReimports services;
+//   - the active findings that remain are closed one by one.
+func (f *fakeDefectDojo) CloseTest(_ context.Context, test defectdojo.Test) (defectdojo.CloseResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -511,16 +519,39 @@ func (f *fakeDefectDojo) CloseTest(_ context.Context, test defectdojo.Test) erro
 
 	if test.BuildID != "" {
 		f.buildIDUpdates++
-
-		if stored, ok := f.tests[test.ID]; ok {
-			stored.buildID = ""
-		}
 	}
 
-	f.closeActive(test.ID)
+	var res defectdojo.CloseResult
 
-	return nil
+	stored, ok := f.tests[test.ID]
+	if !ok {
+		return res, nil
+	}
+
+	if test.BuildID != "" {
+		stored.buildID = ""
+	}
+
+	for res.Reimports < fakeCloseReimports {
+		first := slices.IndexFunc(f.findingsOf(test.ID), func(found *ddFinding) bool { return found.active })
+		if first < 0 {
+			break
+		}
+
+		f.applyFindings(test.ID, f.findingsOf(test.ID)[first].service, nil)
+
+		stored.buildID = ""
+		stored.version = test.Version
+		res.Reimports++
+	}
+
+	res.OneByOne = f.closeActive(test.ID)
+
+	return res, nil
 }
+
+// fakeCloseReimports is the bound of the services that one close reimports, as in the client.
+const fakeCloseReimports = 5
 
 // SetBuildID sets the build_id of the test, as PATCH of the test does.
 func (f *fakeDefectDojo) SetBuildID(_ context.Context, testID int, buildID string) error {
@@ -564,12 +595,17 @@ func (f *fakeDefectDojo) SetProductTags(_ context.Context, productID int, tags [
 	return nil
 }
 
-func (f *fakeDefectDojo) closeActive(testID int) {
+// closeActive mitigates the active findings of the test and returns their number.
+func (f *fakeDefectDojo) closeActive(testID int) (closed int) {
 	for _, found := range f.findingsOf(testID) {
 		if found.active {
 			found.mitigate()
+
+			closed++
 		}
 	}
+
+	return closed
 }
 
 // addEngagement creates another engagement with the name of the context, which becomes its last one, and the
@@ -642,7 +678,8 @@ func (f *fakeDefectDojo) seedScanTest(c ddContext, scanType string, test defectd
 		panic(fmt.Sprintf("test %d is seeded twice", test.ID))
 	}
 
-	f.addTest(f.ensureContext(c).id, test.ID, scanType, test.Title, test.Tags).buildID = test.BuildID
+	seeded := f.addTest(f.ensureContext(c).id, test.ID, scanType, test.Title, test.Tags)
+	seeded.buildID, seeded.version = test.BuildID, test.Version
 	f.lastID["test"] = max(f.lastID["test"], test.ID)
 }
 
