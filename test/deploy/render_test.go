@@ -12,6 +12,7 @@ import (
 	"maps"
 	"os/exec"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ const (
 	chartDir         = "../../deploy-templates"
 	serviceAccount   = "edp-krci-security-operator"
 	secretName       = "defectdojo-credentials"
+	clusterName      = "prod-eu"
 	probePort        = 8081
 )
 
@@ -37,11 +39,7 @@ var envNames = []string{
 	trivy.EnvPodNamespace,
 	trivy.EnvDefectDojoSecretName,
 	trivy.EnvDefectDojoProductType,
-	trivy.EnvDefectDojoPlatformProd,
 	trivy.EnvClusterName,
-	trivy.EnvScopeStage,
-	trivy.EnvScopeTenant,
-	trivy.EnvScopePlatform,
 	trivy.EnvExcludeNamespaces,
 	trivy.EnvComponentPrefixes,
 	trivy.EnvResyncPeriod,
@@ -51,7 +49,8 @@ var envNames = []string{
 
 type rendered []*unstructured.Unstructured
 
-func render(t *testing.T, values ...string) rendered {
+// helmTemplate runs `helm template` and returns its output; the tests skip without the helm binary.
+func helmTemplate(t *testing.T, values ...string) ([]byte, error) {
 	t.Helper()
 
 	if _, err := exec.LookPath("helm"); err != nil {
@@ -60,7 +59,14 @@ func render(t *testing.T, values ...string) rendered {
 
 	args := append([]string{"template", releaseName, chartDir, "--namespace", releaseNamespace}, values...)
 
-	out, err := exec.Command("helm", args...).CombinedOutput()
+	return exec.Command("helm", args...).CombinedOutput()
+}
+
+// render renders the chart for the cluster clusterName; a value in values overrides it.
+func render(t *testing.T, values ...string) rendered {
+	t.Helper()
+
+	out, err := helmTemplate(t, append([]string{"--set", "clusterName=" + clusterName}, values...)...)
 	require.NoErrorf(t, err, "helm template failed: %s", out)
 
 	var objs rendered
@@ -248,9 +254,13 @@ func TestDefaults(t *testing.T) {
 	require.ElementsMatch(t, envNames, slices.Collect(maps.Keys(vars)),
 		"the chart sets exactly the variables the manager reads")
 
-	// Only the Secret name has no default in the code.
+	// The Secret name and the cluster name have no default in the code.
 	require.Equal(t,
-		loadConfig(t, map[string]string{trivy.EnvPodNamespace: releaseNamespace, trivy.EnvDefectDojoSecretName: secretName}),
+		loadConfig(t, map[string]string{
+			trivy.EnvPodNamespace:         releaseNamespace,
+			trivy.EnvDefectDojoSecretName: secretName,
+			trivy.EnvClusterName:          clusterName,
+		}),
 		loadConfig(t, vars), "the chart defaults are the code defaults")
 
 	limit, _, err := unstructured.NestedString(c, "resources", "limits", "memory")
@@ -284,10 +294,7 @@ func TestValuesReachTheManager(t *testing.T) {
 	objs := render(t,
 		"--set", "defectdojo.secretName=dd-creds",
 		"--set", "defectdojo.productType=Platform",
-		"--set", "defectdojo.platformProduct=infra",
 		"--set", "clusterName=sandbox",
-		"--set", "scopes.stage=false",
-		"--set", "scopes.tenant=false",
 		"--set", "excludeNamespaces={kube-*,gitlab}",
 		"--set", "componentPrefixes={in-cluster-,prod-}",
 		"--set", "reportKinds={VulnerabilityReport}",
@@ -299,9 +306,7 @@ func TestValuesReachTheManager(t *testing.T) {
 		OperatorNamespace: releaseNamespace,
 		SecretName:        "dd-creds",
 		ProductType:       "Platform",
-		PlatformProduct:   "infra",
 		ClusterName:       "sandbox",
-		Scopes:            trivy.Scopes{Platform: true},
 		ExcludeNamespaces: []string{"kube-*", "gitlab"},
 		ComponentPrefixes: []string{"in-cluster-", "prod-"},
 		ResyncPeriod:      10 * time.Minute,
@@ -318,6 +323,37 @@ func TestValuesReachTheManager(t *testing.T) {
 	}
 
 	require.Equal(t, []string{"dd-creds"}, names, "the Role grants the Secret the manager reads, and only that one")
+}
+
+func TestClusterNameIsRequired(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		values []string
+	}{
+		{name: "unset"},
+		{name: "empty", values: []string{"--set", "clusterName="}},
+		{name: "blank", values: []string{"--set", "clusterName= "}},
+		{name: "not a DNS label", values: []string{"--set", "clusterName=Prod_EU"}},
+		{name: "ends with a hyphen", values: []string{"--set", "clusterName=prod-"}},
+		{name: "longer than a DNS label", values: []string{"--set", "clusterName=" + strings.Repeat("a", 64)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := helmTemplate(t, tc.values...)
+
+			require.Error(t, err, "the chart does not render without a valid cluster name")
+			require.Contains(t, string(out), "clusterName")
+		})
+	}
+}
+
+func TestClusterNameIsADNSLabel(t *testing.T) {
+	for _, name := range []string{"a", "prod-eu", "c1", strings.Repeat("a", 63)} {
+		t.Run(name, func(t *testing.T) {
+			vars := env(t, container(t, render(t, "--set", "clusterName="+name)))
+
+			require.Equal(t, name, vars[trivy.EnvClusterName])
+		})
+	}
 }
 
 func TestRBACIsReadOnly(t *testing.T) {
@@ -362,6 +398,14 @@ func TestRBACIsReadOnly(t *testing.T) {
 		require.Equal(t, []any{map[string]any{
 			"kind": "ServiceAccount", "name": serviceAccount, "namespace": releaseNamespace,
 		}}, subjects, kind)
+	}
+}
+
+func TestRBACReadsNoKubeRocketCIResources(t *testing.T) {
+	for _, rule := range rules(t, render(t).one(t, "ClusterRole")) {
+		require.NotContains(t, stringList(t, rule, "apiGroups"), "v2.edp.epam.com", "rule %v", rule)
+		require.NotContains(t, stringList(t, rule, "resources"), "stages", "rule %v", rule)
+		require.NotContains(t, stringList(t, rule, "resources"), "codebaseimagestreams", "rule %v", rule)
 	}
 }
 

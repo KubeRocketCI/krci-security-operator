@@ -196,7 +196,7 @@ func (c *Client) Reimport(ctx context.Context, r ReimportRequest) (ReimportResul
 		{"version", r.Version},
 		{"auto_create_context", boolTrue},
 		{"close_old_findings", boolTrue},
-		// Each environment is its own deduplication scope.
+		// Each engagement is its own deduplication scope.
 		{"deduplication_on_engagement", boolTrue},
 		{"active", boolTrue},
 		{"verified", "false"},

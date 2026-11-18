@@ -63,21 +63,11 @@ securityContext:
 defectdojo:
   # -- Secret in the release namespace with the keys `url` and `token` of the cluster's DefectDojo. The operator reads it at runtime and never writes it
   secretName: defectdojo-credentials
-  # -- DefectDojo product type of the products the operator creates
+  # -- DefectDojo Product Type of the namespace products. Use one value for every operator that writes to the same DefectDojo; a product that exists under another Product Type fails its reimports
   productType: KubeRocketCI
-  # -- DefectDojo product of the platform scope
-  platformProduct: platform
 
-# -- Cluster name. Every imported test carries the tag `krci-cluster:<clusterName>`, and the operator closes only the tests that carry it
-clusterName: in-cluster
-
-scopes:
-  # -- Import the reports of namespaces that belong to a Stage
-  stage: true
-  # -- Import the reports of tenant namespaces (label `app.edp.epam.com/tenant`) that belong to no Stage
-  tenant: true
-  # -- Import the reports of the remaining (platform) namespaces
-  platform: true
+# -- Required, no default. Unique name of this cluster in the DefectDojo: a lowercase RFC 1123 DNS label. Every namespace product is named `<clusterName>/<namespace>`, and the operator closes only the tests of its own cluster
+clusterName: ""
 
 # -- Glob patterns of namespaces that are skipped
 excludeNamespaces: []

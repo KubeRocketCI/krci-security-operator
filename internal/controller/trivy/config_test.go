@@ -21,6 +21,7 @@ func requiredEnv() map[string]string {
 	return map[string]string{
 		EnvPodNamespace:         "krci-security",
 		EnvDefectDojoSecretName: "defectdojo-credentials",
+		EnvClusterName:          "prod-eu",
 	}
 }
 
@@ -32,9 +33,7 @@ func TestLoadConfig_Defaults(t *testing.T) {
 		OperatorNamespace: "krci-security",
 		SecretName:        "defectdojo-credentials",
 		ProductType:       "KubeRocketCI",
-		PlatformProduct:   "platform",
-		ClusterName:       "in-cluster",
-		Scopes:            Scopes{Stage: true, Tenant: true, Platform: true},
+		ClusterName:       "prod-eu",
 		ComponentPrefixes: []string{"in-cluster-"},
 		ResyncPeriod:      30 * time.Minute,
 		Concurrency:       2,
@@ -45,11 +44,7 @@ func TestLoadConfig_Defaults(t *testing.T) {
 func TestLoadConfig_Overrides(t *testing.T) {
 	env := requiredEnv()
 	env[EnvDefectDojoProductType] = "Acme"
-	env[EnvDefectDojoPlatformProd] = "infra"
 	env[EnvClusterName] = "sandbox"
-	env[EnvScopeStage] = "true"
-	env[EnvScopeTenant] = "false"
-	env[EnvScopePlatform] = "0"
 	env[EnvExcludeNamespaces] = " kube-*, trivy-system ,,"
 	env[EnvComponentPrefixes] = "in-cluster-, core-"
 	env[EnvResyncPeriod] = "10m"
@@ -60,9 +55,7 @@ func TestLoadConfig_Overrides(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "Acme", cfg.ProductType)
-	assert.Equal(t, "infra", cfg.PlatformProduct)
 	assert.Equal(t, "sandbox", cfg.ClusterName)
-	assert.Equal(t, Scopes{Stage: true, Tenant: false, Platform: false}, cfg.Scopes)
 	assert.Equal(t, []string{"kube-*", "trivy-system"}, cfg.ExcludeNamespaces)
 	assert.Equal(t, []string{"in-cluster-", "core-"}, cfg.ComponentPrefixes)
 	assert.Equal(t, 10*time.Minute, cfg.ResyncPeriod)
@@ -87,7 +80,8 @@ func TestLoadConfig_Errors(t *testing.T) {
 	}{
 		{"missing namespace", func(e map[string]string) { delete(e, EnvPodNamespace) }, EnvPodNamespace},
 		{"missing secret name", func(e map[string]string) { delete(e, EnvDefectDojoSecretName) }, EnvDefectDojoSecretName},
-		{"bad bool", func(e map[string]string) { e[EnvScopeTenant] = "maybe" }, EnvScopeTenant},
+		{"missing cluster name", func(e map[string]string) { delete(e, EnvClusterName) }, EnvClusterName + " is required"},
+		{"blank cluster name", func(e map[string]string) { e[EnvClusterName] = "  " }, EnvClusterName + " is required"},
 		{"bad duration", func(e map[string]string) { e[EnvResyncPeriod] = "soon" }, EnvResyncPeriod},
 		{"zero duration", func(e map[string]string) { e[EnvResyncPeriod] = "0s" }, "must be at least 1m0s"},
 		{"duration just below the minimum", func(e map[string]string) { e[EnvResyncPeriod] = "59s" }, "must be at least 1m0s, got 59s"},
@@ -100,7 +94,6 @@ func TestLoadConfig_Errors(t *testing.T) {
 		{"cluster name with dot", func(e map[string]string) { e[EnvClusterName] = "a.b" }, "lowercase RFC 1123"},
 		{"cluster name too long", func(e map[string]string) { e[EnvClusterName] = strings.Repeat("a", 64) }, "lowercase RFC 1123"},
 		{"product type with comma", func(e map[string]string) { e[EnvDefectDojoProductType] = "a,b" }, "no comma"},
-		{"platform product with comma", func(e map[string]string) { e[EnvDefectDojoPlatformProd] = "a,b" }, "no comma"},
 		{"bad glob", func(e map[string]string) { e[EnvExcludeNamespaces] = "kube-[" }, "invalid glob"},
 	}
 
@@ -120,7 +113,7 @@ func TestConfigValidate_ReportsAllViolations(t *testing.T) {
 	err := Config{}.Validate()
 	require.Error(t, err)
 
-	for _, want := range []string{EnvPodNamespace, EnvDefectDojoSecretName, EnvResyncPeriod, EnvConcurrency, EnvReportKinds} {
+	for _, want := range []string{EnvPodNamespace, EnvDefectDojoSecretName, EnvClusterName, EnvResyncPeriod, EnvConcurrency, EnvReportKinds} {
 		assert.Contains(t, err.Error(), want)
 	}
 }
@@ -138,16 +131,12 @@ func TestConfigValidate_NamesAndPrefixes(t *testing.T) {
 	require.ErrorContains(t, cfg.Validate(), "non-empty")
 
 	cfg = valid()
-	cfg.PlatformProduct = ""
-	require.ErrorContains(t, cfg.Validate(), "non-empty")
-
-	cfg = valid()
 	cfg.ComponentPrefixes = []string{"ok-", "bad,prefix"}
 	require.ErrorContains(t, cfg.Validate(), "prefix")
 
 	cfg = valid()
 	cfg.ClusterName = ""
-	require.ErrorContains(t, cfg.Validate(), EnvClusterName)
+	require.ErrorContains(t, cfg.Validate(), EnvClusterName+" is required")
 
 	cfg = valid()
 	cfg.ClusterName = "prod-eu-1"
@@ -157,6 +146,7 @@ func TestConfigValidate_NamesAndPrefixes(t *testing.T) {
 func TestLoadConfigFromEnv(t *testing.T) {
 	t.Setenv(EnvPodNamespace, "ns")
 	t.Setenv(EnvDefectDojoSecretName, "s")
+	t.Setenv(EnvClusterName, "c")
 
 	cfg, err := LoadConfigFromEnv()
 	require.NoError(t, err)

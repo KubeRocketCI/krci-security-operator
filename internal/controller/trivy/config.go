@@ -17,19 +17,15 @@ import (
 
 // Environment variables of the Trivy module. The chart sets them from its values.
 const (
-	EnvPodNamespace           = "POD_NAMESPACE"
-	EnvDefectDojoSecretName   = "DEFECTDOJO_SECRET_NAME"
-	EnvDefectDojoProductType  = "DEFECTDOJO_PRODUCT_TYPE"
-	EnvDefectDojoPlatformProd = "DEFECTDOJO_PLATFORM_PRODUCT"
-	EnvClusterName            = "CLUSTER_NAME"
-	EnvScopeStage             = "SCOPE_STAGE"
-	EnvScopeTenant            = "SCOPE_TENANT"
-	EnvScopePlatform          = "SCOPE_PLATFORM"
-	EnvExcludeNamespaces      = "EXCLUDE_NAMESPACES"
-	EnvComponentPrefixes      = "COMPONENT_PREFIXES"
-	EnvResyncPeriod           = "RESYNC_PERIOD"
-	EnvConcurrency            = "CONCURRENCY"
-	EnvReportKinds            = "REPORT_KINDS"
+	EnvPodNamespace          = "POD_NAMESPACE"
+	EnvDefectDojoSecretName  = "DEFECTDOJO_SECRET_NAME"
+	EnvDefectDojoProductType = "DEFECTDOJO_PRODUCT_TYPE"
+	EnvClusterName           = "CLUSTER_NAME"
+	EnvExcludeNamespaces     = "EXCLUDE_NAMESPACES"
+	EnvComponentPrefixes     = "COMPONENT_PREFIXES"
+	EnvResyncPeriod          = "RESYNC_PERIOD"
+	EnvConcurrency           = "CONCURRENCY"
+	EnvReportKinds           = "REPORT_KINDS"
 )
 
 // Keys of the credentials Secret.
@@ -40,8 +36,6 @@ const (
 
 const (
 	defaultProductType     = "KubeRocketCI"
-	defaultPlatformProduct = "platform"
-	defaultClusterName     = "in-cluster"
 	defaultComponentPrefix = "in-cluster-"
 	defaultResyncPeriod    = 30 * time.Minute
 	minResyncPeriod        = time.Minute
@@ -50,26 +44,17 @@ const (
 	errInvalidConfig       = "invalid configuration"
 )
 
-// Scopes switches the namespace scopes on and off.
-type Scopes struct {
-	Stage    bool
-	Tenant   bool
-	Platform bool
-}
-
 // Config is the configuration of the Trivy module.
 type Config struct {
 	// OperatorNamespace is the namespace that holds the credentials Secret.
 	OperatorNamespace string
 	// SecretName is the credentials Secret with the keys "url" and "token".
 	SecretName string
-	// ProductType is the DefectDojo product type of the created products.
+	// ProductType is the DefectDojo product type of the namespace products.
 	ProductType string
-	// PlatformProduct is the product of the platform scope.
-	PlatformProduct string
-	// ClusterName marks the tests of this cluster with the tag "krci-cluster:<ClusterName>".
+	// ClusterName is the unique name of the cluster in DefectDojo. It has no default: the namespace products are
+	// named "<ClusterName>/<namespace>", and the tests of this cluster carry the tag "krci-cluster:<ClusterName>".
 	ClusterName string
-	Scopes      Scopes
 	// ExcludeNamespaces holds glob patterns of namespaces that are skipped.
 	ExcludeNamespaces []string
 	// ComponentPrefixes are stripped from the Argo CD application name to derive the component tag.
@@ -96,13 +81,7 @@ func LoadConfig(lookup func(string) (string, bool)) (Config, error) {
 		OperatorNamespace: env.get(EnvPodNamespace, ""),
 		SecretName:        env.get(EnvDefectDojoSecretName, ""),
 		ProductType:       env.get(EnvDefectDojoProductType, defaultProductType),
-		PlatformProduct:   env.get(EnvDefectDojoPlatformProd, defaultPlatformProduct),
-		ClusterName:       env.get(EnvClusterName, defaultClusterName),
-		Scopes: Scopes{
-			Stage:    parseEnv(env, EnvScopeStage, true, strconv.ParseBool),
-			Tenant:   parseEnv(env, EnvScopeTenant, true, strconv.ParseBool),
-			Platform: parseEnv(env, EnvScopePlatform, true, strconv.ParseBool),
-		},
+		ClusterName:       env.get(EnvClusterName, ""),
 		ExcludeNamespaces: env.list(EnvExcludeNamespaces, nil),
 		ComponentPrefixes: env.list(EnvComponentPrefixes, []string{defaultComponentPrefix}),
 		ReportKinds:       env.list(EnvReportKinds, slices.Clone(trivy.ReportKinds)),
@@ -191,8 +170,10 @@ func (c Config) identityErrors() []error {
 		errs = append(errs, fmt.Errorf("%s is required", EnvDefectDojoSecretName))
 	}
 
-	// The cluster name is part of the "krci-cluster" tag that decides which tests the operator owns.
-	if msgs := validation.IsDNS1123Label(c.ClusterName); len(msgs) > 0 {
+	switch msgs := validation.IsDNS1123Label(c.ClusterName); {
+	case c.ClusterName == "":
+		errs = append(errs, fmt.Errorf("%s is required", EnvClusterName))
+	case len(msgs) > 0:
 		errs = append(errs, fmt.Errorf("%s must be a lowercase RFC 1123 DNS label, got %q: %s",
 			EnvClusterName, c.ClusterName, strings.Join(msgs, "; ")))
 	}
@@ -204,13 +185,9 @@ func (c Config) identityErrors() []error {
 func (c Config) nameErrors() []error {
 	var errs []error
 
-	for _, f := range []struct{ env, value string }{
-		{EnvDefectDojoProductType, c.ProductType},
-		{EnvDefectDojoPlatformProd, c.PlatformProduct},
-	} {
-		if f.value == "" || strings.Contains(f.value, listSeparator) {
-			errs = append(errs, fmt.Errorf("%s must be non-empty and contain no comma, got %q", f.env, f.value))
-		}
+	if c.ProductType == "" || strings.Contains(c.ProductType, listSeparator) {
+		errs = append(errs, fmt.Errorf("%s must be non-empty and contain no comma, got %q",
+			EnvDefectDojoProductType, c.ProductType))
 	}
 
 	for _, p := range c.ComponentPrefixes {

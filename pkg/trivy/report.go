@@ -27,28 +27,14 @@ const (
 	LabelResourceNamespace = "trivy-operator.resource.namespace"
 	LabelContainerName     = "trivy-operator.container.name"
 
-	TagPrefixScope     = "krci-scope"
-	TagPrefixTenant    = "krci-tenant"
-	TagPrefixEnv       = "krci-env"
 	TagPrefixNamespace = "krci-namespace"
 	TagPrefixCluster   = "krci-cluster"
 
-	TagScopeRuntime  = TagPrefixScope + ":runtime"
-	TagScopeTenant   = TagPrefixScope + ":tenant"
-	TagScopePlatform = TagPrefixScope + ":platform"
-
-	// EngagementPrefixRuntime prefixes the runtime engagement name: "runtime:<cdPipeline>-<stage>".
-	EngagementPrefixRuntime = "runtime"
-	// EngagementPrefixNamespace prefixes the engagement of the tenant and platform scopes: "namespace:<ns>".
-	EngagementPrefixNamespace = "namespace"
-	// ProductPrefixEnvironment prefixes the product of workloads that belong to no codebase: "env:<cdPipeline>-<stage>".
-	ProductPrefixEnvironment = "env"
-	// ProductPrefixTenant prefixes the product of the tenant scope: "tenant:<tenant>".
-	ProductPrefixTenant = "tenant"
+	// EngagementTrivyOperator is the engagement of a namespace product that holds the tests of this operator.
+	EngagementTrivyOperator = "trivy-operator"
 
 	tagPrefixWorkload  = "krci-workload"
 	tagPrefixContainer = "krci-container"
-	tagPrefixCodebase  = "krci-codebase"
 	tagPrefixComponent = "krci-component"
 
 	digestVersionLen = len("sha256:") + 12
@@ -62,9 +48,6 @@ func ReportGVK(kind string) schema.GroupVersionKind {
 	return schema.GroupVersionKind{Group: TrivyGroup, Version: TrivyVersion, Kind: kind}
 }
 
-// TenantTag is the tag that names the tenant of a test.
-func TenantTag(tenant string) string { return TagPrefixTenant + ":" + tenant }
-
 // NamespaceTag is the tag that ties a DefectDojo test to the namespace of its workload.
 func NamespaceTag(namespace string) string { return TagPrefixNamespace + ":" + namespace }
 
@@ -75,15 +58,14 @@ func ClusterTag(cluster string) string { return TagPrefixCluster + ":" + cluster
 func ComponentTag(component string) string { return tagPrefixComponent + ":" + component }
 
 // ImportTitle is the title of the DefectDojo test of a workload container:
-// "<ReportKind> <namespace>/<kind>/<name>/<container>".
-// It is unique per namespace, so tests of equally named workloads of two namespaces never meet.
-func ImportTitle(reportKind, namespace string, workload Workload, container string) string {
-	return reportKind + " " + namespace + "/" + workload.String() + "/" + container
+// "<ReportKind> <kind>/<name>/<container>". It has no namespace: the namespace product names it.
+func ImportTitle(reportKind string, workload Workload, container string) string {
+	return reportKind + " " + workload.String() + "/" + container
 }
 
 // ReportTitle is the title of the DefectDojo test of a report of a workload.
-func ReportTitle(namespace string, report *unstructured.Unstructured, workload Workload) string {
-	return ImportTitle(report.GetKind(), namespace, workload, report.GetLabels()[LabelContainerName])
+func ReportTitle(report *unstructured.Unstructured, workload Workload) string {
+	return ImportTitle(report.GetKind(), workload, report.GetLabels()[LabelContainerName])
 }
 
 // ResourceRef returns the kind and the name of the resource a report was produced for.
@@ -112,57 +94,20 @@ func TitleKind(title string) string {
 	return kind
 }
 
-// EnvTag is the tag that ties a DefectDojo test to a Stage.
-func EnvTag(cdPipeline, stage string) string { return TagPrefixEnv + ":" + cdPipeline + "." + stage }
+// ProductName is the name of a namespace product: "<cluster name>/<namespace>".
+func ProductName(cluster, namespace string) string { return cluster + "/" + namespace }
 
-// Scope is the kind of a namespace that decides where its reports go.
-type Scope string
-
-const (
-	// ScopeStage is a namespace of a Stage.
-	ScopeStage Scope = "stage"
-	// ScopeTenant is a tenant namespace that belongs to no Stage.
-	ScopeTenant Scope = "tenant"
-	// ScopePlatform is any other namespace.
-	ScopePlatform Scope = "platform"
-)
-
-// Tag is the "krci-scope" tag of the scope; the stage scope is tagged "runtime".
-func (s Scope) Tag() string {
-	switch s {
-	case ScopeStage:
-		return TagScopeRuntime
-	case ScopeTenant:
-		return TagScopeTenant
-	default:
-		return TagScopePlatform
-	}
-}
-
-// IsOwned reports whether the test was written by the operator of the cluster:
-// it carries the cluster tag and a "krci-scope" tag of the operator.
+// IsOwned reports whether the test was written by the operator of the cluster: it carries the cluster tag.
 // The operator closes no other test.
 func IsOwned(test defectdojo.Test, cluster string) bool {
-	if !test.HasTag(ClusterTag(cluster)) {
-		return false
-	}
-
-	return test.HasTag(TagScopeRuntime) || test.HasTag(TagScopeTenant) || test.HasTag(TagScopePlatform)
+	return test.HasTag(ClusterTag(cluster))
 }
 
-// Target is a classified namespace and the names its reports are imported under.
+// Target is a namespace and the cluster it lives in.
 type Target struct {
-	Scope     Scope
 	Namespace string
 	// Cluster is the operator's cluster name.
 	Cluster string
-	// Tenant is the value of the tenant label of the namespace; empty in the platform scope.
-	Tenant string
-	// CDPipeline and Stage name the Stage of the stage scope.
-	CDPipeline string
-	Stage      string
-	// PlatformProduct is the product of the platform scope.
-	PlatformProduct string
 }
 
 // Import is the DefectDojo destination and the descriptive fields of one report.
@@ -172,58 +117,13 @@ type Import struct {
 	TestTitle  string
 	Version    string
 	Tags       []string
-	// Codebase is empty for images that belong to no codebase of the tenant.
-	Codebase string
 }
 
-// ReportImport derives the DefectDojo destination of a report of a workload container in a namespace.
-// In the stage scope the product is the codebase that owns the image, or an environment product for any other image.
-// The codebases map is read in the stage scope only.
-func ReportImport(
-	target Target,
-	report *unstructured.Unstructured,
-	workload Workload,
-	codebases map[string]string,
-	component string,
-) Import {
+// ReportImport derives the DefectDojo destination of a report of a workload container in a namespace:
+// the namespace product, the engagement of the integration and the test of the container.
+func ReportImport(target Target, report *unstructured.Unstructured, workload Workload, component string) Import {
 	image := ImageOf(report)
 	container := report.GetLabels()[LabelContainerName]
-
-	var (
-		product, engagement, codebase string
-		tags                          = []string{target.Scope.Tag()}
-	)
-
-	switch target.Scope {
-	case ScopeStage:
-		codebase = codebases[image.Name]
-		engagement = EngagementPrefixRuntime + ":" + target.CDPipeline + "-" + target.Stage
-
-		product = ProductPrefixEnvironment + ":" + target.CDPipeline + "-" + target.Stage
-		if codebase != "" {
-			product = codebase
-		}
-
-		tags = append(tags, TenantTag(target.Tenant), EnvTag(target.CDPipeline, target.Stage))
-	case ScopeTenant:
-		product = ProductPrefixTenant + ":" + target.Tenant
-		engagement = EngagementPrefixNamespace + ":" + target.Namespace
-		tags = append(tags, TenantTag(target.Tenant))
-	default:
-		product = target.PlatformProduct
-		engagement = EngagementPrefixNamespace + ":" + target.Namespace
-	}
-
-	tags = append(tags,
-		NamespaceTag(target.Namespace),
-		tagPrefixWorkload+":"+workload.Tag(),
-		tagPrefixContainer+":"+container,
-	)
-	if codebase != "" {
-		tags = append(tags, tagPrefixCodebase+":"+codebase)
-	}
-
-	tags = append(tags, ComponentTag(component), ClusterTag(target.Cluster))
 
 	version := image.Tag
 	if version == "" {
@@ -231,12 +131,17 @@ func ReportImport(
 	}
 
 	return Import{
-		Product:    product,
-		Engagement: engagement,
-		TestTitle:  ReportTitle(target.Namespace, report, workload),
+		Product:    ProductName(target.Cluster, target.Namespace),
+		Engagement: EngagementTrivyOperator,
+		TestTitle:  ReportTitle(report, workload),
 		Version:    version,
-		Tags:       tags,
-		Codebase:   codebase,
+		Tags: []string{
+			NamespaceTag(target.Namespace),
+			tagPrefixWorkload + ":" + workload.Tag(),
+			tagPrefixContainer + ":" + container,
+			ComponentTag(component),
+			ClusterTag(target.Cluster),
+		},
 	}
 }
 

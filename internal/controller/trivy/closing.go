@@ -15,11 +15,11 @@ import (
 	"github.com/KubeRocketCI/krci-security-operator/pkg/trivy"
 )
 
-// sweepInterval is the period of the check for tests of namespaces that are gone or out of scope.
+// sweepInterval is the period of the check for tests of namespaces that are gone or excluded.
 const sweepInterval = 6 * time.Hour
 
 // closeStaleTests closes the owned tests of the namespace that no longer reflect a running workload container.
-// That covers removed workloads and tests written under another scope before the namespace changed its scope.
+// That covers removed workloads.
 // A test whose Deployment has only superseded reports so far (a rollout is in progress), a test whose report
 // was rejected, and a test of a report kind the pass could not list stay open.
 func (r *Reconciler) closeStaleTests(ctx context.Context, dd DefectDojo, target trivy.Target, p *pass) error {
@@ -62,8 +62,8 @@ func (r *Reconciler) closeStaleTests(ctx context.Context, dd DefectDojo, target 
 	return nil
 }
 
-// release closes every owned test of a namespace that is gone or out of scope, once per process
-// until the namespace is in scope again.
+// release closes every owned test of a namespace that is gone or excluded, once per process
+// until the namespace is imported again.
 func (r *Reconciler) release(ctx context.Context, dd DefectDojo, namespace string) error {
 	if r.isReleased(namespace) {
 		return nil
@@ -118,7 +118,7 @@ func (r *Reconciler) ownsTest(ctx context.Context, test defectdojo.Test) bool {
 }
 
 // runSweeper looks for namespaces whose tests need closing at start and then periodically,
-// which also covers a namespace deleted or a scope switched off while the operator was down.
+// which also covers a namespace deleted or excluded while the operator was down.
 func (r *Reconciler) runSweeper(ctx context.Context) error {
 	ctx = ctrl.LoggerInto(ctx, ctrl.Log.WithName(controllerName).WithName("sweeper"))
 
@@ -138,7 +138,7 @@ func (r *Reconciler) runSweeper(ctx context.Context) error {
 	}
 }
 
-// sweep finds the namespaces that own open tests although the namespace no longer exists or is out of scope,
+// sweep finds the namespaces that own open tests although the namespace no longer exists or is excluded,
 // and hands them to the controller, which closes the tests. The sweeper closes nothing itself, so the
 // closing of a namespace is serialized with its imports by the workqueue.
 // A failure for one namespace does not stop the others; the errors are joined.
@@ -166,14 +166,14 @@ func (r *Reconciler) sweep(ctx context.Context) error {
 			continue
 		}
 
-		inScope, scopeErr := r.namespaceInScope(ctx, namespace)
-		if scopeErr != nil {
-			errs = append(errs, scopeErr)
+		importable, nsErr := r.isImportable(ctx, namespace)
+		if nsErr != nil {
+			errs = append(errs, nsErr)
 
 			continue
 		}
 
-		if inScope {
+		if importable {
 			continue
 		}
 

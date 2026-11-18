@@ -3,13 +3,11 @@ package trivy
 
 import (
 	"fmt"
-	"maps"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -45,8 +43,8 @@ func controllerOptions(cfg Config) controller.Options {
 
 // SetupWithManager registers the module with the manager: the namespace controller and the sweeper.
 //
-// The controller watches the metadata of the reports only. The full reports, the workloads, the
-// CodebaseImageStreams and the credentials Secret are read through the API reader and never cached.
+// The controller watches the metadata of the reports only. The full reports, the workloads and the credentials
+// Secret are read through the API reader and never cached.
 func SetupWithManager(mgr ctrl.Manager, cfg Config) error {
 	r := NewReconciler(mgr.GetCache(), mgr.GetAPIReader(), cfg, NewConnector(defectdojo.New()))
 
@@ -78,36 +76,17 @@ func SetupWithManager(mgr ctrl.Manager, cfg Config) error {
 			builder.OnlyMetadata, builder.WithPredicates(reportPredicate()))
 	}
 
-	served, err := isServed(mgr, stageGVK)
-	if err != nil {
-		return err
-	}
-
-	if served {
-		stage := &unstructured.Unstructured{}
-		stage.SetGroupVersionKind(stageGVK)
-
-		b = b.Watches(stage, stageHandler())
-	} else {
-		log.Info("Stage kind is not served by the cluster, every namespace is classified without Stages")
-	}
-
 	b = b.WatchesRawSource(source.Channel(r.wake, handler.EnqueueRequestsFromMapFunc(enqueueNamed)))
 
-	if err = b.Complete(r); err != nil {
+	if err := b.Complete(r); err != nil {
 		return fmt.Errorf("failed to build Trivy controller: %w", err)
 	}
 
-	if err = mgr.Add(manager.RunnableFunc(r.runSweeper)); err != nil {
+	if err := mgr.Add(manager.RunnableFunc(r.runSweeper)); err != nil {
 		return fmt.Errorf("failed to add Trivy sweeper: %w", err)
 	}
 
-	log.Info("Registered Trivy module",
-		"clusterName", cfg.ClusterName,
-		"stageScope", cfg.Scopes.Stage,
-		"tenantScope", cfg.Scopes.Tenant,
-		"platformScope", cfg.Scopes.Platform,
-	)
+	log.Info("Registered Trivy module", "clusterName", cfg.ClusterName, "productType", cfg.ProductType)
 
 	return nil
 }
@@ -128,12 +107,11 @@ func isServed(mgr ctrl.Manager, gvk schema.GroupVersionKind) (bool, error) {
 // reportPredicate drops the updates that change no resourceVersion, which are informer resyncs.
 func reportPredicate() predicate.Predicate { return predicate.ResourceVersionChangedPredicate{} }
 
-// namespacePredicate passes creations, deletions, label changes and the start of the termination.
+// namespacePredicate passes creations, deletions and the start of the termination.
 func namespacePredicate() predicate.Predicate {
 	return predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			return !maps.Equal(e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels()) ||
-				!e.ObjectOld.GetDeletionTimestamp().Equal(e.ObjectNew.GetDeletionTimestamp())
+			return !e.ObjectOld.GetDeletionTimestamp().Equal(e.ObjectNew.GetDeletionTimestamp())
 		},
 	}
 }

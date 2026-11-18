@@ -7,24 +7,17 @@ One operator for the security integrations of a KubeRocketCI cluster. The first 
 ```mermaid
 flowchart LR
     T[Trivy Operator] -->|reports of every namespace| O[krci-security-operator]
-    K[Namespaces and Stages] -->|stage, tenant or platform| O
     O -->|reimport-scan| D[(DefectDojo)]
 ```
 
-- **Every namespace in one of three scopes.** A namespace that a KubeRocketCI `Stage` deploys to is a stage, one with the `app.edp.epam.com/tenant` label is a tenant, and everything else, such as Argo CD, Tekton or monitoring, is the platform. Each scope can be switched off.
-- **One test per container.** Each container of a workload has one DefectDojo test per report kind, so a redeploy updates the same test. Only changed reports are uploaded.
+- **One product per cluster and namespace.** Every namespace has its own DefectDojo product, `<clusterName>/<namespace>`, under one Product Type (`KubeRocketCI` by default), with one engagement, `trivy-operator`. The operator reads no KubeRocketCI resource or label, so it also works on a cluster without KubeRocketCI.
+- **One test per container.** Each container of a workload has one DefectDojo test per report kind, `<ReportKind> <kind>/<name>/<container>`, so a redeploy updates the same test. Only changed reports are uploaded.
 - **Closes what is gone.** The findings of removed workloads and of deleted or excluded namespaces are closed. The operator closes only the tests of its own cluster.
 - **Read-only in the cluster.** Apart from its leader-election Lease and events, it writes only to DefectDojo. No CRDs, no webhooks.
 
-| Scope | DefectDojo product | Engagement |
-|---|---|---|
-| stage | the codebase of the image, else `env:<cdPipeline>-<stage>` | `runtime:<cdPipeline>-<stage>` |
-| tenant | `tenant:<tenant>` | `namespace:<ns>` |
-| platform | `platform` | `namespace:<ns>` |
-
 ## Prerequisites
 
-Trivy Operator 0.34 or later and a DefectDojo 3.2.200 or later API token; see [supported versions](docs/development.md#upstream-sources). The stage scope needs the KubeRocketCI `Stage` resource; without it every namespace is a tenant or the platform.
+Trivy Operator 0.34 or later and a DefectDojo 2.55 or later API token with the permissions in [docs/trivy.md](docs/trivy.md#defectdojo-requirements); see [supported versions](docs/development.md#upstream-sources). The cluster name is required and unique per DefectDojo.
 
 ## Install
 
@@ -39,11 +32,11 @@ helm install krci-security-operator epamedp/krci-security-operator -n krci-secur
   --set clusterName=<cluster-name>
 ```
 
-Chart values: [deploy-templates/README.md](deploy-templates/README.md). Classification, naming, closing, errors, sizing and access in detail: [docs/trivy.md](docs/trivy.md).
+Chart values: [deploy-templates/README.md](deploy-templates/README.md). Naming, closing, errors, sizing and access in detail: [docs/trivy.md](docs/trivy.md).
 
 ## Limitations
 
-- One DefectDojo per cluster: two clusters that write into one DefectDojo overwrite each other's tests of the same names.
+- Two clusters with the same `clusterName` in one DefectDojo write into, and close, the same products.
 - A report CRD installed after the operator started is imported on each resync (30 minutes by default) until a restart makes the operator watch it.
 - Metrics are off by default; `metrics.enabled=true` serves them over plain HTTP on port 8080 of the pod.
 
