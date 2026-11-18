@@ -8,6 +8,14 @@ A Go operator for the security integrations of a KubeRocketCI cluster, one modul
 
 **Read `AGENTS.md` first** - it covers the project structure, the files you must not edit, and the design rules. This file adds the commands and the control flow.
 
+Terms: `GLOSSARY.md`. Decisions: `docs/adr/`. Use the glossary terms in code names, logs and notes.
+
+## Agent skills
+
+- Issue tracker: Jira project EPMDEDP through the mcp-atlassian tools; pull requests on GitHub. `docs/agents/issue-tracker.md`.
+- Triage labels: default five roles as Jira labels. `docs/agents/triage-labels.md`.
+- Domain docs: single-context, `GLOSSARY.md` and `docs/adr/`. `docs/agents/domain.md`.
+
 ## Commands
 
 ```bash
