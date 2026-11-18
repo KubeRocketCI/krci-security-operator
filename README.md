@@ -24,7 +24,7 @@ flowchart LR
 
 ## Prerequisites
 
-Trivy Operator and a DefectDojo API token; tested with Trivy Operator 0.35 and DefectDojo 2.55. The stage scope needs the KubeRocketCI `Stage` resource; without it every namespace is a tenant or the platform.
+Trivy Operator 0.34 or later and a DefectDojo 3.2.200 or later API token; see [supported versions](docs/development.md#upstream-sources). The stage scope needs the KubeRocketCI `Stage` resource; without it every namespace is a tenant or the platform.
 
 ## Install
 
