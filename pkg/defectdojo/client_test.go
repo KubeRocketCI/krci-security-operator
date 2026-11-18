@@ -679,6 +679,7 @@ func TestClient_CloseTest_ClosesATestOfThousandsOfFindingsWithOneRequest(t *test
 	res := closeTest(t, c, closableTest)
 
 	assert.Equal(t, CloseResult{Reimports: 1}, res)
+	assert.True(t, res.FoundActive())
 	assert.Empty(t, f.active)
 	assert.Empty(t, f.closed, "no finding is closed one by one")
 	assert.Equal(t, []string{patchTest, readFindings, reimportScan}, f.order,
@@ -889,6 +890,7 @@ func TestClient_CloseTest_ClosesOneByOneWhenTheTestCannotBeReimported(t *testing
 			assert.Contains(t, apiErr.Body, "Invalid pk", "the body of the refusal is kept")
 			assert.Equal(t, 2, res.OneByOne)
 			assert.Zero(t, res.Reimports)
+			assert.True(t, res.FoundActive())
 			assert.Equal(t, []string{
 				patchTest, readFindings, reimportScan, readFindings, fmt.Sprintf(closeOne, 1), fmt.Sprintf(closeOne, 2),
 			}, f.order, "the findings are closed through the findings after the rejected reimport")
@@ -991,8 +993,9 @@ func TestClient_CloseTest_NoActiveFindings(t *testing.T) {
 	f := newFindingsServer(t)
 	c := newTestClient(t, f.handle)
 
-	closeTest(t, c, closableTest)
+	res := closeTest(t, c, closableTest)
 
+	assert.False(t, res.FoundActive())
 	assert.Equal(t, []string{patchTest, readFindings}, f.order,
 		"a test without active findings is not reimported; its build_id is cleared")
 	assert.Equal(t, []map[string]any{{"build_id": ""}}, f.patches)
