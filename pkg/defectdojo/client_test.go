@@ -102,7 +102,27 @@ func TestClient_Reimport_SendsMultipartFields(t *testing.T) {
 		"push_to_jira":                {"false"},
 		"scan_date":                   {"2026-11-10"},
 		"tags":                        {"krci-scope:runtime", "krci-env:cdp.dev"},
-	}, fields)
+	}, fields, "an empty service is not sent")
+}
+
+func TestClient_Reimport_SendsTheService(t *testing.T) {
+	var service []string
+
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseMultipartForm(1<<20))
+
+		service = r.MultipartForm.Value["service"]
+
+		writeJSON(w, http.StatusCreated, ReimportResult{TestID: 7})
+	})
+
+	req := testRequest()
+	req.Service = "ns/Deployment/app/app"
+
+	_, err := c.Reimport(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ns/Deployment/app/app"}, service)
 }
 
 func TestClient_Reimport_Retries(t *testing.T) {
