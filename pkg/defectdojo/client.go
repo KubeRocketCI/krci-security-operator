@@ -73,9 +73,13 @@ type ReimportRequest struct {
 	Product     string
 	Engagement  string
 	TestTitle   string
-	Version     string
-	Tags        []string
-	ScanDate    time.Time
+	// Service replaces the service of every finding and limits the findings the reimport closes to that service.
+	// Empty: not sent; DefectDojo keeps the parser service and closes only findings without a service.
+	// DefectDojo stores at most 200 characters; the caller shortens a longer value.
+	Service  string
+	Version  string
+	Tags     []string
+	ScanDate time.Time
 	// Report is the JSON document handed to the Trivy Operator parser.
 	Report []byte
 }
@@ -182,7 +186,7 @@ func (c *Client) WithCredentials(baseURL, token string) *Client {
 // Reimport re-imports the report into the test named by the request, creating the product type,
 // product, engagement and test when they do not exist, and closes findings absent from the report.
 func (c *Client) Reimport(ctx context.Context, r ReimportRequest) (ReimportResult, error) {
-	fields := make([][2]string, 0, 15+len(r.Tags))
+	fields := make([][2]string, 0, 16+len(r.Tags))
 	fields = append(fields, [][2]string{
 		{"scan_type", ScanTypeTrivyOperator},
 		{"product_type_name", r.ProductType},
@@ -201,6 +205,10 @@ func (c *Client) Reimport(ctx context.Context, r ReimportRequest) (ReimportResul
 		{"push_to_jira", "false"},
 		{"scan_date", r.ScanDate.Format(time.DateOnly)},
 	}...)
+
+	if r.Service != "" {
+		fields = append(fields, [2]string{"service", r.Service})
+	}
 
 	for _, tag := range r.Tags {
 		fields = append(fields, [2]string{"tags", tag})
