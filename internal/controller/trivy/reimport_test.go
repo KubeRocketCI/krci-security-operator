@@ -138,7 +138,7 @@ func TestReconcile_TestCarriesExactlyTheTagsOfItsWorkloadAndImage(t *testing.T) 
 		objects[goAppDeployment] = &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
 			Name: "test-go-app", Namespace: appNS, Labels: map[string]string{"app.kubernetes.io/part-of": "Shop"},
 			Annotations: map[string]string{revisionAnnotation: "1"},
-		}}
+		}, Spec: appsv1.DeploymentSpec{Template: podTemplate("test-go-app")}}
 
 		h := newHarness(t, withReports(objects, goApp(t)))
 		testID := h.onlyTest()
@@ -232,7 +232,7 @@ func TestReconcile_LongWorkloadNameKeepsOneTestAndItsFindings(t *testing.T) {
 	}
 
 	objects := []client.Object{
-		integrationSecret(), namespaceObject(appNS, nil), deployment(name, "1"), replicaSet(replicaSetName, name, "1"),
+		integrationSecret(), namespaceObject(appNS, nil), deployment(name, "1", "test-go-app"), replicaSet(replicaSetName, name, "1"),
 	}
 
 	h := newHarness(t, withReports(objects, newReport()))

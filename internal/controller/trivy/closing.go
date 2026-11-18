@@ -71,26 +71,21 @@ func (r *Reconciler) productTests(
 	return tests, nil
 }
 
-// closeStaleTests closes the owned tests of the namespace product that no longer reflect a running workload container.
-// That covers removed workloads.
-// A test whose Deployment has only superseded reports so far (a rollout is in progress), a test whose report
-// was rejected, and a test of a report kind the pass could not list stay open.
+// closeStaleTests closes the owned tests of the namespace product whose title is not the title of a container of a
+// live stable workload: the workload is gone or the container is no longer in its pod template.
+// A missing report and a workload scaled to zero close nothing.
 func (r *Reconciler) closeStaleTests(
 	ctx context.Context,
 	dd DefectDojo,
 	target trivy.Target,
-	p *pass,
 	product defectdojo.Product,
 ) error {
-	live := make(map[int]struct{}, len(p.current))
-	for _, entry := range p.current {
-		live[entry.testID] = struct{}{}
-	}
-
 	tests, err := r.productTests(ctx, dd, product)
 	if err != nil {
 		return err
 	}
+
+	var expected map[string]struct{}
 
 	listed := make(map[int]struct{}, len(tests))
 
@@ -101,17 +96,17 @@ func (r *Reconciler) closeStaleTests(
 			continue
 		}
 
-		if _, ok := live[test.ID]; ok {
-			r.markOpen(target.Namespace, test.ID)
+		if expected == nil {
+			if expected, err = r.expectedTitles(ctx, target.Namespace); err != nil {
+				return err
+			}
+		}
 
+		if _, ok := expected[test.Title]; ok {
 			continue
 		}
 
-		if p.keepsOpen(test.Title) {
-			continue
-		}
-
-		if err = r.closeTest(ctx, dd, target.Namespace, test); err != nil {
+		if err = r.closeTest(ctx, dd, target.Namespace, test, "no container of a workload has its title"); err != nil {
 			return err
 		}
 	}
@@ -119,6 +114,35 @@ func (r *Reconciler) closeStaleTests(
 	r.pruneTests(target.Namespace, listed)
 
 	return nil
+}
+
+// expectedTitles returns the titles of the tests of the namespace that its live workloads call for: one per report
+// kind, stable workload and container of its pod template. The workloads are listed at the time of the call, not
+// taken from the lists of the import: a workload created in between keeps its test.
+func (r *Reconciler) expectedTitles(ctx context.Context, namespace string) (map[string]struct{}, error) {
+	resolver := trivy.NewWorkloadResolver(r.reader, namespace)
+
+	workloads, err := resolver.StableWorkloads(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	titles := map[string]struct{}{}
+
+	for _, workload := range workloads {
+		containers, _, err := resolver.Containers(ctx, workload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read the containers of %s: %w", workload, err)
+		}
+
+		for container := range containers {
+			for _, kind := range r.config.ReportKinds {
+				titles[trivy.ImportTitle(kind, workload, container)] = struct{}{}
+			}
+		}
+	}
+
+	return titles, nil
 }
 
 // release closes every owned test of a namespace that is gone or excluded, once per process
@@ -170,7 +194,7 @@ func (r *Reconciler) closeOwnedTests(
 			continue
 		}
 
-		if err = r.closeTest(ctx, dd, namespace, test); err != nil {
+		if err = r.closeTest(ctx, dd, namespace, test, "the namespace is gone or excluded"); err != nil {
 			return err
 		}
 	}
@@ -179,7 +203,13 @@ func (r *Reconciler) closeOwnedTests(
 }
 
 // closeTest closes a test that is not closed yet; the callers check that the operator owns it.
-func (r *Reconciler) closeTest(ctx context.Context, dd DefectDojo, namespace string, test defectdojo.Test) error {
+func (r *Reconciler) closeTest(
+	ctx context.Context,
+	dd DefectDojo,
+	namespace string,
+	test defectdojo.Test,
+	reason string,
+) error {
 	if r.isClosed(namespace, test.ID) {
 		return nil
 	}
@@ -190,7 +220,7 @@ func (r *Reconciler) closeTest(ctx context.Context, dd DefectDojo, namespace str
 
 	r.markClosed(namespace, test.ID)
 
-	ctrl.LoggerFrom(ctx).Info("Closed a test", "test", test.ID, "title", test.Title)
+	ctrl.LoggerFrom(ctx).Info("Closed a test", "test", test.ID, "title", test.Title, "reason", reason)
 
 	return nil
 }

@@ -401,6 +401,44 @@ func TestRBACIsReadOnly(t *testing.T) {
 	}
 }
 
+// TestClusterRoleGrantsWhatTheCodeCalls pins the access table of docs/trivy.md: the verbs per resource of the
+// ClusterRole. The workloads need `list` for the close rules; `get` stays for the component tag and the Pods.
+// The reports need `get` for the body of a report on the stable workload that was never imported.
+func TestClusterRoleGrantsWhatTheCodeCalls(t *testing.T) {
+	got := map[string][]string{}
+
+	for _, rule := range rules(t, render(t).one(t, "ClusterRole")) {
+		for _, group := range stringList(t, rule, "apiGroups") {
+			for _, resource := range stringList(t, rule, "resources") {
+				key := group + "/" + resource
+				got[key] = append(got[key], stringList(t, rule, "verbs")...)
+			}
+		}
+	}
+
+	for key, verbs := range got {
+		slices.Sort(verbs)
+		got[key] = slices.Compact(verbs)
+	}
+
+	read := []string{"get", "list"}
+	watch := []string{"list", "watch"}
+	report := []string{"get", "list", "watch"}
+
+	require.Equal(t, map[string][]string{
+		"aquasecurity.github.io/vulnerabilityreports": report,
+		"aquasecurity.github.io/exposedsecretreports": report,
+		"apps/replicasets":  {"list"},
+		"apps/deployments":  read,
+		"apps/statefulsets": read,
+		"apps/daemonsets":   read,
+		"batch/jobs":        read,
+		"batch/cronjobs":    read,
+		"/pods":             read,
+		"/namespaces":       watch,
+	}, got)
+}
+
 func TestRBACReadsNoKubeRocketCIResources(t *testing.T) {
 	for _, rule := range rules(t, render(t).one(t, "ClusterRole")) {
 		require.NotContains(t, stringList(t, rule, "apiGroups"), "v2.edp.epam.com", "rule %v", rule)

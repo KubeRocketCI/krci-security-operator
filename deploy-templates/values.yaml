@@ -35,7 +35,7 @@ extraVolumes: []
 # -- Additional volume mounts to add to the manager container
 extraVolumeMounts: []
 
-# -- Resource requests/limits for the manager container. Memory scales with `concurrency` multiplied by one page of 10 full Trivy reports (a report can reach 3 MB), plus the metadata of all reports in the cluster: raise the memory limit when `concurrency` or the report sizes grow.
+# -- Resource requests/limits for the manager container. Memory scales with `concurrency` multiplied by one page of 10 full Trivy reports (a report can reach 3 MB), plus the metadata of all reports in the cluster, plus the names and container names of the workloads of a namespace (read 500 at a time) and the metadata of the reports of one kind of a namespace: raise the memory limit when `concurrency`, the report sizes or the number of workloads grow.
 ## Ref: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
 resources:
   limits:

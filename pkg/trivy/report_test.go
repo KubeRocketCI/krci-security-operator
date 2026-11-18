@@ -497,3 +497,26 @@ func TestPayload_DoesNotModifyTheReport(t *testing.T) {
 	assert.Contains(t, report.Object["metadata"], "managedFields")
 	assert.Equal(t, "ReplicaSet", report.GetLabels()[LabelResourceKind])
 }
+
+func TestExpiredReport(t *testing.T) {
+	tests := map[string]struct {
+		annotations map[string]string
+		want        bool
+	}{
+		"no annotation":      {annotations: nil, want: false},
+		"0s":                 {annotations: map[string]string{AnnotationReportTTL: "0s"}, want: true},
+		"zero in hours":      {annotations: map[string]string{AnnotationReportTTL: "0h0m0s"}, want: true},
+		"168h":               {annotations: map[string]string{AnnotationReportTTL: "168h0m0s"}, want: false},
+		"not a duration":     {annotations: map[string]string{AnnotationReportTTL: "never"}, want: false},
+		"another annotation": {annotations: map[string]string{"other": "0s"}, want: false},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			report := &unstructured.Unstructured{Object: map[string]any{}}
+			report.SetAnnotations(tt.annotations)
+
+			assert.Equal(t, tt.want, ExpiredReport(report))
+		})
+	}
+}
