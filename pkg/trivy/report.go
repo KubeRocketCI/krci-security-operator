@@ -280,8 +280,10 @@ func ExpiredReport(report metav1.Object) bool {
 }
 
 // Payload returns the report ready to be marshalled, without the fields DefectDojo does not need.
-// Only the top level and the metadata are copied; the report body is shared with the original and must not be
-// modified, so a report is not held in memory twice.
+// Only the top level, the metadata and, when entries are dropped, the report block and its result list are
+// copied; the other values are shared with the original and must not be modified, so a report is not held in
+// memory twice.
+// A result entry whose hash parts (entryHashParts) repeat an earlier entry is dropped; the first is kept.
 // The Trivy Operator parser builds the finding service from the resource namespace, kind and name labels and
 // the container name label, and DefectDojo closes findings only within one service. The labels name the stable
 // workload and the namespace, so the parser service equals Service and a rollout keeps one service.
@@ -311,6 +313,8 @@ func Payload(report *unstructured.Unstructured, workload Workload) map[string]an
 	metadata["labels"] = labels
 
 	out["metadata"] = metadata
+
+	collapseEntries(out, report.GetKind())
 
 	return out
 }

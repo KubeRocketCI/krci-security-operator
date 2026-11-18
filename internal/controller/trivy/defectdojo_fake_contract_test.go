@@ -277,6 +277,75 @@ func TestFakeDefectDojo_FindingIdentity(t *testing.T) {
 	}
 }
 
+func TestFakeDefectDojo_FirstUploadCreatesOneFindingPerEntry(t *testing.T) {
+	f := newFakeDefectDojo()
+
+	id := reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA, vulnA, vulnB))).TestID
+
+	found := f.findingsIn(id)
+
+	require.Len(t, found, 3, "no matching on the upload that creates the test")
+	assert.Equal(t, found[0].hash, found[1].hash)
+	assert.NotEqual(t, found[0].hash, found[2].hash)
+
+	for _, item := range found {
+		assert.Equal(t, statusActive, item.status())
+	}
+}
+
+func TestFakeDefectDojo_ReimportMatchesRepeatedEntriesToTheLowestFindingAndClosesTheOther(t *testing.T) {
+	f := newFakeDefectDojo()
+	id := reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA, vulnA, vulnB))).TestID
+
+	reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA, vulnA, vulnB)))
+
+	found := f.findingsIn(id)
+
+	require.Len(t, found, 3)
+	assert.Equal(t, statusActive, found[0].status(), "the lowest ID of the hash code stays")
+	assert.Equal(t, statusClosed, found[1].status(), "no entry is left for the other finding")
+	assert.Equal(t, statusActive, found[2].status())
+}
+
+func TestFakeDefectDojo_ClosedFindingOfARepeatedEntryStaysClosedWhileTheLowestOneFollowsTheReport(t *testing.T) {
+	f := newFakeDefectDojo()
+	repeated := vulnReport(t, appLabels(), vulnA, vulnA, vulnB)
+	id := reimport(t, f, contractRequest(repeated)).TestID
+
+	statuses := func() []string {
+		out := make([]string, 0, 3)
+		for _, item := range f.findingsIn(id) {
+			out = append(out, item.status())
+		}
+
+		return out
+	}
+
+	reimport(t, f, contractRequest(repeated))
+	assert.Equal(t, []string{statusActive, statusClosed, statusActive}, statuses(), "the second finding is closed")
+
+	reimport(t, f, contractRequest(repeated))
+	assert.Equal(t, []string{statusActive, statusClosed, statusActive}, statuses(), "the closed finding stays closed")
+
+	reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnB)))
+	assert.Equal(t, []string{statusClosed, statusClosed, statusActive}, statuses(), "the entry is gone: both are closed")
+
+	reimport(t, f, contractRequest(repeated))
+	assert.Equal(t, []string{statusActive, statusClosed, statusActive}, statuses(),
+		"the entry is back: the lowest finding is reactivated, the other stays closed")
+	assert.Len(t, f.findingsIn(id), 3, "no finding is created")
+}
+
+func TestFakeDefectDojo_ReimportCreatesOneFindingForAnEntryThatRepeatsInTheReport(t *testing.T) {
+	f := newFakeDefectDojo()
+	id := reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA))).TestID
+
+	reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA, vulnB, vulnB)))
+
+	assert.Equal(t, map[string]string{cveA: statusActive, cveB: statusActive}, f.statuses(id, contractService))
+	assert.Len(t, f.findingsIn(id), 2, "the second entry matches the finding the first one created")
+}
+
 func TestFakeDefectDojo_RequestServiceReplacesTheParserService(t *testing.T) {
 	f := newFakeDefectDojo()
 	r := contractRequest(vulnReport(t, appLabels(), vulnA))
