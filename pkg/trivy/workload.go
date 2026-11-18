@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -75,6 +76,16 @@ type WorkloadResolver struct {
 // NewWorkloadResolver returns a resolver that reads the workloads of namespace.
 func NewWorkloadResolver(reader client.Reader, namespace string) *WorkloadResolver {
 	return &WorkloadResolver{reader: reader, namespace: namespace}
+}
+
+// ResolveReport returns the workload of a report, see ResourceRef and Resolve.
+func (r *WorkloadResolver) ResolveReport(
+	ctx context.Context,
+	report *unstructured.Unstructured,
+) (Workload, WorkloadState, error) {
+	kind, name := ResourceRef(report)
+
+	return r.Resolve(ctx, kind, name)
 }
 
 // Resolve returns the workload of a report's resource kind and name and whether it is current.

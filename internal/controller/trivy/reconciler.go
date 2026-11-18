@@ -288,6 +288,17 @@ type pass struct {
 	rejected map[importKey]reportVersion
 	// unlisted holds the configured report kinds the pass could not list completely.
 	unlisted []string
+	// unattributed holds the report kinds with a skipped report that names no resource: no test is known for it.
+	unattributed map[string]struct{}
+}
+
+// keepOpenKind keeps the tests of a report kind open in this pass.
+func (p *pass) keepOpenKind(kind string) {
+	if p.unattributed == nil {
+		p.unattributed = map[string]struct{}{}
+	}
+
+	p.unattributed[kind] = struct{}{}
 }
 
 // reject records a report version DefectDojo rejected: its test stays open and keeps reflecting the earlier import.
@@ -312,6 +323,10 @@ func (p *pass) keepsOpen(title string) bool {
 		return true
 	}
 
+	if _, ok := p.unattributed[trivy.TitleKind(title)]; ok {
+		return true
+	}
+
 	return !p.listed(title)
 }
 
@@ -323,6 +338,7 @@ func (p *pass) forget(kind string) {
 	maps.DeleteFunc(p.current, func(key importKey, _ importedReport) bool { return ofKind(key.title) })
 	maps.DeleteFunc(p.rejected, func(key importKey, _ reportVersion) bool { return ofKind(key.title) })
 	maps.DeleteFunc(p.keepOpenTitles, func(title string, _ struct{}) bool { return ofKind(title) })
+	delete(p.unattributed, kind)
 }
 
 // syncNamespace imports the reports of an in-scope namespace page by page and closes the tests of workloads
@@ -393,9 +409,11 @@ func (r *Reconciler) importOne(ctx context.Context, dd DefectDojo, p *pass, repo
 		return nil
 	}
 
-	labels := report.GetLabels()
+	if reason := trivy.BrokenReport(report); reason != "" {
+		return r.skipBroken(ctx, p, report, reason)
+	}
 
-	workload, state, err := p.resolver.Resolve(ctx, labels[trivy.LabelResourceKind], labels[trivy.LabelResourceName])
+	workload, state, err := p.resolver.ResolveReport(ctx, report)
 	if err != nil {
 		return err
 	}
@@ -459,6 +477,31 @@ func (r *Reconciler) importOne(ctx context.Context, dd DefectDojo, p *pass, repo
 
 	log.Info("Imported a report", "report", report.GetName(), "kind", report.GetKind(),
 		"scope", p.target.Scope, "product", imp.Product, "engagement", imp.Engagement, "test", entry.testID)
+
+	return nil
+}
+
+// skipBroken logs a report that is not uploaded (see trivy.BrokenReport) and keeps its test open.
+// It is not recorded as imported. A report that names no resource names no test: every test of its report kind
+// stays open.
+func (r *Reconciler) skipBroken(ctx context.Context, p *pass, report *unstructured.Unstructured, reason string) error {
+	ctrl.LoggerFrom(ctx).Info("Skipped a broken report",
+		"report", report.GetName(), "kind", report.GetKind(), "reason", reason)
+
+	if !trivy.NamesResource(report) {
+		p.keepOpenKind(report.GetKind())
+
+		return nil
+	}
+
+	workload, state, err := p.resolver.ResolveReport(ctx, report)
+	if err != nil {
+		return err
+	}
+
+	if state != trivy.WorkloadGone {
+		p.keepOpenTitles[trivy.ReportTitle(p.target.Namespace, report, workload)] = struct{}{}
+	}
 
 	return nil
 }

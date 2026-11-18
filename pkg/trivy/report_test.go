@@ -220,6 +220,18 @@ func TestImportTitle_IsUniquePerNamespace(t *testing.T) {
 	assert.NotEqual(t, ImportTitle("VulnerabilityReport", "ns-a", w, "web"), ImportTitle("VulnerabilityReport", "ns-b", w, "web"))
 }
 
+func TestReportTitle_IsTheTitleOfTheImport(t *testing.T) {
+	workload := Workload{"deployment", "test-go-app"}
+
+	for _, fixture := range []string{"vulnerabilityreport_replicaset.json", "exposedsecretreport_replicaset.json"} {
+		report := loadFixture(t, fixture)
+
+		want := ReportImport(testTarget(), report, workload, nil, "go-app").TestTitle
+
+		assert.Equal(t, want, ReportTitle(testTarget().Namespace, report, workload))
+	}
+}
+
 func TestTitleKind(t *testing.T) {
 	w := Workload{"deployment", "app"}
 
