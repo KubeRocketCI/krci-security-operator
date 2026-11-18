@@ -160,7 +160,7 @@ The operator also reads `POD_NAMESPACE`, which the chart sets from the pod's nam
 
 ### DefectDojo requirements
 
-- DefectDojo 3.5.200.
+- DefectDojo 3.5.200 is the tested and recommended version; earlier versions may work but are not tested.
 - The API token user is a superuser, a staff user, or an authorized user of the Product Type or of the product. DefectDojo 3.5.200 checks the superuser and staff flags and the authorized users only, and does not read role assignments.
 
 | Used for | Token user |

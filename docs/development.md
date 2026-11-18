@@ -39,7 +39,7 @@ The unit tests use the fake client and a fake DefectDojo (`defectdojo_fake_test.
 
 ## Upstream sources
 
-The operator depends on DefectDojo and Trivy Operator behavior that no API document states. Check it in the upstream source at the supported versions, not from memory.
+The operator depends on DefectDojo and Trivy Operator behavior that no API document states. Check it in the upstream source at the supported versions, not from memory. DefectDojo 3.5.200 is the tested and recommended version; earlier versions may work but are not tested.
 
 | Project | Supported | Contract unchanged across |
 |---|---|---|
