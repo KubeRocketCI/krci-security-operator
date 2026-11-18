@@ -59,7 +59,10 @@ DefectDojo files that define the reimport contract:
 |---|---|
 | `dojo/tools/trivy_operator/` | parser: title, severity, vulnerability ids, description and service of each finding; a report without labels or result list gives no findings |
 | `dojo/settings/settings.dist.py` | `HASHCODE_FIELDS_PER_SCANNER["Trivy Operator Scan"]`, `HASH_CODE_FIELDS_ALWAYS` (service) |
-| `dojo/finding/models.py` | `hash_fields`, `get_vulnerability_ids`: how the hash is built |
+| `dojo/finding/models.py` (`dojo/models.py` in 2.55) | `hash_fields`, `get_vulnerability_ids`: how the hash is built; `Finding.service` (200 characters) |
+| `dojo/test/models.py` (`dojo/models.py` in 2.55) | `Test.title` (255 characters), `Test.version` (100 characters) |
+| `dojo/validators.py` | `TAG_PATTERN`: a tag has no space, comma or quote |
+| `dojo/db_migrations/0066_django_tagulous.py` | tag `name` column (255 characters) |
 | `dojo/importers/default_reimporter.py` | `get_original_findings` (close set by service), `process_matched_finding` (reactivation, kept triage states), `close_old_findings` |
 | `dojo/importers/base_importer.py` | `update_test_meta` (version), `update_test_tags`, `mitigate_finding` (risk acceptance removed) |
 | `dojo/importers/auto_create_context.py` | product type conflict, last engagement and test by name |

@@ -44,6 +44,9 @@ const (
 // ErrTestNotNamed is returned for a test without product, engagement or title: only ListTests fills them.
 var ErrTestNotNamed = errors.New("test has no product, engagement or title")
 
+// ErrServiceRequired is returned by Reimport for a request without a service.
+var ErrServiceRequired = errors.New("reimport has no service")
+
 // ErrProductTypeNotFound is returned by ListProducts when the product type is not in the list of product types
 // the token may read.
 var ErrProductTypeNotFound = errors.New("product type not found")
@@ -84,8 +87,7 @@ type ReimportRequest struct {
 	Engagement  string
 	TestTitle   string
 	// Service replaces the service of every finding and limits the findings the reimport closes to that service.
-	// Empty: not sent; DefectDojo keeps the parser service and closes only findings without a service.
-	// DefectDojo stores at most 200 characters; the caller shortens a longer value.
+	// Required. DefectDojo stores at most 200 characters; the caller shortens a longer value.
 	Service  string
 	Version  string
 	Tags     []string
@@ -192,6 +194,10 @@ func (c *Client) WithCredentials(baseURL, token string) *Client {
 // Reimport re-imports the report into the test named by the request, creating the product type,
 // product, engagement and test when they do not exist, and closes findings absent from the report.
 func (c *Client) Reimport(ctx context.Context, r ReimportRequest) (ReimportResult, error) {
+	if r.Service == "" {
+		return ReimportResult{}, ErrServiceRequired
+	}
+
 	fields := make([][2]string, 0, 16+len(r.Tags))
 	fields = append(fields, [][2]string{
 		{"scan_type", ScanTypeTrivyOperator},
@@ -199,6 +205,7 @@ func (c *Client) Reimport(ctx context.Context, r ReimportRequest) (ReimportResul
 		{"product_name", r.Product},
 		{"engagement_name", r.Engagement},
 		{"test_title", r.TestTitle},
+		{"service", r.Service},
 		{"version", r.Version},
 		{"auto_create_context", boolTrue},
 		{"close_old_findings", boolTrue},
@@ -211,10 +218,6 @@ func (c *Client) Reimport(ctx context.Context, r ReimportRequest) (ReimportResul
 		{"push_to_jira", "false"},
 		{"scan_date", r.ScanDate.Format(time.DateOnly)},
 	}...)
-
-	if r.Service != "" {
-		fields = append(fields, [2]string{"service", r.Service})
-	}
 
 	for _, tag := range r.Tags {
 		fields = append(fields, [2]string{"tags", tag})
@@ -244,40 +247,28 @@ func (c *Client) Reimport(ctx context.Context, r ReimportRequest) (ReimportResul
 // CloseTest mitigates every active finding of the test and keeps the test. A test without active findings
 // is closed. It takes the lock of the re-import of the same test.
 func (c *Client) CloseTest(ctx context.Context, test Test) error {
-	_, err := c.closeActiveFindings(ctx, test, func(string) bool { return true })
-
-	return err
-}
-
-// CloseFindingsOutsideService mitigates the active findings of the test whose service is not the given one
-// and returns how many it closed. It takes the lock of the re-import of the same test.
-func (c *Client) CloseFindingsOutsideService(ctx context.Context, test Test, service string) (int, error) {
-	return c.closeActiveFindings(ctx, test, func(s string) bool { return s != service })
-}
-
-func (c *Client) closeActiveFindings(ctx context.Context, test Test, selected func(service string) bool) (int, error) {
 	// The lock is keyed by the names the re-import of the test uses; without them it would be a lock no
 	// re-import shares.
 	if test.Product == "" || test.Engagement == "" || test.Title == "" {
-		return 0, fmt.Errorf("%w: test %d", ErrTestNotNamed, test.ID)
+		return fmt.Errorf("%w: test %d", ErrTestNotNamed, test.ID)
 	}
 
 	unlock := c.testLocks.lock(testLockKey(c.contextKey(test.Product, test.Engagement), test.Title))
 	defer unlock()
 
 	// The list is read completely before anything is closed so closing does not shift the pages.
-	ids, err := c.activeFindingIDs(ctx, test.ID, selected)
+	ids, err := c.activeFindingIDs(ctx, test.ID)
 	if err != nil {
-		return 0, err
+		return err
 	}
 
 	for _, id := range ids {
 		if err := c.closeFinding(ctx, id); err != nil {
-			return 0, err
+			return err
 		}
 	}
 
-	return len(ids), nil
+	return nil
 }
 
 // testLockKey names one test by its context and title, the way a re-import finds it.
@@ -285,13 +276,11 @@ func testLockKey(contextKey, title string) string { return contextKey + "\x00" +
 
 // findingRef holds the fields of a finding that closing needs.
 type findingRef struct {
-	ID      int    `json:"id"`
-	Service string `json:"service"`
+	ID int `json:"id"`
 }
 
-// activeFindingIDs returns the IDs of the findings of the test that are active, not mitigated and whose
-// service is selected.
-func (c *Client) activeFindingIDs(ctx context.Context, testID int, selected func(service string) bool) ([]int, error) {
+// activeFindingIDs returns the IDs of the findings of the test that are active and not mitigated.
+func (c *Client) activeFindingIDs(ctx context.Context, testID int) ([]int, error) {
 	var ids []int
 
 	filter := url.Values{}
@@ -299,11 +288,7 @@ func (c *Client) activeFindingIDs(ctx context.Context, testID int, selected func
 	filter.Set("active", boolTrue)
 	filter.Set("is_mitigated", "false")
 
-	err := listAll(ctx, c, findingsPath, "findings", filter, func(f findingRef) {
-		if selected(f.Service) {
-			ids = append(ids, f.ID)
-		}
-	})
+	err := listAll(ctx, c, findingsPath, "findings", filter, func(f findingRef) { ids = append(ids, f.ID) })
 	if err != nil {
 		return nil, err
 	}

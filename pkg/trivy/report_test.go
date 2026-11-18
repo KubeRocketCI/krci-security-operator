@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,72 +33,80 @@ func testTarget() Target {
 
 func TestReportImport(t *testing.T) {
 	tests := []struct {
-		name     string
-		fixture  string
-		workload Workload
-		want     Import
+		name      string
+		fixture   string
+		workload  Workload
+		component string
+		want      Import
 	}{
 		{
-			name:     "vulnerability report of a Deployment container",
-			fixture:  "vulnerabilityreport_replicaset.json",
-			workload: Workload{"deployment", "test-go-app"},
+			name:      "vulnerability report of a Deployment container",
+			fixture:   "vulnerabilityreport_replicaset.json",
+			workload:  Workload{"deployment", "test-go-app"},
+			component: "go-app",
 			want: Import{
 				Product:    "in-cluster/krci-demo-dev",
 				Engagement: "trivy-operator",
 				TestTitle:  "VulnerabilityReport deployment/test-go-app/test-go-app",
+				Service:    "krci-demo-dev/Deployment/test-go-app/test-go-app",
 				Version:    "main-20261110-194848",
 				Tags: []string{
-					"krci-namespace:krci-demo-dev",
-					"krci-workload:deployment.test-go-app", "krci-container:test-go-app",
-					"krci-component:go-app", "krci-cluster:in-cluster",
+					"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
+					"k8s-workload:deployment.test-go-app", "k8s-container:test-go-app",
+					"oci-image:gitlab.127.0.0.1.nip.io:5050/krci/test-go-app", "app:go-app",
 				},
 			},
 		},
 		{
-			name:     "image of a foreign registry",
-			fixture:  "vulnerabilityreport_dockerhub.json",
-			workload: Workload{"deployment", "defectdojo-primary"},
+			name:      "image of Docker Hub is written without host and library",
+			fixture:   "vulnerabilityreport_dockerhub.json",
+			workload:  Workload{"deployment", "defectdojo-primary"},
+			component: "go-app",
 			want: Import{
 				Product:    "in-cluster/krci-demo-dev",
 				Engagement: "trivy-operator",
 				TestTitle:  "VulnerabilityReport deployment/defectdojo-primary/postgres",
+				Service:    "defectdojo/Deployment/defectdojo-primary/postgres",
 				Version:    "16-alpine",
 				Tags: []string{
-					"krci-namespace:krci-demo-dev",
-					"krci-workload:deployment.defectdojo-primary", "krci-container:postgres",
-					"krci-component:go-app", "krci-cluster:in-cluster",
+					"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
+					"k8s-workload:deployment.defectdojo-primary", "k8s-container:postgres",
+					"oci-image:postgres", "app:go-app",
 				},
 			},
 		},
 		{
-			name:     "whole image reference in the tag is versioned by its tag",
+			name:     "whole image reference in the tag is versioned by its tag, no app tag without a component",
 			fixture:  "vulnerabilityreport_fullref_tag.json",
 			workload: Workload{"statefulset", "defectdojo-valkey"},
 			want: Import{
 				Product:    "in-cluster/krci-demo-dev",
 				Engagement: "trivy-operator",
 				TestTitle:  "VulnerabilityReport statefulset/defectdojo-valkey/valkey",
+				Service:    "defectdojo/StatefulSet/defectdojo-valkey/valkey",
 				Version:    "9.0.0-alpine3.22",
 				Tags: []string{
-					"krci-namespace:krci-demo-dev",
-					"krci-workload:statefulset.defectdojo-valkey", "krci-container:valkey",
-					"krci-component:go-app", "krci-cluster:in-cluster",
+					"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
+					"k8s-workload:statefulset.defectdojo-valkey", "k8s-container:valkey",
+					"oci-image:valkey/valkey",
 				},
 			},
 		},
 		{
-			name:     "exposed secret report has its own test in the same product",
-			fixture:  "exposedsecretreport_replicaset.json",
-			workload: Workload{"deployment", "test-go-app"},
+			name:      "exposed secret report has its own test in the same product",
+			fixture:   "exposedsecretreport_replicaset.json",
+			workload:  Workload{"deployment", "test-go-app"},
+			component: "go-app",
 			want: Import{
 				Product:    "in-cluster/krci-demo-dev",
 				Engagement: "trivy-operator",
 				TestTitle:  "ExposedSecretReport deployment/test-go-app/test-go-app",
+				Service:    "krci-demo-dev/Deployment/test-go-app/test-go-app",
 				Version:    "main-20261110-194848",
 				Tags: []string{
-					"krci-namespace:krci-demo-dev",
-					"krci-workload:deployment.test-go-app", "krci-container:test-go-app",
-					"krci-component:go-app", "krci-cluster:in-cluster",
+					"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
+					"k8s-workload:deployment.test-go-app", "k8s-container:test-go-app",
+					"oci-image:gitlab.127.0.0.1.nip.io:5050/krci/test-go-app", "app:go-app",
 				},
 			},
 		},
@@ -105,11 +114,36 @@ func TestReportImport(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ReportImport(testTarget(), loadFixture(t, tt.fixture), tt.workload, "go-app")
+			got := ReportImport(testTarget(), loadFixture(t, tt.fixture), tt.workload, tt.component)
 
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestReportImport_TagValuesAreTagSafe(t *testing.T) {
+	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
+
+	got := ReportImport(Target{Namespace: "Team A,B", Cluster: "Prod EU"}, report, Workload{"deployment", "app"}, "My,App x")
+
+	assert.Contains(t, got.Tags, "k8s-cluster:prod-eu")
+	assert.Contains(t, got.Tags, "k8s-namespace:team-a-b")
+	assert.Contains(t, got.Tags, "app:my-app-x")
+}
+
+func TestReportImport_OneTagPerKey(t *testing.T) {
+	got := ReportImport(testTarget(), loadFixture(t, "vulnerabilityreport_replicaset.json"), Workload{"deployment", "app"}, "x")
+
+	keys := map[string]int{}
+
+	for _, tag := range got.Tags {
+		key, _, _ := strings.Cut(tag, ":")
+		keys[key]++
+	}
+
+	assert.Equal(t, map[string]int{
+		"k8s-cluster": 1, "k8s-namespace": 1, "k8s-workload": 1, "k8s-container": 1, "oci-image": 1, "app": 1,
+	}, keys)
 }
 
 func TestReportImport_ProductNamesTheClusterAndTheNamespace(t *testing.T) {
@@ -124,18 +158,100 @@ func TestReportImport_ProductNamesTheClusterAndTheNamespace(t *testing.T) {
 	assert.Equal(t, a.TestTitle, b.TestTitle, "the title has no namespace")
 }
 
-func TestReportImport_VersionFallsBackToDigest(t *testing.T) {
+func TestReportImport_Version(t *testing.T) {
+	longTag := strings.Repeat("t", 150)
+
+	tests := map[string]struct {
+		tag, digest, want string
+	}{
+		"tag":                 {tag: "1.2", digest: "sha256:9155b03ee4d94b88", want: "1.2"},
+		"digest only":         {digest: "sha256:9155b03ee4d94b88f7ef", want: "sha256:9155b03ee4d9"},
+		"short digest":        {digest: "sha256:9155", want: "sha256:9155"},
+		"digest without algo": {digest: "9155b03ee4d94b88", want: "sha256:9155b03ee4d9"},
+		"no tag, no digest":   {want: ""},
+		"tag over the limit":  {tag: longTag, want: Shorten(longTag, MaxVersionLen)},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			report := loadFixture(t, "vulnerabilityreport_replicaset.json")
+			require.NoError(t, unstructured.SetNestedField(report.Object, tt.tag, "report", "artifact", "tag"))
+			require.NoError(t, unstructured.SetNestedField(report.Object, tt.digest, "report", "artifact", "digest"))
+
+			got := ReportImport(testTarget(), report, Workload{"deployment", "app"}, "app")
+
+			assert.Equal(t, tt.want, got.Version)
+			assert.LessOrEqual(t, len(got.Version), MaxVersionLen)
+		})
+	}
+}
+
+func TestReportImport_LongNamesKeepTheirLimits(t *testing.T) {
 	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
-	require.NoError(t, unstructured.SetNestedField(report.Object, "", "report", "artifact", "tag"))
+	name := strings.Repeat("n", 250)
+	workload := Workload{"deployment", name}
 
-	got := ReportImport(testTarget(), report, Workload{"deployment", "app"}, "app")
+	labels := report.GetLabels()
+	labels[LabelResourceKind] = "Deployment"
+	labels[LabelResourceName] = name
+	report.SetLabels(labels)
 
-	assert.Equal(t, "sha256:9155b03ee4d9", got.Version)
+	got := ReportImport(testTarget(), report, workload, "app")
+
+	assert.Len(t, got.Service, MaxServiceLen)
+	assert.Len(t, got.TestTitle, MaxTitleLen)
+	assert.True(t, strings.HasPrefix(got.TestTitle, "VulnerabilityReport deployment/nnn"))
+	assert.Equal(t, got, ReportImport(testTarget(), report, workload, "app"), "the same input gives the same values")
+	assert.Equal(t, ReportTitle(report, workload), got.TestTitle)
+	assert.Equal(t, KindVulnerabilityReport, TitleKind(got.TestTitle))
+}
+
+func TestReportImport_TagOverTheLimitIsShortenedKeepingItsKey(t *testing.T) {
+	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
+	name := strings.Repeat("n", 240)
+	value := "deployment." + name
+
+	got := ReportImport(testTarget(), report, Workload{"deployment", name}, "app")
+
+	want := TagKeyWorkload + ":" + Shorten(value, MaxTagLen-len(TagKeyWorkload)-1)
+	assert.Contains(t, got.Tags, want)
+	assert.Len(t, want, MaxTagLen)
+	assert.True(t, strings.HasPrefix(want, "k8s-workload:deployment.nnn"))
+
+	for _, tag := range got.Tags {
+		assert.LessOrEqual(t, len(tag), MaxTagLen, tag)
+	}
+
+	assert.Equal(t, got.Tags, ReportImport(testTarget(), report, Workload{"deployment", name}, "app").Tags,
+		"the same input gives the same tags")
+}
+
+func TestReportImport_TagAtTheLimitIsKept(t *testing.T) {
+	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
+	name := strings.Repeat("n", MaxTagLen-len(TagKeyWorkload)-1-len("deployment."))
+
+	got := ReportImport(testTarget(), report, Workload{"deployment", name}, "app")
+
+	assert.Contains(t, got.Tags, "k8s-workload:deployment."+name)
+}
+
+func TestReportImport_TagsHoldNoCharacterDefectDojoRejects(t *testing.T) {
+	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
+
+	got := ReportImport(Target{Namespace: "ns", Cluster: `c'1"x`}, report, Workload{"deployment", "app"}, `My'App "x"`)
+
+	assert.Contains(t, got.Tags, "k8s-cluster:c-1-x")
+	assert.Contains(t, got.Tags, "app:my-app--x-")
+
+	for _, tag := range got.Tags {
+		assert.NotContains(t, tag, "'")
+		assert.NotContains(t, tag, `"`)
+	}
 }
 
 func TestImport_Request(t *testing.T) {
 	scanDate := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
-	i := Import{Product: "p", Engagement: "e", TestTitle: "t", Version: "v", Tags: []string{"a"}}
+	i := Import{Product: "p", Engagement: "e", TestTitle: "t", Service: "s", Version: "v", Tags: []string{"a"}}
 
 	req := i.Request("KubeRocketCI", scanDate, []byte("{}"))
 
@@ -143,6 +259,7 @@ func TestImport_Request(t *testing.T) {
 	assert.Equal(t, "p", req.Product)
 	assert.Equal(t, "e", req.Engagement)
 	assert.Equal(t, "t", req.TestTitle)
+	assert.Equal(t, "s", req.Service)
 	assert.Equal(t, "v", req.Version)
 	assert.Equal(t, []string{"a"}, req.Tags)
 	assert.Equal(t, scanDate, req.ScanDate)
@@ -201,6 +318,69 @@ func TestPayload(t *testing.T) {
 	assert.Equal(t, "ReplicaSet", report.GetLabels()[LabelResourceKind])
 }
 
+// parserService is the finding service of the Trivy Operator parser: "<namespace>/<kind>/<name>" of the report
+// labels, then "/<container>" when the container label is not empty.
+func parserService(labels map[string]string) string {
+	service := labels[LabelResourceNamespace] + "/" + labels[LabelResourceKind] + "/" + labels[LabelResourceName]
+
+	if container := labels[LabelContainerName]; container != "" {
+		service += "/" + container
+	}
+
+	return service
+}
+
+func TestPayload_ServiceIsTheOneTheParserBuildsFromTheLabels(t *testing.T) {
+	withoutNamespaceLabel := func() *unstructured.Unstructured {
+		report := loadFixture(t, "vulnerabilityreport_replicaset.json")
+		report.SetLabels(withoutKey(report.GetLabels(), LabelResourceNamespace))
+		report.SetNamespace("report-ns")
+
+		return report
+	}
+
+	tests := map[string]struct {
+		report   *unstructured.Unstructured
+		workload Workload
+	}{
+		"replicaset of a deployment": {loadFixture(t, "vulnerabilityreport_replicaset.json"), Workload{"deployment", "test-go-app"}},
+		"exposed secret report":      {loadFixture(t, "exposedsecretreport_replicaset.json"), Workload{"deployment", "test-go-app"}},
+		"statefulset":                {loadFixture(t, "vulnerabilityreport_fullref_tag.json"), Workload{"statefulset", "defectdojo-valkey"}},
+		"job of a cronjob":           {loadFixture(t, "vulnerabilityreport_replicaset.json"), Workload{"cronjob", "nightly"}},
+		"no namespace label":         {withoutNamespaceLabel(), Workload{"deployment", "test-go-app"}},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			sent := &unstructured.Unstructured{Object: Payload(tt.report, tt.workload)}
+
+			assert.Equal(t, parserService(sent.GetLabels()), Service(tt.report, tt.workload))
+			assert.NotContains(t, Service(tt.report, tt.workload), "//", "no part of the service is empty")
+		})
+	}
+}
+
+func withoutKey(m map[string]string, key string) map[string]string {
+	out := map[string]string{}
+
+	for k, v := range m {
+		if k != key {
+			out[k] = v
+		}
+	}
+
+	return out
+}
+
+func TestBrokenReport_NeedsTheContainerName(t *testing.T) {
+	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
+	assert.Empty(t, BrokenReport(report))
+
+	report.SetLabels(withoutKey(report.GetLabels(), LabelContainerName))
+
+	assert.Equal(t, "no container name", BrokenReport(report))
+}
+
 func TestReportGVK(t *testing.T) {
 	gvk := ReportGVK(KindExposedSecretReport)
 
@@ -235,10 +415,6 @@ func TestTitleKind(t *testing.T) {
 
 	assert.Equal(t, "Trivy", TitleKind("Trivy Scan"), "a title written elsewhere yields its first word")
 	assert.Empty(t, TitleKind(""))
-}
-
-func TestNamespaceTag(t *testing.T) {
-	assert.Equal(t, "krci-namespace:ns-a", NamespaceTag("ns-a"))
 }
 
 func TestIsOwned(t *testing.T) {

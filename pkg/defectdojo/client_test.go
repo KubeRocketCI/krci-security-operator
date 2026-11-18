@@ -39,8 +39,9 @@ func testRequest() ReimportRequest {
 		Product:     "app",
 		Engagement:  "runtime-cdp-dev",
 		TestTitle:   "VulnerabilityReport deployment/app/app",
+		Service:     "ns/Deployment/app/app",
 		Version:     "1.0.0",
-		Tags:        []string{"krci-scope:runtime", "krci-env:cdp.dev"},
+		Tags:        []string{"k8s-cluster:c", "k8s-workload:deployment.app", "app:shop"},
 		ScanDate:    time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC),
 		Report:      []byte(`{"kind":"VulnerabilityReport"}`),
 	}
@@ -92,6 +93,7 @@ func TestClient_Reimport_SendsMultipartFields(t *testing.T) {
 		"product_name":                {"app"},
 		"engagement_name":             {"runtime-cdp-dev"},
 		"test_title":                  {"VulnerabilityReport deployment/app/app"},
+		"service":                     {"ns/Deployment/app/app"},
 		"version":                     {"1.0.0"},
 		"auto_create_context":         {"true"},
 		"close_old_findings":          {"true"},
@@ -102,28 +104,25 @@ func TestClient_Reimport_SendsMultipartFields(t *testing.T) {
 		"environment":                 {"Development"},
 		"push_to_jira":                {"false"},
 		"scan_date":                   {"2026-11-10"},
-		"tags":                        {"krci-scope:runtime", "krci-env:cdp.dev"},
-	}, fields, "an empty service is not sent")
+		"tags":                        {"k8s-cluster:c", "k8s-workload:deployment.app", "app:shop"},
+	}, fields, "the form has the service, the version and one tags field per tag, and no apply_tags_to_findings")
 }
 
-func TestClient_Reimport_SendsTheService(t *testing.T) {
-	var service []string
+func TestClient_Reimport_RejectsAnEmptyService(t *testing.T) {
+	var calls atomic.Int32
 
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		require.NoError(t, r.ParseMultipartForm(1<<20))
-
-		service = r.MultipartForm.Value["service"]
-
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
 		writeJSON(w, http.StatusCreated, ReimportResult{TestID: 7})
 	})
 
 	req := testRequest()
-	req.Service = "ns/Deployment/app/app"
+	req.Service = ""
 
 	_, err := c.Reimport(context.Background(), req)
 
-	require.NoError(t, err)
-	assert.Equal(t, []string{"ns/Deployment/app/app"}, service)
+	require.ErrorIs(t, err, ErrServiceRequired)
+	assert.Zero(t, calls.Load(), "nothing is sent")
 }
 
 func TestClient_Reimport_Retries(t *testing.T) {
@@ -557,34 +556,9 @@ func TestClient_Close_RequiresTheNamesOfTheTest(t *testing.T) {
 
 			require.ErrorIs(t, c.CloseTest(context.Background(), test), ErrTestNotNamed)
 
-			_, err := c.CloseFindingsOutsideService(context.Background(), test, "s")
-			require.ErrorIs(t, err, ErrTestNotNamed)
-
 			assert.Zero(t, requests.Load(), "no finding is read or closed")
 		})
 	}
-}
-
-func TestClient_CloseFindingsOutsideService(t *testing.T) {
-	f := newFindingsServer(t, "ns/Deployment/app/app", "ns/ReplicaSet/app-1/app", "ns/Deployment/app/app", "ns/ReplicaSet/app-2/app")
-	c := newTestClient(t, f.handle)
-
-	closed, err := c.CloseFindingsOutsideService(context.Background(), closableTest, "ns/Deployment/app/app")
-
-	require.NoError(t, err)
-	assert.Equal(t, 2, closed)
-	assert.Equal(t, []int{2, 4}, f.closed)
-}
-
-func TestClient_CloseFindingsOutsideService_NothingToClose(t *testing.T) {
-	f := newFindingsServer(t, "ns/Deployment/app/app")
-	c := newTestClient(t, f.handle)
-
-	closed, err := c.CloseFindingsOutsideService(context.Background(), closableTest, "ns/Deployment/app/app")
-
-	require.NoError(t, err)
-	assert.Zero(t, closed)
-	assert.Zero(t, f.posts.Load())
 }
 
 // listingServer serves product types, products, engagements and tests with the filters of the DefectDojo list

@@ -116,7 +116,7 @@ func (r *Reconciler) closeStaleTests(
 		}
 	}
 
-	r.pruneTests(target.Namespace, listed, live)
+	r.pruneTests(target.Namespace, listed)
 
 	return nil
 }

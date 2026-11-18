@@ -105,6 +105,9 @@ func brokenReportCases() map[string]brokenReportCase {
 	withoutResourceName := func(_ *testing.T, r *unstructured.Unstructured) *unstructured.Unstructured {
 		return withoutLabel(r, trivy.LabelResourceName)
 	}
+	withoutContainerName := func(_ *testing.T, r *unstructured.Unstructured) *unstructured.Unstructured {
+		return withoutLabel(r, trivy.LabelContainerName)
+	}
 	withoutReportBlock := func(t *testing.T, r *unstructured.Unstructured) *unstructured.Unstructured {
 		return withoutField(t, r, "report")
 	}
@@ -131,6 +134,7 @@ func brokenReportCases() map[string]brokenReportCase {
 		"vulnerability report with other labels only":      vulnerability(withOtherLabelsOnly),
 		"vulnerability report without the resource kind":   vulnerability(withoutResourceKind),
 		"vulnerability report without the resource name":   vulnerability(withoutResourceName),
+		"vulnerability report without the container name":  vulnerability(withoutContainerName),
 		"vulnerability report without the report block":    vulnerability(withoutReportBlock),
 		"vulnerability report with an empty report block":  vulnerability(withEmptyReportBlock),
 		"vulnerability report without its vulnerabilities": vulnerability(withoutList("vulnerabilities")),
@@ -139,6 +143,7 @@ func brokenReportCases() map[string]brokenReportCase {
 		"exposed secret report with other labels only":     exposedSecret(withOtherLabelsOnly),
 		"exposed secret report without the resource kind":  exposedSecret(withoutResourceKind),
 		"exposed secret report without the resource name":  exposedSecret(withoutResourceName),
+		"exposed secret report without the container name": exposedSecret(withoutContainerName),
 		"exposed secret report without the report block":   exposedSecret(withoutReportBlock),
 		"exposed secret report with an empty report block": exposedSecret(withEmptyReportBlock),
 		"exposed secret report without its secrets":        exposedSecret(withoutList("secrets")),
@@ -223,11 +228,6 @@ func TestReconcile_EmptyReportClosesTheFindingsOfItsTest(t *testing.T) {
 			h.reconcile()
 
 			assert.Len(t, h.dd.reimports, 2, "an empty report is uploaded")
-
-			if h.findingStatuses()[statusClosed] == 0 {
-				t.Skip("the reimport request does not send the service: " +
-					"DefectDojo closes only the findings of the request service")
-			}
 
 			assert.Equal(t, map[string]int{statusClosed: before[statusActive]}, h.findingStatuses())
 		})

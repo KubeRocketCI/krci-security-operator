@@ -36,11 +36,11 @@ func (w Workload) GVK() (gvk schema.GroupVersionKind, ok bool) {
 	}
 }
 
-// Component returns the component a workload belongs to, as a tag-safe value.
+// Component returns the component a workload belongs to, as a tag-safe value, or "" when no source names one.
 // The first source present wins:
 // the app part of the Argo CD tracking-id annotation without the prefixes, the Argo CD instance label,
-// the part-of label, the Helm release annotation, the instance label, and the namespace name.
-func Component(labels, annotations map[string]string, namespace string, prefixes []string) string {
+// the part-of label, the Helm release annotation, the instance label.
+func Component(labels, annotations map[string]string, prefixes []string) string {
 	candidates := []string{
 		stripPrefixes(trackingApp(annotations[annotationArgoTrackingID]), prefixes),
 		labels[labelArgoInstance],
@@ -55,15 +55,16 @@ func Component(labels, annotations map[string]string, namespace string, prefixes
 		}
 	}
 
-	return TagSafe(namespace)
+	return ""
 }
 
-// TagSafe lower-cases the value and replaces spaces and commas, which DefectDojo tags cannot hold.
+// TagSafe lower-cases the value and replaces spaces, commas and quotes (' and "), which DefectDojo tags cannot
+// hold, with "-".
 func TagSafe(v string) string {
 	v = strings.ToLower(strings.TrimSpace(v))
 
 	return strings.Map(func(r rune) rune {
-		if r == ',' || unicode.IsSpace(r) {
+		if r == ',' || r == '\'' || r == '"' || unicode.IsSpace(r) {
 			return '-'
 		}
 

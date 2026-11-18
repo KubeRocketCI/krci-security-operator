@@ -17,6 +17,24 @@ type Image struct {
 	Digest string
 }
 
+// Version is the tag of the image, else "sha256:" and the first 12 characters of the digest, else "".
+func (i Image) Version() string {
+	if i.Tag != "" {
+		return i.Tag
+	}
+
+	if i.Digest == "" {
+		return ""
+	}
+
+	algo, hex, ok := strings.Cut(i.Digest, ":")
+	if !ok {
+		algo, hex = digestAlgo, i.Digest
+	}
+
+	return algo + ":" + hex[:min(len(hex), digestHexLen)]
+}
+
 // ImageOf extracts the image of a Trivy Operator report.
 func ImageOf(report *unstructured.Unstructured) Image {
 	server, _, _ := unstructured.NestedString(report.Object, "report", "registry", "server")

@@ -53,7 +53,7 @@ type Config struct {
 	// ProductType is the DefectDojo product type of the namespace products.
 	ProductType string
 	// ClusterName is the unique name of the cluster in DefectDojo. It has no default: the namespace products are
-	// named "<ClusterName>/<namespace>", and the tests of this cluster carry the tag "krci-cluster:<ClusterName>".
+	// named "<ClusterName>/<namespace>", and the tests of this cluster carry the tag "k8s-cluster:<ClusterName>".
 	ClusterName string
 	// ExcludeNamespaces holds glob patterns of namespaces that are skipped.
 	ExcludeNamespaces []string
