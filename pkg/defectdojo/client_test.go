@@ -248,9 +248,10 @@ func TestClient_RequestTimeouts(t *testing.T) {
 func TestClient_Reimport_StopsWaitingWhenContextIsCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// 429 is the one answer a reimport retries, so the client waits for the backoff.
 	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		cancel()
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusTooManyRequests)
 	}, WithRetry(5, time.Hour))
 
 	_, err := c.Reimport(ctx, testRequest())
