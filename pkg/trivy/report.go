@@ -81,6 +81,30 @@ func ImportTitle(reportKind, namespace string, workload Workload, container stri
 	return reportKind + " " + namespace + "/" + workload.String() + "/" + container
 }
 
+// ReportTitle is the title of the DefectDojo test of a report of a workload.
+func ReportTitle(namespace string, report *unstructured.Unstructured, workload Workload) string {
+	return ImportTitle(report.GetKind(), namespace, workload, report.GetLabels()[LabelContainerName])
+}
+
+// ResourceRef returns the kind and the name of the resource a report was produced for.
+// The name is the label, else the annotation of the same key: Trivy Operator writes a name that is not a valid
+// label value only to the annotation.
+func ResourceRef(report *unstructured.Unstructured) (kind, name string) {
+	name = report.GetLabels()[LabelResourceName]
+	if name == "" {
+		name = report.GetAnnotations()[LabelResourceName]
+	}
+
+	return report.GetLabels()[LabelResourceKind], name
+}
+
+// NamesResource reports whether the report carries both the kind and the name of its resource.
+func NamesResource(report *unstructured.Unstructured) bool {
+	kind, name := ResourceRef(report)
+
+	return kind != "" && name != ""
+}
+
 // TitleKind returns the report kind of a title written by ImportTitle.
 func TitleKind(title string) string {
 	kind, _, _ := strings.Cut(title, " ")
@@ -209,7 +233,7 @@ func ReportImport(
 	return Import{
 		Product:    product,
 		Engagement: engagement,
-		TestTitle:  ImportTitle(report.GetKind(), target.Namespace, workload, container),
+		TestTitle:  ReportTitle(target.Namespace, report, workload),
 		Version:    version,
 		Tags:       tags,
 		Codebase:   codebase,
@@ -230,6 +254,39 @@ func (i Import) Request(productType string, scanDate time.Time, report []byte) d
 	}
 }
 
+// resultFields names the list of results each report kind holds under "report".
+var resultFields = map[string]string{
+	KindVulnerabilityReport: "vulnerabilities",
+	KindExposedSecretReport: "secrets",
+}
+
+// BrokenReport returns why the report must not be uploaded, or "" when it can be.
+// DefectDojo reads a report without labels, without the report block or without its result list as a report
+// with no findings and closes the findings of its test. Trivy Operator always writes the list, also when it is
+// empty; an empty list is not broken.
+// A report without the resource kind or the resource name (see ResourceRef) is broken: it names no test.
+func BrokenReport(report *unstructured.Unstructured) string {
+	if !NamesResource(report) {
+		return "no resource kind or name"
+	}
+
+	block, ok := report.Object["report"].(map[string]any)
+	if !ok {
+		return "no report block"
+	}
+
+	field, ok := resultFields[report.GetKind()]
+	if !ok {
+		return ""
+	}
+
+	if _, ok = block[field].([]any); !ok {
+		return "no report." + field + " list"
+	}
+
+	return ""
+}
+
 // Payload returns the report ready to be marshalled, without the fields DefectDojo does not need.
 // Only the top level and the metadata are copied; the report body is shared with the original and must not be
 // modified, so a report is not held in memory twice.
@@ -247,18 +304,17 @@ func Payload(report *unstructured.Unstructured, workload Workload) map[string]an
 
 	delete(metadata, "managedFields")
 
-	if kind := stableKinds[workload.Kind]; kind != "" {
-		labels, _ := metadata["labels"].(map[string]any)
-		labels = maps.Clone(labels)
+	labels, _ := metadata["labels"].(map[string]any)
+	labels = maps.Clone(labels)
 
-		if labels == nil {
-			labels = map[string]any{}
-		}
-
-		labels[LabelResourceKind] = kind
-		labels[LabelResourceName] = workload.Name
-		metadata["labels"] = labels
+	if labels == nil {
+		labels = map[string]any{}
 	}
+
+	kind, name := serviceResource(report, workload)
+	labels[LabelResourceKind] = kind
+	labels[LabelResourceName] = name
+	metadata["labels"] = labels
 
 	out["metadata"] = metadata
 
@@ -267,6 +323,16 @@ func Payload(report *unstructured.Unstructured, workload Workload) map[string]an
 
 // stableKinds are the workload kinds that replace the resource kind of their reports.
 var stableKinds = map[string]string{workloadDeployment: kindDeployment, workloadCronJob: kindCronJob}
+
+// serviceResource returns the resource kind and name the parser reads: the stable workload, else the report's own.
+// The name is always written as a label, so a name found only in the annotation reaches the parser.
+func serviceResource(report *unstructured.Unstructured, workload Workload) (kind, name string) {
+	if stable := stableKinds[workload.Kind]; stable != "" {
+		return stable, workload.Name
+	}
+
+	return ResourceRef(report)
+}
 
 // Service returns the finding service DefectDojo derives from the report sent by Payload.
 func Service(report *unstructured.Unstructured, workload Workload) string {
@@ -277,10 +343,7 @@ func Service(report *unstructured.Unstructured, workload Workload) string {
 		namespace = report.GetNamespace()
 	}
 
-	kind, name := labels[LabelResourceKind], labels[LabelResourceName]
-	if stable := stableKinds[workload.Kind]; stable != "" {
-		kind, name = stable, workload.Name
-	}
+	kind, name := serviceResource(report, workload)
 
 	return namespace + "/" + kind + "/" + name + "/" + labels[LabelContainerName]
 }

@@ -36,6 +36,10 @@ _Avoid_: empty report, clean
 A current report with zero vulnerabilities or secrets. It means "clean".
 _Avoid_: missing report
 
+**Broken report**:
+A report without the resource kind label, without the resource name (label or annotation), without the `report` block, or without its result list. It is never uploaded.
+_Avoid_: empty report, malformed report, invalid report
+
 ## DefectDojo side
 
 **Product Type**:

@@ -448,8 +448,7 @@ func TestReconcile_ReportWithOneCVELessClosesThatFinding(t *testing.T) {
 
 	got := h.dd.statuses(testID, goAppService)
 	if got[fixed] == statusActive {
-		t.Skip(`known failure until EPMDEDP-17556 "Full reimport request: service, version and tags": ` +
-			"the fixed CVE stays active")
+		t.Skip("the reimport request does not send the service: the fixed CVE stays active")
 	}
 
 	assert.Equal(t, map[string]string{kept: statusActive, fixed: statusClosed}, got)
