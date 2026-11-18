@@ -26,7 +26,7 @@ Product Type   <product type>                              setting, default Kube
 
 - `<ReportKind>`: `VulnerabilityReport` or `ExposedSecretReport`.
 - `<kind>/<name>`: the stable workload, lower-case kind: `deployment`, `statefulset`, `daemonset`, `cronjob`, `job`, `replicaset` (a ReplicaSet without a Deployment), `pod`. ReplicationController reports are not imported.
-- Product tags are set when the product has none of them, on the first reimport and on every sweep, so a failed first attempt is repaired.
+- On the first reimport and on every sweep, the operator makes sure both product tags exist with the correct values and keeps other tags, so a failed first attempt is repaired.
 - `<Kind>` in the service: the same kind in Kubernetes spelling: `Deployment`, `CronJob`, …
 - The CI pipeline writes codebase products under the same Product Type (`<codebase>`, engagements `code-security-<branch>` and `image:<registry>/<repository>`). The operator never reads or writes them.
 
