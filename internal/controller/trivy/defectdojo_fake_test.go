@@ -13,6 +13,8 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"golang.org/x/text/cases"
+
 	"github.com/KubeRocketCI/krci-security-operator/pkg/defectdojo"
 	"github.com/KubeRocketCI/krci-security-operator/pkg/trivy"
 )
@@ -118,13 +120,13 @@ type parsedFinding struct {
 
 // hash is the DefectDojo hash code of Trivy Operator Scan (Finding.hash_fields): the concatenation of title,
 // severity, the sorted unique vulnerability ids, description and, when set, service (HASH_CODE_FIELDS_ALWAYS),
-// case-folded and stripped of ASCII whitespace. strings.ToLower stands in for Python casefold.
+// case-folded and stripped of ASCII whitespace.
 func (p parsedFinding) hash() string {
 	ids := slices.Clone(p.vulnIDs)
 	slices.Sort(ids)
 
 	fields := p.title + p.severity + strings.Join(slices.Compact(ids), "") + p.description + p.service
-	sum := sha256.Sum256([]byte(strings.Trim(strings.ToLower(fields), " \t\n\r\v\f")))
+	sum := sha256.Sum256([]byte(strings.Trim(cases.Fold().String(fields), " \t\n\r\v\f")))
 
 	return hex.EncodeToString(sum[:])
 }
@@ -134,7 +136,10 @@ func (p parsedFinding) hash() string {
 //     and minimum_severity=Info are applied on every reimport, not read from the request;
 //   - the test is the latest one of the engagement with the scan type and title, else a new one;
 //   - a product of another product type is rejected;
-//   - findings match by hash code; the request service replaces the parser service;
+//   - the reimport that creates the test creates one finding per report entry, without matching;
+//   - on an existing test, findings match by hash code, the lowest ID first, and an entry that repeats a hash code
+//     matches that same finding, so the other finding with the hash code is not matched; a hash code that is new
+//     in the report gives one finding, however often it repeats; the request service replaces the parser service;
 //   - the close set is the findings of the test with the request service, or without a service when none is sent;
 //   - a matched closed finding is reactivated; false positive, risk accepted and out of scope are kept;
 //     a finding of the close set missing from the report is closed and loses its risk acceptance;
@@ -208,7 +213,7 @@ func (f *fakeDefectDojo) reimport(r defectdojo.ReimportRequest) (defectdojo.Reim
 		return defectdojo.ReimportResult{}, err
 	}
 
-	test, err := f.targetTest(r)
+	test, created, err := f.targetTest(r)
 	if err != nil {
 		return defectdojo.ReimportResult{}, err
 	}
@@ -218,7 +223,11 @@ func (f *fakeDefectDojo) reimport(r defectdojo.ReimportRequest) (defectdojo.Reim
 		return defectdojo.ReimportResult{}, err
 	}
 
-	f.applyFindings(test.id, r.Service, parsed)
+	if created {
+		f.createFindings(test.id, r.Service, parsed)
+	} else {
+		f.applyFindings(test.id, r.Service, parsed)
+	}
 
 	test.version = r.Version
 
@@ -288,30 +297,43 @@ func validateTags(tags []string) ([]string, error) {
 	return stored, nil
 }
 
-// targetTest finds the test of the request, or creates it with its missing product type, product and engagement.
-func (f *fakeDefectDojo) targetTest(r defectdojo.ReimportRequest) (*ddTest, error) {
+// targetTest finds the test of the request, or creates it with its missing product type, product and engagement;
+// created reports the latter.
+func (f *fakeDefectDojo) targetTest(r defectdojo.ReimportRequest) (test *ddTest, created bool, err error) {
 	product := f.productNamed(r.Product)
 
 	if product != nil && f.productTypes[product.productType] != r.ProductType {
-		return nil, badRequest("The fetched product has a conflict with the supplied product type name: " +
+		return nil, false, badRequest("The fetched product has a conflict with the supplied product type name: " +
 			"supplied product type name - " + r.ProductType)
 	}
 
 	if product != nil {
 		if engagement := f.lastEngagement(product.id, r.Engagement); engagement != nil {
 			if test := f.latestTest(engagement.id, defectdojo.ScanTypeTrivyOperator, r.TestTitle); test != nil {
-				return test, nil
+				return test, false, nil
 			}
 		}
 	}
 
 	if product == nil && r.ProductType == "" {
-		return nil, badRequest("product_type_name parameter missing")
+		return nil, false, badRequest("product_type_name parameter missing")
 	}
 
 	engagement := f.ensureContext(ddContext{productType: r.ProductType, product: r.Product, engagement: r.Engagement})
 
-	return f.addTest(engagement.id, f.nextID("test"), defectdojo.ScanTypeTrivyOperator, r.TestTitle, nil), nil
+	return f.addTest(engagement.id, f.nextID("test"), defectdojo.ScanTypeTrivyOperator, r.TestTitle, nil), true, nil
+}
+
+// createFindings stores one finding per parsed entry, as the import into a new test does: no matching, so entries
+// with an equal hash code give equal findings.
+func (f *fakeDefectDojo) createFindings(testID int, service string, parsed []parsedFinding) {
+	for _, p := range parsed {
+		if service != "" {
+			p.service = service
+		}
+
+		f.addFinding(testID, p)
+	}
 }
 
 // applyFindings matches the parsed findings to the findings of the test and closes the rest of the close set.
@@ -803,32 +825,54 @@ type trivyDocument struct {
 	} `json:"report"`
 }
 
-// The report fields are pointers: the parser formats an absent field as "None" or its default.
+// reportString is a string field of a report entry. The parser reads it with dict.get(name, default): an absent
+// field is the default, a null field is None, which Python formats as "None".
+type reportString struct {
+	set  bool
+	null bool
+	text string
+}
+
+func (s *reportString) UnmarshalJSON(raw []byte) error {
+	s.set = true
+
+	if string(raw) == "null" {
+		s.null = true
+
+		return nil
+	}
+
+	return json.Unmarshal(raw, &s.text)
+}
+
+// or is the value the parser formats: def when the field is absent, "None" when it is null.
+func (s reportString) or(def string) string {
+	switch {
+	case !s.set:
+		return def
+	case s.null:
+		return "None"
+	default:
+		return s.text
+	}
+}
+
 type trivyVulnerability struct {
-	VulnerabilityID  *string `json:"vulnerabilityID"`
-	Resource         *string `json:"resource"`
-	InstalledVersion *string `json:"installedVersion"`
-	FixedVersion     *string `json:"fixedVersion"`
-	Severity         string  `json:"severity"`
-	Title            *string `json:"title"`
+	VulnerabilityID  reportString `json:"vulnerabilityID"`
+	Resource         reportString `json:"resource"`
+	InstalledVersion reportString `json:"installedVersion"`
+	FixedVersion     reportString `json:"fixedVersion"`
+	Severity         string       `json:"severity"`
+	Title            reportString `json:"title"`
 }
 
 type trivySecret struct {
-	RuleID   *string `json:"ruleID"`
-	Category *string `json:"category"`
-	Match    *string `json:"match"`
-	Severity string  `json:"severity"`
-	Target   *string `json:"target"`
-	Title    *string `json:"title"`
-}
-
-// orDefault is the value of a report field, or def when the field is absent.
-func orDefault(v *string, def string) string {
-	if v == nil {
-		return def
-	}
-
-	return *v
+	RuleID   reportString `json:"ruleID"`
+	Category reportString `json:"category"`
+	Match    reportString `json:"match"`
+	Severity string       `json:"severity"`
+	Target   reportString `json:"target"`
+	Title    reportString `json:"title"`
 }
 
 // severityOf maps a Trivy severity to the DefectDojo severity.
@@ -896,17 +940,18 @@ func parseVulnerability(v trivyVulnerability, service, resource string) (parsedF
 		return parsedFinding{}, err
 	}
 
-	id := orDefault(v.VulnerabilityID, "0")
+	id := v.VulnerabilityID.or("0")
 
 	p := parsedFinding{
-		title:    id + " " + orDefault(v.Resource, "None") + " " + orDefault(v.InstalledVersion, "None"),
+		title:    id + " " + v.Resource.or("None") + " " + v.InstalledVersion.or("None"),
 		severity: severity,
-		description: orDefault(v.Title, "None") + "\n**Fixed version:** " + orDefault(v.FixedVersion, "None") + "\n" +
+		description: v.Title.or("None") + "\n**Fixed version:** " + v.FixedVersion.or("None") + "\n" +
 			resource,
 		service: service,
 	}
 
-	if id != "" {
+	// A null id is falsy in the parser; DefectDojo drops a blank vulnerability id (sanitize_vulnerability_ids).
+	if !v.VulnerabilityID.null && strings.TrimSpace(id) != "" {
 		p.vulnIDs = []string{id}
 	}
 
@@ -919,13 +964,13 @@ func parseSecret(s trivySecret, service, resource string) (parsedFinding, error)
 		return parsedFinding{}, err
 	}
 
-	title := orDefault(s.Title, "None")
+	title := s.Title.or("None")
 
 	return parsedFinding{
-		title:    "Secret detected in " + orDefault(s.Target, "") + " - " + title,
+		title:    "Secret detected in " + s.Target.or("") + " - " + title,
 		severity: severity,
-		description: title + "\n**Category:** " + orDefault(s.Category, "None") + "\n**Match:** " +
-			orDefault(s.Match, "") + "\n" + resource + "\n**ruleID:** " + orDefault(s.RuleID, "0"),
+		description: title + "\n**Category:** " + s.Category.or("None") + "\n**Match:** " +
+			s.Match.or("") + "\n" + resource + "\n**ruleID:** " + s.RuleID.or("0"),
 		service: service,
 	}, nil
 }

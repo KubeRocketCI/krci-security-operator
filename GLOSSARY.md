@@ -70,6 +70,10 @@ _Avoid_: scan, report (for the test)
 One issue in a test, identified by DefectDojo from its title, severity, vulnerability ids, description and service.
 _Avoid_: vulnerability (for the finding), issue
 
+**Repeated entry**:
+A result entry of a report that DefectDojo would give the same finding identity as an earlier entry of the same report. The operator sends the first and drops the rest.
+_Avoid_: duplicate, duplicate finding (DefectDojo's term for a finding flagged by deduplication)
+
 **Service**:
 The finding field that names the stable workload and container: `<namespace>/<Kind>/<name>/<container>`.
 _Avoid_: component, workload (for the field)
