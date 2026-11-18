@@ -330,7 +330,7 @@ func TestFakeDefectDojo_ReactivatesAClosedFindingTheReportHoldsAgain(t *testing.
 	id := reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA, vulnB))).TestID
 	before := f.findingsIn(id)
 
-	require.NoError(t, f.CloseTest(context.Background(), id))
+	require.NoError(t, f.CloseTest(context.Background(), defectdojo.Test{ID: id}))
 	assert.Equal(t, map[string]string{cveA: statusClosed, cveB: statusClosed}, f.statuses(id, contractService))
 
 	reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA)))
@@ -427,25 +427,95 @@ func TestFakeDefectDojo_NeverReusesATestID(t *testing.T) {
 	assert.Equal(t, 122, reimport(t, f, contractRequest(vulnReport(t, appLabels()))).TestID)
 }
 
-func TestFakeDefectDojo_TestEndpoints(t *testing.T) {
+func TestFakeDefectDojo_ListsProductsByProductTypeAndName(t *testing.T) {
 	ctx := context.Background()
 
 	f := newFakeDefectDojo()
-	f.seedTests(defectdojo.Test{ID: 7, Title: "a", Tags: []string{"K8s-Namespace:NS"}}, defectdojo.Test{ID: 3, Title: "b", Tags: []string{"k8s-namespace:ns"}})
+	f.seedNamespace("c", "ns", defectdojo.Test{ID: 1, Title: "a"})
+	f.seedNamespace("x-c", "ns", defectdojo.Test{ID: 2, Title: "a"})
+	f.seedNamespace("d", "ns", defectdojo.Test{ID: 3, Title: "a"})
+	f.seedTestsIn(ddContext{productType: "Other", product: "c/other", engagement: "trivy-operator"},
+		defectdojo.Test{ID: 4, Title: "a"})
 
-	listed, err := f.ListTests(ctx, "k8s-namespace:ns")
+	got, err := f.ListProducts(ctx, "KubeRocketCI", "C/")
 	require.NoError(t, err)
-	assert.Equal(t, []int{3, 7}, []int{listed[0].ID, listed[1].ID}, "tags match case-insensitively, ordered by ID")
 
-	got, err := f.GetTest(ctx, 7)
+	names := make([]string, 0, len(got))
+	for _, p := range got {
+		names = append(names, p.Name)
+	}
+
+	assert.Equal(t, []string{"c/ns", "x-c/ns"}, names,
+		"the name matches by contains, case-insensitively, within the product type; the caller checks the prefix")
+
+	_, err = f.ListProducts(ctx, "Missing", "c/")
+	require.ErrorIs(t, err, defectdojo.ErrProductTypeNotFound)
+}
+
+func TestFakeDefectDojo_ListsProductsByExactName(t *testing.T) {
+	ctx := context.Background()
+
+	f := newFakeDefectDojo()
+	f.seedNamespace("c", "kube", defectdojo.Test{ID: 1, Title: "a"})
+	f.seedNamespace("c", "kube-system", defectdojo.Test{ID: 2, Title: "a"})
+	f.seedNamespace("C", "kube", defectdojo.Test{ID: 3, Title: "a"})
+
+	got, err := f.ListProductsByName(ctx, "KubeRocketCI", "c/kube")
 	require.NoError(t, err)
-	assert.Equal(t, defectdojo.Test{ID: 7, Title: "a", Tags: []string{"K8s-Namespace:NS"}}, got)
 
-	_, err = f.GetTest(ctx, 99)
+	names := make([]string, 0, len(got))
+	for _, p := range got {
+		names = append(names, p.Name)
+	}
+
+	assert.Equal(t, []string{"c/kube", "C/kube"}, names, "the whole name matches, case-insensitively")
+
+	_, err = f.ListProductsByName(ctx, "Missing", "c/kube")
+	require.ErrorIs(t, err, defectdojo.ErrProductTypeNotFound)
+}
+
+func TestFakeDefectDojo_ListsTestsOfTheEngagementByScanType(t *testing.T) {
+	ctx := context.Background()
+	c := namespaceContext("c", "ns")
+
+	f := newFakeDefectDojo()
+	f.seedTestsIn(c, defectdojo.Test{ID: 7, Title: "a"}, defectdojo.Test{ID: 3, Title: "b"})
+	f.seedScanTest(c, "Trivy Scan", defectdojo.Test{ID: 5, Title: "c"})
+	f.seedTestsIn(ddContext{productType: c.productType, product: c.product, engagement: "other"},
+		defectdojo.Test{ID: 6, Title: "d"})
+	f.seedNamespace("c", "ns2", defectdojo.Test{ID: 8, Title: "e"})
+
+	products, err := f.ListProducts(ctx, "KubeRocketCI", "c/ns")
+	require.NoError(t, err)
+	require.Len(t, products, 2)
+
+	tests, err := f.ListTests(ctx, products[0], "trivy-operator")
+	require.NoError(t, err)
+
+	require.Len(t, tests, 2)
+	assert.Equal(t, []int{3, 7}, []int{tests[0].ID, tests[1].ID}, "ordered by ID; no other scan type, engagement or product")
+	assert.Equal(t, "c/ns", tests[0].Product)
+	assert.Equal(t, defectdojo.ScanTypeTrivyOperator, tests[0].ScanType)
+}
+
+func TestFakeDefectDojo_PatchReplacesTheProductTags(t *testing.T) {
+	ctx := context.Background()
+
+	f := newFakeDefectDojo()
+	f.seedNamespace("c", "ns", defectdojo.Test{ID: 1, Title: "a"})
+	f.seedProductTags("c/ns", "owner:team", "k8s-cluster:old")
+
+	products, err := f.ListProducts(ctx, "KubeRocketCI", "c/ns")
+	require.NoError(t, err)
+	require.Len(t, products, 1)
+	assert.Equal(t, []string{"owner:team", "k8s-cluster:old"}, products[0].Tags)
+
+	require.NoError(t, f.SetProductTags(ctx, products[0].ID, []string{"k8s-cluster:c"}))
+	assert.Equal(t, []string{"k8s-cluster:c"}, f.productTags("c/ns"), "a PATCH replaces the list")
 
 	var apiErr *defectdojo.APIError
 
-	require.ErrorAs(t, err, &apiErr)
+	require.ErrorAs(t, f.SetProductTags(ctx, 99, nil), &apiErr)
 	assert.Equal(t, http.StatusNotFound, apiErr.StatusCode)
 }
 
@@ -458,7 +528,7 @@ func TestFakeDefectDojo_CloseFindingsOutsideService(t *testing.T) {
 	r.Service = "b"
 	reimport(t, f, r)
 
-	closed, err := f.CloseFindingsOutsideService(context.Background(), id, "a")
+	closed, err := f.CloseFindingsOutsideService(context.Background(), defectdojo.Test{ID: id}, "a")
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, closed)

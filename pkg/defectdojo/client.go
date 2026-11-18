@@ -25,9 +25,12 @@ const (
 
 	boolTrue = "true"
 
-	reimportPath = "/api/v2/reimport-scan/"
-	testsPath    = "/api/v2/tests/"
-	findingsPath = "/api/v2/findings/"
+	reimportPath     = "/api/v2/reimport-scan/"
+	productTypesPath = "/api/v2/product_types/"
+	productsPath     = "/api/v2/products/"
+	engagementsPath  = "/api/v2/engagements/"
+	testsPath        = "/api/v2/tests/"
+	findingsPath     = "/api/v2/findings/"
 
 	defaultRequestTimeout = 2 * time.Minute
 	// reimportTimeout bounds a re-import, which DefectDojo processes before it answers.
@@ -37,6 +40,13 @@ const (
 	maxBackoff        = 30 * time.Second
 	pageSize          = 100
 )
+
+// ErrTestNotNamed is returned for a test without product, engagement or title: only ListTests fills them.
+var ErrTestNotNamed = errors.New("test has no product, engagement or title")
+
+// ErrProductTypeNotFound is returned by ListProducts when the product type is not in the list of product types
+// the token may read.
+var ErrProductTypeNotFound = errors.New("product type not found")
 
 // APIError is a non-2xx answer of DefectDojo.
 type APIError struct {
@@ -91,33 +101,25 @@ type ReimportResult struct {
 	ProductID    int `json:"product_id"`
 }
 
-// Test is a DefectDojo test as returned by the tests list.
+// Product is a DefectDojo product as returned by the products list.
+type Product struct {
+	ID   int      `json:"id"`
+	Name string   `json:"name"`
+	Tags []string `json:"tags"`
+}
+
+// Test is a DefectDojo test of an engagement, as ListTests returns it.
 type Test struct {
-	ID    int      `json:"id"`
-	Title string   `json:"title"`
-	Tags  []string `json:"tags"`
-}
-
-// HasTag reports whether the test carries the exact tag.
-func (t Test) HasTag(tag string) bool {
-	for _, have := range t.Tags {
-		if have == tag {
-			return true
-		}
-	}
-
-	return false
-}
-
-// TagValue returns the value of the first tag with the given "<prefix>:" and whether it exists.
-func (t Test) TagValue(prefix string) (string, bool) {
-	for _, have := range t.Tags {
-		if v, ok := strings.CutPrefix(have, prefix+":"); ok {
-			return v, true
-		}
-	}
-
-	return "", false
+	ID    int    `json:"id"`
+	Title string `json:"title"`
+	// ScanType is the scan type DefectDojo reports for the test.
+	ScanType string `json:"scan_type"`
+	// Tags are the tags of the test. They are not used for ownership.
+	Tags []string `json:"tags"`
+	// Product and Engagement are the names of the product and the engagement the test was listed through.
+	// Closing a test requires them with Title.
+	Product    string `json:"-"`
+	Engagement string `json:"-"`
 }
 
 // state is shared by every Client derived with WithCredentials.
@@ -134,6 +136,8 @@ type state struct {
 	createMu sync.Mutex
 	mu       sync.Mutex
 	known    map[string]struct{}
+	// productTypes holds the IDs of the product types found, by instance and name.
+	productTypes map[string]int
 }
 
 // Client talks to one DefectDojo instance.
@@ -168,6 +172,8 @@ func New(opts ...Option) *Client {
 		backoff:    defaultBackoff,
 		sleep:      sleep,
 		known:      map[string]struct{}{},
+
+		productTypes: map[string]int{},
 	}
 
 	for _, o := range opts {
@@ -217,7 +223,7 @@ func (c *Client) Reimport(ctx context.Context, r ReimportRequest) (ReimportResul
 	// The key names the DefectDojo instance, so a changed base URL starts with every context unknown.
 	contextKey := c.contextKey(r.Product, r.Engagement)
 
-	unlock := c.testLocks.lock(contextKey + "\x00" + r.TestTitle)
+	unlock := c.testLocks.lock(testLockKey(contextKey, r.TestTitle))
 	defer unlock()
 
 	if !c.isKnown(contextKey) {
@@ -235,25 +241,32 @@ func (c *Client) Reimport(ctx context.Context, r ReimportRequest) (ReimportResul
 	return res, nil
 }
 
-// CloseTest mitigates every active finding of the test. A test without active findings is closed.
-func (c *Client) CloseTest(ctx context.Context, testID int) error {
-	_, err := c.closeActiveFindings(ctx, testID, func(string) bool { return true })
+// CloseTest mitigates every active finding of the test and keeps the test. A test without active findings
+// is closed. It takes the lock of the re-import of the same test.
+func (c *Client) CloseTest(ctx context.Context, test Test) error {
+	_, err := c.closeActiveFindings(ctx, test, func(string) bool { return true })
 
 	return err
 }
 
 // CloseFindingsOutsideService mitigates the active findings of the test whose service is not the given one
-// and returns how many it closed.
-func (c *Client) CloseFindingsOutsideService(ctx context.Context, testID int, service string) (int, error) {
-	return c.closeActiveFindings(ctx, testID, func(s string) bool { return s != service })
+// and returns how many it closed. It takes the lock of the re-import of the same test.
+func (c *Client) CloseFindingsOutsideService(ctx context.Context, test Test, service string) (int, error) {
+	return c.closeActiveFindings(ctx, test, func(s string) bool { return s != service })
 }
 
-func (c *Client) closeActiveFindings(ctx context.Context, testID int, selected func(service string) bool) (int, error) {
-	unlock := c.testLocks.lock("test\x00" + strconv.Itoa(testID))
+func (c *Client) closeActiveFindings(ctx context.Context, test Test, selected func(service string) bool) (int, error) {
+	// The lock is keyed by the names the re-import of the test uses; without them it would be a lock no
+	// re-import shares.
+	if test.Product == "" || test.Engagement == "" || test.Title == "" {
+		return 0, fmt.Errorf("%w: test %d", ErrTestNotNamed, test.ID)
+	}
+
+	unlock := c.testLocks.lock(testLockKey(c.contextKey(test.Product, test.Engagement), test.Title))
 	defer unlock()
 
 	// The list is read completely before anything is closed so closing does not shift the pages.
-	ids, err := c.activeFindingIDs(ctx, testID, selected)
+	ids, err := c.activeFindingIDs(ctx, test.ID, selected)
 	if err != nil {
 		return 0, err
 	}
@@ -267,19 +280,24 @@ func (c *Client) closeActiveFindings(ctx context.Context, testID int, selected f
 	return len(ids), nil
 }
 
+// testLockKey names one test by its context and title, the way a re-import finds it.
+func testLockKey(contextKey, title string) string { return contextKey + "\x00" + title }
+
 // findingRef holds the fields of a finding that closing needs.
 type findingRef struct {
 	ID      int    `json:"id"`
 	Service string `json:"service"`
 }
 
-// activeFindingIDs returns the IDs of the active findings of the test whose service is selected.
+// activeFindingIDs returns the IDs of the findings of the test that are active, not mitigated and whose
+// service is selected.
 func (c *Client) activeFindingIDs(ctx context.Context, testID int, selected func(service string) bool) ([]int, error) {
 	var ids []int
 
 	filter := url.Values{}
 	filter.Set("test", strconv.Itoa(testID))
 	filter.Set("active", boolTrue)
+	filter.Set("is_mitigated", "false")
 
 	err := listAll(ctx, c, findingsPath, "findings", filter, func(f findingRef) {
 		if selected(f.Service) {
@@ -294,8 +312,11 @@ func (c *Client) activeFindingIDs(ctx context.Context, testID int, selected func
 }
 
 // listAll reads every page of the DefectDojo list endpoint with the filter and calls each with every result.
+// The next offset is the number of results read, so a server that caps the page size is followed.
 func listAll[T any](ctx context.Context, c *Client, endpoint, what string, filter url.Values, each func(T)) error {
-	for offset := 0; ; offset += pageSize {
+	offset := 0
+
+	for {
 		q := make(url.Values, len(filter)+2)
 		maps.Copy(q, filter)
 		q.Set("limit", strconv.Itoa(pageSize))
@@ -324,6 +345,9 @@ func listAll[T any](ctx context.Context, c *Client, endpoint, what string, filte
 		if page.Next == nil || len(page.Results) == 0 {
 			return nil
 		}
+
+		// A server may answer with fewer results than the limit.
+		offset += len(page.Results)
 	}
 }
 
@@ -345,36 +369,153 @@ func (c *Client) closeFinding(ctx context.Context, findingID int) error {
 	return err
 }
 
-// GetTest returns the test with the given ID.
-func (c *Client) GetTest(ctx context.Context, testID int) (Test, error) {
-	body, err := c.do(ctx, retryAll, defaultRequestTimeout, func(ctx context.Context) (*http.Request, error) {
-		return c.newRequest(ctx, http.MethodGet, fmt.Sprintf("%s%d/", testsPath, testID), nil, "")
-	})
-	if err != nil {
-		return Test{}, err
-	}
-
-	var test Test
-	if err = json.Unmarshal(body, &test); err != nil {
-		return Test{}, fmt.Errorf("failed to decode test %d: %w", testID, err)
-	}
-
-	return test, nil
+// ListProducts returns the products of the product type whose name contains name, with their tags.
+// DefectDojo has no name prefix filter: the caller checks the prefix. A product type that does not exist, or that
+// the token cannot see, gives ErrProductTypeNotFound: DefectDojo answers the same way for both.
+func (c *Client) ListProducts(ctx context.Context, productType, name string) ([]Product, error) {
+	return c.listProducts(ctx, productType, "name", name)
 }
 
-// ListTests returns the tests that carry the tag. DefectDojo matches tags case-insensitively
-// and by exact value; callers that need an exact match check Test.HasTag.
-func (c *Client) ListTests(ctx context.Context, tag string) ([]Test, error) {
-	var tests []Test
+// ListProductsByName returns the products of the product type whose name equals name, with their tags. DefectDojo
+// compares case-insensitively: the caller compares the names. It reads one product, where ListProducts reads
+// every product whose name contains name. ErrProductTypeNotFound as for ListProducts.
+func (c *Client) ListProductsByName(ctx context.Context, productType, name string) ([]Product, error) {
+	return c.listProducts(ctx, productType, "name_exact", name)
+}
 
-	filter := url.Values{}
-	filter.Set("tags", tag)
-
-	if err := listAll(ctx, c, testsPath, "tests", filter, func(t Test) { tests = append(tests, t) }); err != nil {
+func (c *Client) listProducts(ctx context.Context, productType, nameFilter, name string) ([]Product, error) {
+	typeID, found, err := c.productTypeID(ctx, productType)
+	if err != nil {
 		return nil, err
 	}
 
+	if !found {
+		return nil, fmt.Errorf("%w: %q", ErrProductTypeNotFound, productType)
+	}
+
+	var products []Product
+
+	filter := url.Values{}
+	filter.Set("prod_type", strconv.Itoa(typeID))
+	filter.Set(nameFilter, name)
+
+	err = listAll(ctx, c, productsPath, "products", filter, func(p Product) { products = append(products, p) })
+	if err != nil {
+		return nil, err
+	}
+
+	if len(products) == 0 {
+		// The product type may have been deleted and created again under another ID.
+		c.forgetProductType(productType)
+	}
+
+	return products, nil
+}
+
+func (c *Client) productTypeKey(name string) string { return c.baseURL + "\x00" + name }
+
+func (c *Client) forgetProductType(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	delete(c.productTypes, c.productTypeKey(name))
+}
+
+// productTypeID returns the ID of the product type with exactly this name. The ID is kept until a list of
+// products under it comes back empty.
+func (c *Client) productTypeID(ctx context.Context, name string) (id int, found bool, err error) {
+	key := c.productTypeKey(name)
+
+	c.mu.Lock()
+	id, found = c.productTypes[key]
+	c.mu.Unlock()
+
+	if found {
+		return id, true, nil
+	}
+
+	filter := url.Values{}
+	filter.Set("name", name)
+
+	type productType struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}
+
+	err = listAll(ctx, c, productTypesPath, "product types", filter, func(t productType) {
+		if t.Name == name {
+			id, found = t.ID, true
+		}
+	})
+	if err != nil || !found {
+		return 0, false, err
+	}
+
+	c.mu.Lock()
+	c.productTypes[key] = id
+	c.mu.Unlock()
+
+	return id, true, nil
+}
+
+// ListTests returns the tests of the engagement with exactly this name in the product, asking DefectDojo for
+// the Trivy Operator Scan tests. Each test carries the scan type DefectDojo reports; the caller checks it.
+// The engagement name filter is a contains match, so the name is checked here.
+func (c *Client) ListTests(ctx context.Context, product Product, engagement string) ([]Test, error) {
+	var engagementIDs []int
+
+	filter := url.Values{}
+	filter.Set("product", strconv.Itoa(product.ID))
+	filter.Set("name", engagement)
+
+	type engagementRef struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	}
+
+	err := listAll(ctx, c, engagementsPath, "engagements", filter, func(e engagementRef) {
+		if e.Name == engagement {
+			engagementIDs = append(engagementIDs, e.ID)
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var tests []Test
+
+	for _, id := range engagementIDs {
+		filter = url.Values{}
+		filter.Set("engagement", strconv.Itoa(id))
+		filter.Set("scan_type", ScanTypeTrivyOperator)
+
+		err = listAll(ctx, c, testsPath, "tests", filter, func(t Test) {
+			t.Product, t.Engagement = product.Name, engagement
+			tests = append(tests, t)
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return tests, nil
+}
+
+// SetProductTags replaces the tags of the product with the list. DefectDojo replaces the tags on PATCH,
+// so the list holds every tag the product keeps.
+func (c *Client) SetProductTags(ctx context.Context, productID int, tags []string) error {
+	payload, err := json.Marshal(map[string]any{"tags": tags})
+	if err != nil {
+		return fmt.Errorf("failed to encode product tags: %w", err)
+	}
+
+	// Setting the same list twice is harmless, so the call is retried like a read.
+	_, err = c.do(ctx, retryAll, defaultRequestTimeout, func(ctx context.Context) (*http.Request, error) {
+		return c.newRequest(ctx, http.MethodPatch, fmt.Sprintf("%s%d/", productsPath, productID),
+			bytes.NewReader(payload), "application/json")
+	})
+
+	return err
 }
 
 func (c *Client) postReport(ctx context.Context, fields [][2]string, report []byte) (ReimportResult, error) {

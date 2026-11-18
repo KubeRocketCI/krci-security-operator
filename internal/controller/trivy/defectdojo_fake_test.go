@@ -37,13 +37,16 @@ type ddContext struct {
 	engagement  string
 }
 
-// seededContext holds the tests seeded without a context: no reimport of the reconcile tests lands in it.
-var seededContext = ddContext{productType: "KubeRocketCI", product: "seeded", engagement: "seeded"}
+// namespaceContext is the context of the Trivy tests of a namespace product of a cluster.
+func namespaceContext(cluster, namespace string) ddContext {
+	return ddContext{productType: "KubeRocketCI", product: cluster + "/" + namespace, engagement: "trivy-operator"}
+}
 
 type ddProduct struct {
 	id          int
 	name        string
 	productType int
+	tags        []string
 }
 
 type ddEngagement struct {
@@ -135,6 +138,8 @@ func (p parsedFinding) hash() string {
 //   - a matched closed finding is reactivated; false positive, risk accepted and out of scope are kept;
 //     a finding of the close set missing from the report is closed and loses its risk acceptance;
 //   - the version is written, empty included; the test tags are replaced when tags are sent;
+//   - the lists are filtered as DefectDojo does: products by product type ID and name (contains, case-insensitive),
+//     engagements by product and name, tests by engagement and scan type; PATCH of product tags replaces them;
 //   - a form value of only whitespace is rejected with 400; invalid JSON gives 400, an unknown severity 500.
 //
 // It also records the calls of the controller. The error hooks fail a call before it changes the state.
@@ -152,17 +157,24 @@ type fakeDefectDojo struct {
 	reimports []defectdojo.ReimportRequest
 	closed    []int
 	healCalls []healCall
-	getCalls  []int
+	// tagCalls holds the product tag lists the controller sent.
+	tagCalls  []tagCall
 	listCalls int
 
 	reimportErr func(defectdojo.ReimportRequest) error
 	listErr     error
 	healErr     error
+	tagErr      error
 }
 
 type healCall struct {
-	testID  int
+	test    defectdojo.Test
 	service string
+}
+
+type tagCall struct {
+	productID int
+	tags      []string
 }
 
 func newFakeDefectDojo() *fakeDefectDojo {
@@ -187,14 +199,6 @@ func (f *fakeDefectDojo) Reimport(_ context.Context, r defectdojo.ReimportReques
 			return defectdojo.ReimportResult{}, err
 		}
 	}
-
-	return f.reimport(r)
-}
-
-// reimportAs applies a reimport of another producer: the state changes, the calls of the controller do not.
-func (f *fakeDefectDojo) reimportAs(r defectdojo.ReimportRequest) (defectdojo.ReimportResult, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 
 	return f.reimport(r)
 }
@@ -329,22 +333,57 @@ func matchFinding(existing *ddFinding) {
 	existing.verified = false
 }
 
-func (f *fakeDefectDojo) GetTest(_ context.Context, testID int) (defectdojo.Test, error) {
+// ListProducts returns, ordered by ID, the products of the product type whose name contains name.
+// A product type that does not exist gives defectdojo.ErrProductTypeNotFound.
+func (f *fakeDefectDojo) ListProducts(_ context.Context, productType, name string) ([]defectdojo.Product, error) {
+	return f.listProducts(productType, func(have string) bool {
+		return strings.Contains(strings.ToLower(have), strings.ToLower(name))
+	})
+}
+
+// ListProductsByName returns, ordered by ID, the products of the product type whose name equals name, ignoring
+// case, as the name_exact filter does.
+func (f *fakeDefectDojo) ListProductsByName(_ context.Context, productType, name string) ([]defectdojo.Product, error) {
+	return f.listProducts(productType, func(have string) bool { return strings.EqualFold(have, name) })
+}
+
+func (f *fakeDefectDojo) listProducts(productType string, matches func(name string) bool) ([]defectdojo.Product, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	f.getCalls = append(f.getCalls, testID)
+	f.listCalls++
 
-	test, ok := f.tests[testID]
-	if !ok {
-		return defectdojo.Test{}, &defectdojo.APIError{StatusCode: http.StatusNotFound, Body: `{"detail":"Not found."}`}
+	if f.listErr != nil {
+		return nil, f.listErr
 	}
 
-	return apiTest(test), nil
+	typeID := 0
+
+	for id, have := range f.productTypes {
+		if have == productType {
+			typeID = id
+		}
+	}
+
+	if typeID == 0 {
+		return nil, fmt.Errorf("%w: %q", defectdojo.ErrProductTypeNotFound, productType)
+	}
+
+	var out []defectdojo.Product
+
+	for _, id := range slices.Sorted(maps.Keys(f.products)) {
+		p := f.products[id]
+		if p.productType == typeID && matches(p.name) {
+			out = append(out, defectdojo.Product{ID: p.id, Name: p.name, Tags: slices.Clone(p.tags)})
+		}
+	}
+
+	return out, nil
 }
 
-// ListTests returns, ordered by ID, the tests with the tag; DefectDojo compares tags case-insensitively.
-func (f *fakeDefectDojo) ListTests(_ context.Context, tag string) ([]defectdojo.Test, error) {
+// ListTests returns, ordered by ID, the Trivy Operator Scan tests of the engagements of the product that have
+// exactly this name.
+func (f *fakeDefectDojo) ListTests(_ context.Context, product defectdojo.Product, engagement string) ([]defectdojo.Test, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -358,8 +397,13 @@ func (f *fakeDefectDojo) ListTests(_ context.Context, tag string) ([]defectdojo.
 
 	for _, id := range slices.Sorted(maps.Keys(f.tests)) {
 		test := f.tests[id]
-		if slices.ContainsFunc(test.tags, func(have string) bool { return strings.EqualFold(have, tag) }) {
-			out = append(out, apiTest(test))
+		e := f.engagements[test.engagement]
+
+		if e.product == product.ID && e.name == engagement && test.scanType == defectdojo.ScanTypeTrivyOperator {
+			out = append(out, defectdojo.Test{
+				ID: test.id, Title: test.title, ScanType: test.scanType, Tags: slices.Clone(test.tags),
+				Product: product.Name, Engagement: engagement,
+			})
 		}
 	}
 
@@ -367,27 +411,48 @@ func (f *fakeDefectDojo) ListTests(_ context.Context, tag string) ([]defectdojo.
 }
 
 // CloseTest closes every active finding of the test, as the client does through the findings endpoints.
-func (f *fakeDefectDojo) CloseTest(_ context.Context, testID int) error {
+func (f *fakeDefectDojo) CloseTest(_ context.Context, test defectdojo.Test) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	f.closed = append(f.closed, testID)
-	f.closeActive(testID, func(string) bool { return true })
+	f.closed = append(f.closed, test.ID)
+	f.closeActive(test.ID, func(string) bool { return true })
 
 	return nil
 }
 
-func (f *fakeDefectDojo) CloseFindingsOutsideService(_ context.Context, testID int, service string) (int, error) {
+func (f *fakeDefectDojo) CloseFindingsOutsideService(_ context.Context, test defectdojo.Test, service string) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	f.healCalls = append(f.healCalls, healCall{testID: testID, service: service})
+	f.healCalls = append(f.healCalls, healCall{test: test, service: service})
 
 	if f.healErr != nil {
 		return 0, f.healErr
 	}
 
-	return f.closeActive(testID, func(s string) bool { return s != service }), nil
+	return f.closeActive(test.ID, func(s string) bool { return s != service }), nil
+}
+
+// SetProductTags replaces the tags of the product, as PATCH does.
+func (f *fakeDefectDojo) SetProductTags(_ context.Context, productID int, tags []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.tagCalls = append(f.tagCalls, tagCall{productID: productID, tags: slices.Clone(tags)})
+
+	if f.tagErr != nil {
+		return f.tagErr
+	}
+
+	product, ok := f.products[productID]
+	if !ok {
+		return &defectdojo.APIError{StatusCode: http.StatusNotFound, Body: `{"detail":"Not found."}`}
+	}
+
+	product.tags = slices.Clone(tags)
+
+	return nil
 }
 
 func (f *fakeDefectDojo) closeActive(testID int, selected func(service string) bool) int {
@@ -404,9 +469,39 @@ func (f *fakeDefectDojo) closeActive(testID int, selected func(service string) b
 	return closed
 }
 
-// seedTests stores tests in seededContext, as written earlier by this or another producer.
+// seedTests stores tests in the namespace product of the cluster under test and the namespace appNS, as written
+// earlier by this operator.
 func (f *fakeDefectDojo) seedTests(tests ...defectdojo.Test) {
-	f.seedTestsIn(seededContext, tests...)
+	f.seedTestsIn(goAppContext, tests...)
+}
+
+// seedNamespace stores tests in the namespace product of a cluster and a namespace.
+func (f *fakeDefectDojo) seedNamespace(cluster, namespace string, tests ...defectdojo.Test) {
+	f.seedTestsIn(namespaceContext(cluster, namespace), tests...)
+}
+
+// seedProductTags sets the tags of the product as a user or an earlier version of the operator left them.
+func (f *fakeDefectDojo) seedProductTags(product string, tags ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.productNamed(product).tags = slices.Clone(tags)
+}
+
+// productTags returns the tags of the product.
+func (f *fakeDefectDojo) productTags(product string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return slices.Clone(f.productNamed(product).tags)
+}
+
+// hasProduct reports whether the product exists.
+func (f *fakeDefectDojo) hasProduct(product string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.productNamed(product) != nil
 }
 
 // seedTestsIn stores Trivy Operator Scan tests in the context.
@@ -425,7 +520,7 @@ func (f *fakeDefectDojo) seedScanTest(c ddContext, scanType string, test defectd
 		panic(fmt.Sprintf("test %d is seeded twice", test.ID))
 	}
 
-	f.addTest(f.ensureContext(c).id, test.ID, scanType, test.Title, test.Tags)
+	f.addTest(f.ensureContext(c).id, test.ID, scanType, test.Title, nil)
 	f.lastID["test"] = max(f.lastID["test"], test.ID)
 }
 
@@ -473,6 +568,17 @@ func (f *fakeDefectDojo) deleteAllTests() {
 	for _, id := range f.testIDs() {
 		f.deleteTest(id)
 	}
+}
+
+// deleteProducts removes every product with its engagements, tests and findings.
+func (f *fakeDefectDojo) deleteProducts() {
+	f.deleteAllTests()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	clear(f.engagements)
+	clear(f.products)
 }
 
 func (f *fakeDefectDojo) testIDs() []int {
@@ -652,10 +758,6 @@ func (f *fakeDefectDojo) nextID(kind string) int {
 	f.lastID[kind]++
 
 	return f.lastID[kind]
-}
-
-func apiTest(test *ddTest) defectdojo.Test {
-	return defectdojo.Test{ID: test.id, Title: test.title, Tags: slices.Clone(test.tags)}
 }
 
 func badRequest(body string) error {

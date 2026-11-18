@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -214,7 +215,13 @@ func TestClient_Reimport_DoesNotRetryTimeout(t *testing.T) {
 func TestClient_Reads_RetryTransportErrorAndServerError(t *testing.T) {
 	var attempts atomic.Int32
 
-	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == productsPath {
+			writeJSON(w, http.StatusOK, map[string]any{"next": nil, "results": []Product{{ID: 3, Name: "a/ns"}}})
+
+			return
+		}
+
 		switch attempts.Add(1) {
 		case 1:
 			conn, _, err := w.(http.Hijacker).Hijack()
@@ -223,15 +230,15 @@ func TestClient_Reads_RetryTransportErrorAndServerError(t *testing.T) {
 		case 2:
 			w.WriteHeader(http.StatusBadGateway)
 		default:
-			writeJSON(w, http.StatusOK, Test{ID: 3})
+			writeJSON(w, http.StatusOK, map[string]any{"next": nil, "results": []map[string]any{{"id": 1, "name": "KubeRocketCI"}}})
 		}
 	})
 
-	test, err := c.GetTest(context.Background(), 3)
+	products, err := c.ListProducts(context.Background(), "KubeRocketCI", "a/")
 
 	require.NoError(t, err)
-	assert.Equal(t, 3, test.ID)
-	assert.Equal(t, int32(3), attempts.Load())
+	assert.Equal(t, []Product{{ID: 3, Name: "a/ns"}}, products)
+	assert.Equal(t, int32(3), attempts.Load(), "the product type lookup was retried")
 }
 
 func TestClient_RequestTimeouts(t *testing.T) {
@@ -426,6 +433,7 @@ func (f *findingsServer) handle(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(f.t, "/api/v2/findings/", r.URL.Path)
 		assert.Equal(f.t, "42", r.URL.Query().Get("test"))
 		assert.Equal(f.t, "true", r.URL.Query().Get("active"))
+		assert.Equal(f.t, "false", r.URL.Query().Get("is_mitigated"))
 
 		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -475,12 +483,14 @@ func newFindingsServer(t *testing.T, services ...string) *findingsServer {
 	return f
 }
 
+var closableTest = Test{ID: 42, Title: "VulnerabilityReport deployment/app/app", Product: "a/ns", Engagement: "trivy-operator"}
+
 func TestClient_CloseTest_ClosesEveryActiveFinding(t *testing.T) {
 	services := make([]string, 250)
 	f := newFindingsServer(t, services...)
 	c := newTestClient(t, f.handle)
 
-	require.NoError(t, c.CloseTest(context.Background(), 42))
+	require.NoError(t, c.CloseTest(context.Background(), closableTest))
 
 	assert.Len(t, f.closed, 250, "findings of every page are closed")
 	assert.Empty(t, f.active)
@@ -502,7 +512,7 @@ func TestClient_CloseTest_NoActiveFindings(t *testing.T) {
 	f := newFindingsServer(t)
 	c := newTestClient(t, f.handle)
 
-	require.NoError(t, c.CloseTest(context.Background(), 42))
+	require.NoError(t, c.CloseTest(context.Background(), closableTest))
 	assert.Zero(t, f.posts.Load())
 }
 
@@ -511,7 +521,7 @@ func TestClient_CloseTest_RetriesClose(t *testing.T) {
 	f.failOn = 1
 	c := newTestClient(t, f.handle)
 
-	require.NoError(t, c.CloseTest(context.Background(), 42))
+	require.NoError(t, c.CloseTest(context.Background(), closableTest))
 
 	assert.Equal(t, []int{1}, f.closed)
 	assert.Equal(t, int32(2), f.posts.Load(), "the 503 was retried")
@@ -524,15 +534,42 @@ func TestClient_CloseTest_ServerError(t *testing.T) {
 
 	var apiErr *APIError
 
-	require.ErrorAs(t, c.CloseTest(context.Background(), 42), &apiErr)
+	require.ErrorAs(t, c.CloseTest(context.Background(), closableTest), &apiErr)
 	assert.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
+}
+
+func TestClient_Close_RequiresTheNamesOfTheTest(t *testing.T) {
+	tests := map[string]Test{
+		"no product":    {ID: 42, Title: "t", Engagement: "e"},
+		"no engagement": {ID: 42, Title: "t", Product: "p"},
+		"no title":      {ID: 42, Product: "p", Engagement: "e"},
+		"only the ID":   {ID: 42},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			var requests atomic.Int32
+
+			c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				writeJSON(w, http.StatusOK, map[string]any{"next": nil, "results": []map[string]any{{"id": 1}}})
+			})
+
+			require.ErrorIs(t, c.CloseTest(context.Background(), test), ErrTestNotNamed)
+
+			_, err := c.CloseFindingsOutsideService(context.Background(), test, "s")
+			require.ErrorIs(t, err, ErrTestNotNamed)
+
+			assert.Zero(t, requests.Load(), "no finding is read or closed")
+		})
+	}
 }
 
 func TestClient_CloseFindingsOutsideService(t *testing.T) {
 	f := newFindingsServer(t, "ns/Deployment/app/app", "ns/ReplicaSet/app-1/app", "ns/Deployment/app/app", "ns/ReplicaSet/app-2/app")
 	c := newTestClient(t, f.handle)
 
-	closed, err := c.CloseFindingsOutsideService(context.Background(), 42, "ns/Deployment/app/app")
+	closed, err := c.CloseFindingsOutsideService(context.Background(), closableTest, "ns/Deployment/app/app")
 
 	require.NoError(t, err)
 	assert.Equal(t, 2, closed)
@@ -543,46 +580,229 @@ func TestClient_CloseFindingsOutsideService_NothingToClose(t *testing.T) {
 	f := newFindingsServer(t, "ns/Deployment/app/app")
 	c := newTestClient(t, f.handle)
 
-	closed, err := c.CloseFindingsOutsideService(context.Background(), 42, "ns/Deployment/app/app")
+	closed, err := c.CloseFindingsOutsideService(context.Background(), closableTest, "ns/Deployment/app/app")
 
 	require.NoError(t, err)
 	assert.Zero(t, closed)
 	assert.Zero(t, f.posts.Load())
 }
 
-func TestClient_ListTests_FollowsPages(t *testing.T) {
-	var queries []string
+// listingServer serves product types, products, engagements and tests with the filters of the DefectDojo list
+// endpoints, two results per page, and records each query.
+type listingServer struct {
+	t        *testing.T
+	mu       sync.Mutex
+	queries  map[string][]url.Values
+	results  map[string][]any
+	pageSize int
+}
 
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodGet, r.Method)
-		assert.Equal(t, "Token "+testToken, r.Header.Get("Authorization"))
-		assert.Equal(t, "krci-tenant:krci", r.URL.Query().Get("tags"))
+func newListingServer(t *testing.T, results map[string][]any) *listingServer {
+	t.Helper()
 
-		queries = append(queries, r.URL.RawQuery)
+	return &listingServer{t: t, queries: map[string][]url.Values{}, results: results, pageSize: 2}
+}
 
-		offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
-		require.NoError(t, err)
+func (l *listingServer) handle(w http.ResponseWriter, r *http.Request) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
-		if offset == 0 {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"next":    "http://next",
-				"results": []Test{{ID: 1, Title: "a", Tags: []string{"krci-env:cdp.dev"}}},
-			})
+	assert.Equal(l.t, http.MethodGet, r.Method)
+	assert.Equal(l.t, "Token "+testToken, r.Header.Get("Authorization"))
 
-			return
-		}
+	l.queries[r.URL.Path] = append(l.queries[r.URL.Path], r.URL.Query())
 
-		writeJSON(w, http.StatusOK, map[string]any{
-			"next":    nil,
-			"results": []Test{{ID: 2, Title: "b"}},
-		})
+	all := l.results[r.URL.Path]
+
+	offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
+	require.NoError(l.t, err)
+
+	end := min(offset+l.pageSize, len(all))
+
+	var next *string
+
+	if end < len(all) {
+		n := "http://next"
+		next = &n
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"next": next, "results": all[min(offset, end):end]})
+}
+
+func TestClient_ListProducts_FiltersByProductTypeAndName(t *testing.T) {
+	l := newListingServer(t, map[string][]any{
+		productTypesPath: {map[string]any{"id": 4, "name": "KubeRocketCI-old"}, map[string]any{"id": 5, "name": "KubeRocketCI"}},
+		productsPath: {
+			map[string]any{"id": 1, "name": "a/one", "tags": []string{"k8s-cluster:a"}},
+			map[string]any{"id": 2, "name": "x-a/two", "tags": []string{}},
+			map[string]any{"id": 3, "name": "a/three", "tags": nil},
+		},
 	})
+	c := newTestClient(t, l.handle)
 
-	tests, err := c.ListTests(context.Background(), "krci-tenant:krci")
+	products, err := c.ListProducts(context.Background(), "KubeRocketCI", "a/")
 
 	require.NoError(t, err)
-	assert.Equal(t, []Test{{ID: 1, Title: "a", Tags: []string{"krci-env:cdp.dev"}}, {ID: 2, Title: "b"}}, tests)
-	assert.Len(t, queries, 2)
+	assert.Equal(t, []Product{
+		{ID: 1, Name: "a/one", Tags: []string{"k8s-cluster:a"}},
+		{ID: 2, Name: "x-a/two", Tags: []string{}},
+		{ID: 3, Name: "a/three"},
+	}, products, "the name filter is a contains match: the caller checks the prefix; every page is read")
+
+	require.Len(t, l.queries[productTypesPath], 1)
+	assert.Equal(t, "KubeRocketCI", l.queries[productTypesPath][0].Get("name"))
+
+	require.Len(t, l.queries[productsPath], 2, "two pages")
+
+	for _, q := range l.queries[productsPath] {
+		assert.Equal(t, "5", q.Get("prod_type"), "the ID of the exact product type name")
+		assert.Equal(t, "a/", q.Get("name"))
+	}
+}
+
+func TestClient_ListProductsByName_AsksForTheExactName(t *testing.T) {
+	l := newListingServer(t, map[string][]any{
+		productTypesPath: {map[string]any{"id": 5, "name": "KubeRocketCI"}},
+		productsPath:     {map[string]any{"id": 1, "name": "a/kube", "tags": []string{"k8s-cluster:a"}}},
+	})
+	c := newTestClient(t, l.handle)
+
+	products, err := c.ListProductsByName(context.Background(), "KubeRocketCI", "a/kube")
+
+	require.NoError(t, err)
+	assert.Equal(t, []Product{{ID: 1, Name: "a/kube", Tags: []string{"k8s-cluster:a"}}}, products)
+
+	require.Len(t, l.queries[productsPath], 1)
+	assert.Equal(t, "a/kube", l.queries[productsPath][0].Get("name_exact"))
+	assert.Empty(t, l.queries[productsPath][0].Get("name"), "no contains filter, so no other product is read")
+	assert.Equal(t, "5", l.queries[productsPath][0].Get("prod_type"))
+}
+
+func TestClient_ListProductsByName_UnknownProductType(t *testing.T) {
+	l := newListingServer(t, map[string][]any{productTypesPath: {}})
+	c := newTestClient(t, l.handle)
+
+	_, err := c.ListProductsByName(context.Background(), "KubeRocketCI", "a/kube")
+
+	require.ErrorIs(t, err, ErrProductTypeNotFound)
+}
+
+func TestClient_ListProducts_UnknownProductType(t *testing.T) {
+	l := newListingServer(t, map[string][]any{productTypesPath: {map[string]any{"id": 4, "name": "Other"}}})
+	c := newTestClient(t, l.handle)
+
+	products, err := c.ListProducts(context.Background(), "KubeRocketCI", "a/")
+
+	require.ErrorIs(t, err, ErrProductTypeNotFound)
+	assert.Empty(t, products)
+	assert.Empty(t, l.queries[productsPath], "no product can be listed under a missing product type")
+}
+
+func TestClient_ListProducts_ForgetsTheProductTypeIDOfAnEmptyList(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		typeID  = 5
+		lookups int
+	)
+
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		results := []map[string]any{}
+
+		switch r.URL.Path {
+		case productTypesPath:
+			lookups++
+
+			results = append(results, map[string]any{"id": typeID, "name": "KubeRocketCI"})
+		case productsPath:
+			if r.URL.Query().Get("prod_type") == strconv.Itoa(typeID) {
+				results = append(results, map[string]any{"id": 1, "name": "a/ns"})
+			}
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{"next": nil, "results": results})
+	})
+
+	list := func() []Product {
+		products, err := c.ListProducts(context.Background(), "KubeRocketCI", "a/ns")
+		require.NoError(t, err)
+
+		return products
+	}
+
+	require.Len(t, list(), 1)
+	require.Len(t, list(), 1)
+	assert.Equal(t, 1, lookups, "the ID is kept while the lists are not empty")
+
+	// The product type was deleted and created again: the kept ID matches nothing.
+	mu.Lock()
+	typeID = 6
+	mu.Unlock()
+
+	assert.Empty(t, list())
+	assert.Len(t, list(), 1, "the next list resolves the product type again")
+	assert.Equal(t, 2, lookups)
+}
+
+func TestClient_ListProducts_ServerError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	})
+
+	_, err := c.ListProducts(context.Background(), "KubeRocketCI", "a/")
+
+	var apiErr *APIError
+
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+}
+
+func TestClient_ListTests_ThroughEngagementOfProduct(t *testing.T) {
+	l := newListingServer(t, map[string][]any{
+		engagementsPath: {
+			map[string]any{"id": 20, "name": "trivy-operator-extra"},
+			map[string]any{"id": 21, "name": "trivy-operator"},
+		},
+		testsPath: {
+			map[string]any{"id": 1, "title": "a", "scan_type": ScanTypeTrivyOperator, "tags": []string{"k8s-workload:x"}},
+			map[string]any{"id": 2, "title": "b", "scan_type": ScanTypeTrivyOperator, "tags": []string{}},
+			map[string]any{"id": 3, "title": "c", "scan_type": "Trivy Scan"},
+		},
+	})
+	c := newTestClient(t, l.handle)
+
+	tests, err := c.ListTests(context.Background(), Product{ID: 9, Name: "a/ns"}, "trivy-operator")
+
+	require.NoError(t, err)
+	assert.Equal(t, []Test{
+		{ID: 1, Title: "a", ScanType: ScanTypeTrivyOperator, Tags: []string{"k8s-workload:x"}, Product: "a/ns", Engagement: "trivy-operator"},
+		{ID: 2, Title: "b", ScanType: ScanTypeTrivyOperator, Tags: []string{}, Product: "a/ns", Engagement: "trivy-operator"},
+		{ID: 3, Title: "c", ScanType: "Trivy Scan", Product: "a/ns", Engagement: "trivy-operator"},
+	}, tests, "scan type and tags are the ones of the response, also when the server ignores the scan type filter")
+
+	require.Len(t, l.queries[engagementsPath], 1)
+	assert.Equal(t, "9", l.queries[engagementsPath][0].Get("product"))
+	assert.Equal(t, "trivy-operator", l.queries[engagementsPath][0].Get("name"))
+
+	require.Len(t, l.queries[testsPath], 2, "two pages")
+
+	for _, q := range l.queries[testsPath] {
+		assert.Equal(t, "21", q.Get("engagement"), "the engagement whose name is exactly the requested one")
+		assert.Equal(t, "Trivy Operator Scan", q.Get("scan_type"))
+	}
+}
+
+func TestClient_ListTests_NoEngagement(t *testing.T) {
+	l := newListingServer(t, map[string][]any{engagementsPath: {}})
+	c := newTestClient(t, l.handle)
+
+	tests, err := c.ListTests(context.Background(), Product{ID: 9, Name: "a/ns"}, "trivy-operator")
+
+	require.NoError(t, err)
+	assert.Empty(t, tests)
+	assert.Empty(t, l.queries[testsPath])
 }
 
 func TestClient_ListTests_ServerError(t *testing.T) {
@@ -590,12 +810,145 @@ func TestClient_ListTests_ServerError(t *testing.T) {
 		w.WriteHeader(http.StatusBadGateway)
 	})
 
-	_, err := c.ListTests(context.Background(), "krci-tenant:krci")
+	_, err := c.ListTests(context.Background(), Product{ID: 9, Name: "a/ns"}, "trivy-operator")
 
 	var apiErr *APIError
 
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+}
+
+func TestClient_SetProductTags_PatchesTheFullList(t *testing.T) {
+	var (
+		method string
+		path   string
+		body   map[string]any
+	)
+
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.Path
+
+		assert.Equal(t, "Token "+testToken, r.Header.Get("Authorization"))
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+
+		writeJSON(w, http.StatusOK, map[string]any{})
+	})
+
+	require.NoError(t, c.SetProductTags(context.Background(), 9, []string{"owner:team", "k8s-cluster:a", "k8s-namespace:ns"}))
+
+	assert.Equal(t, http.MethodPatch, method)
+	assert.Equal(t, "/api/v2/products/9/", path)
+	assert.Equal(t, map[string]any{"tags": []any{"owner:team", "k8s-cluster:a", "k8s-namespace:ns"}}, body)
+}
+
+func TestClient_SetProductTags_ServerError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+
+	var apiErr *APIError
+
+	require.ErrorAs(t, c.SetProductTags(context.Background(), 9, []string{"a:b"}), &apiErr)
+	assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+}
+
+func TestClient_CloseTest_WaitsForTheReimportOfTheSameTest(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		inFlight int
+		overlap  bool
+	)
+
+	enter := func() {
+		mu.Lock()
+		defer mu.Unlock()
+
+		inFlight++
+		overlap = overlap || inFlight > 1
+	}
+
+	leave := func() {
+		mu.Lock()
+		defer mu.Unlock()
+
+		inFlight--
+	}
+
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, map[string]any{"next": nil, "results": []map[string]any{{"id": 1}}})
+
+			return
+		}
+
+		enter()
+
+		defer leave()
+
+		time.Sleep(30 * time.Millisecond)
+
+		writeJSON(w, http.StatusCreated, ReimportResult{TestID: 42})
+	})
+
+	req := testRequest()
+	req.Product = closableTest.Product
+	req.Engagement = closableTest.Engagement
+	req.TestTitle = closableTest.Title
+
+	_, err := c.Reimport(context.Background(), req)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+
+		_, reimportErr := c.Reimport(context.Background(), req)
+		assert.NoError(t, reimportErr)
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		assert.NoError(t, c.CloseTest(context.Background(), closableTest))
+	}()
+
+	wg.Wait()
+
+	assert.False(t, overlap, "the close call and the reimport of one test never run at the same time")
+}
+
+func TestClient_CloseTest_OtherTestsDoNotWait(t *testing.T) {
+	release := make(chan struct{})
+	reached := make(chan struct{}, 1)
+
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == findingsPath {
+			writeJSON(w, http.StatusOK, map[string]any{"next": nil, "results": []map[string]any{}})
+
+			return
+		}
+
+		reached <- struct{}{}
+
+		<-release
+
+		writeJSON(w, http.StatusCreated, ReimportResult{TestID: 1})
+	})
+
+	req := testRequest()
+
+	go func() { _, _ = c.Reimport(context.Background(), req) }()
+
+	<-reached
+
+	other := Test{ID: 7, Title: "another", Product: req.Product, Engagement: req.Engagement}
+	require.NoError(t, c.CloseTest(context.Background(), other))
+
+	close(release)
 }
 
 func TestListAll_NilFilter(t *testing.T) {
@@ -612,46 +965,4 @@ func TestListAll_NilFilter(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, []Test{{ID: 7}}, got)
-}
-
-func TestTest_Tags(t *testing.T) {
-	test := Test{Tags: []string{"krci-scope:runtime", "krci-env:cdp.dev"}}
-
-	assert.True(t, test.HasTag("krci-scope:runtime"))
-	assert.False(t, test.HasTag("krci-scope:ci"))
-
-	v, ok := test.TagValue("krci-env")
-	assert.True(t, ok)
-	assert.Equal(t, "cdp.dev", v)
-
-	_, ok = test.TagValue("krci-codebase")
-	assert.False(t, ok)
-}
-
-func TestClient_GetTest(t *testing.T) {
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, http.MethodGet, r.Method)
-		assert.Equal(t, "/api/v2/tests/42/", r.URL.Path)
-		assert.Equal(t, "Token "+testToken, r.Header.Get("Authorization"))
-
-		writeJSON(w, http.StatusOK, Test{ID: 42, Title: "a", Tags: []string{"krci-tenant:krci"}})
-	})
-
-	test, err := c.GetTest(context.Background(), 42)
-
-	require.NoError(t, err)
-	assert.Equal(t, Test{ID: 42, Title: "a", Tags: []string{"krci-tenant:krci"}}, test)
-}
-
-func TestClient_GetTest_NotFound(t *testing.T) {
-	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	})
-
-	_, err := c.GetTest(context.Background(), 42)
-
-	var apiErr *APIError
-
-	require.ErrorAs(t, err, &apiErr)
-	assert.Equal(t, http.StatusNotFound, apiErr.StatusCode)
 }

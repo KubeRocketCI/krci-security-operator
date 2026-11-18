@@ -3,6 +3,7 @@ package trivy
 
 import (
 	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,6 +33,10 @@ const (
 
 	// EngagementTrivyOperator is the engagement of a namespace product that holds the tests of this operator.
 	EngagementTrivyOperator = "trivy-operator"
+
+	// TagPrefixK8sCluster and TagPrefixK8sNamespace are the keys of the product tags.
+	TagPrefixK8sCluster   = "k8s-cluster"
+	TagPrefixK8sNamespace = "k8s-namespace"
 
 	tagPrefixWorkload  = "krci-workload"
 	tagPrefixContainer = "krci-container"
@@ -97,10 +102,47 @@ func TitleKind(title string) string {
 // ProductName is the name of a namespace product: "<cluster name>/<namespace>".
 func ProductName(cluster, namespace string) string { return cluster + "/" + namespace }
 
-// IsOwned reports whether the test was written by the operator of the cluster: it carries the cluster tag.
-// The operator closes no other test.
+// IsOwned reports whether the operator of the cluster may close the test: its product name starts with
+// "<cluster name>/" and its scan type is Trivy Operator Scan. Tags are not used.
 func IsOwned(test defectdojo.Test, cluster string) bool {
-	return test.HasTag(ClusterTag(cluster))
+	return strings.HasPrefix(test.Product, cluster+"/") && test.ScanType == defectdojo.ScanTypeTrivyOperator
+}
+
+// NamespaceOfProduct returns the namespace of a namespace product of the cluster, "<cluster name>/<namespace>".
+// Any other product name, one without the prefix or with a further "/" for example, is not one.
+func NamespaceOfProduct(cluster, product string) (string, bool) {
+	namespace, ok := strings.CutPrefix(product, cluster+"/")
+	if !ok || namespace == "" || strings.Contains(namespace, "/") {
+		return "", false
+	}
+
+	return namespace, true
+}
+
+// ProductTags returns the two tags of a namespace product: "k8s-cluster:<cluster>" and "k8s-namespace:<namespace>".
+func ProductTags(cluster, namespace string) []string {
+	return []string{TagPrefixK8sCluster + ":" + cluster, TagPrefixK8sNamespace + ":" + namespace}
+}
+
+// WithProductTags returns the tags a product keeps: its other tags, then the two product tags with the correct
+// values, exactly once each. changed is false when the product has them already.
+func WithProductTags(have []string, cluster, namespace string) (tags []string, changed bool) {
+	want := ProductTags(cluster, namespace)
+
+	for _, tag := range have {
+		if !strings.HasPrefix(tag, TagPrefixK8sCluster+":") && !strings.HasPrefix(tag, TagPrefixK8sNamespace+":") {
+			tags = append(tags, tag)
+		}
+	}
+
+	tags = append(tags, want...)
+
+	return tags, !sameSet(have, tags)
+}
+
+// sameSet reports whether both lists hold the same tags, in any order.
+func sameSet(a, b []string) bool {
+	return slices.Equal(slices.Sorted(slices.Values(a)), slices.Sorted(slices.Values(b)))
 }
 
 // Target is a namespace and the cluster it lives in.

@@ -6,7 +6,7 @@
 |---|---|
 | `cmd/main.go` | manager setup: metrics, health probes, leader election; loads the module configuration and registers the module |
 | `internal/controller/trivy/` | the Trivy module: `Config` (environment parsing and validation), `SetupWithManager` (controller and sweeper), `Reconciler` (pass over a namespace), namespace exclusion, closing, event mapping |
-| `pkg/defectdojo/` | minimal DefectDojo API v2 client with a per-test import lock |
+| `pkg/defectdojo/` | minimal DefectDojo API v2 client with one lock per test for the reimport and the close |
 | `pkg/trivy/` | Trivy report parsing, image and workload resolution, the namespace product, engagement, test title, tags and ownership, component tag |
 | `deploy-templates/` | Helm chart, the only deployment artifact |
 | `test/deploy/` | chart render tests: `helm template` checked against the configuration the code reads and the read-only access |
@@ -30,7 +30,7 @@
 | `trivy.go` | `SetupWithManager`: the controller keyed by namespace, the metadata watches of the reports, the Namespace watch, the sweeper |
 | `reconciler.go` | `Reconcile`, the import of a namespace, the in-memory state of imported reports |
 | `namespace.go` | the live namespace and `excludeNamespaces` |
-| `closing.go` | closing of stale and released tests; the sweeper that wakes namespaces for the controller |
+| `closing.go` | the namespace product lookup, closing of stale and released tests, product tags; the sweeper that wakes namespaces for the controller |
 | `watch.go` | mapping of report events to namespaces |
 
 The unit tests use the fake client and a fake DefectDojo (`defectdojo_fake_test.go`) that models the DefectDojo reimport contract; `defectdojo_fake_contract_test.go` has one test per rule. There is no envtest suite. The event wiring in `SetupWithManager` is not unit-tested; the kind testbed covers it.
