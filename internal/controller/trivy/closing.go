@@ -302,6 +302,13 @@ func (r *Reconciler) closeTest(
 
 	r.markClosed(namespace, test.ID)
 
+	if !res.FoundActive() {
+		ctrl.LoggerFrom(ctx).V(1).Info("Skipped a test without active findings",
+			"test", test.ID, "title", test.Title, "reason", reason)
+
+		return nil
+	}
+
 	kv := []any{
 		"test", test.ID, "title", test.Title, "reason", reason,
 		"reimports", res.Reimports, "closedOneByOne", res.OneByOne,

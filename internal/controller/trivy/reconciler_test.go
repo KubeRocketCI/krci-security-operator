@@ -1865,6 +1865,30 @@ func TestReconcile_LogsHowATestWasClosed(t *testing.T) {
 	}
 }
 
+func TestReconcile_AfterARestartATestWithoutActiveFindingsIsNotLoggedAsClosed(t *testing.T) {
+	const stale = 7
+
+	h := newHarness(t, goAppObjects())
+	h.dd.seedTests(ownedTest(stale, "VulnerabilityReport deployment/removed/removed"))
+	h.dd.seedFinding(stale, "CVE-2026-0001", appNS+"/Deployment/removed/removed")
+
+	logs, err := h.reconcileLoggedErr()
+
+	require.NoError(t, err)
+	assert.Contains(t, logs, `"Closed a test"`)
+	assert.Contains(t, logs, `"reimports"=1`)
+
+	h.restart()
+
+	logs, err = h.reconcileLoggedAt(1)
+
+	require.NoError(t, err)
+	assert.Equal(t, []int{stale, stale}, h.dd.closed, "a restart checks the test again: a reimport by hand may have reactivated findings")
+	assert.NotContains(t, logs, `"Closed a test"`)
+	assert.Contains(t, logs, `"Skipped a test without active findings"`)
+	assert.Contains(t, logs, `"test"=7`)
+}
+
 func TestReconcile_SecretIsReadOncePerTTL(t *testing.T) {
 	secretReads := 0
 

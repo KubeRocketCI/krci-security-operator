@@ -25,13 +25,21 @@ const (
 	sidecarContainer = "sidecar"
 )
 
-// reconcileLoggedErr reconciles the namespace of the app and returns the error and what the pass logged.
+// reconcileLoggedErr reconciles the namespace of the app and returns the error and what the pass logged at Info.
 func (h *harness) reconcileLoggedErr() (string, error) {
+	h.t.Helper()
+
+	return h.reconcileLoggedAt(0)
+}
+
+// reconcileLoggedAt reconciles the namespace of the app and returns the error and what the pass logged up to the
+// verbosity.
+func (h *harness) reconcileLoggedAt(verbosity int) (string, error) {
 	h.t.Helper()
 
 	var lines []string
 
-	log := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{Verbosity: 0})
+	log := funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{Verbosity: verbosity})
 
 	_, err := h.reconciler.Reconcile(ctrl.LoggerInto(context.Background(), log), namespaceRequest(appNS))
 

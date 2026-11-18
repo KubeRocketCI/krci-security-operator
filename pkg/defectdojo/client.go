@@ -309,6 +309,12 @@ type CloseResult struct {
 	Fallback error
 }
 
+// FoundActive reports whether the test had active findings when the close began. A fallback implies one: the
+// reimport is sent only for the service of an active finding.
+func (r CloseResult) FoundActive() bool {
+	return r.Reimports > 0 || r.OneByOne > 0 || r.Fallback != nil
+}
+
 // maxCloseReimports bounds the empty reimports of one close, one per service of the test.
 const maxCloseReimports = 5
 
