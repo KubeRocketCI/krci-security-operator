@@ -485,6 +485,174 @@ func TestFakeDefectDojo_WritesTheVersionAndReplacesTheTags(t *testing.T) {
 	assert.Equal(t, "2.0", f.test(id).version)
 }
 
+// listedTest returns the test as the list of its engagement returns it.
+func listedTest(t *testing.T, f *fakeDefectDojo, testID int) defectdojo.Test {
+	t.Helper()
+
+	ctx := context.Background()
+	c := f.contextOf(testID)
+
+	products, err := f.ListProductsByName(ctx, c.productType, c.product)
+	require.NoError(t, err)
+	require.Len(t, products, 1)
+
+	tests, err := f.ListTests(ctx, products[0], c.engagement)
+	require.NoError(t, err)
+
+	for _, test := range tests {
+		if test.ID == testID {
+			return test
+		}
+	}
+
+	require.Failf(t, "test not listed", "test %d", testID)
+
+	return defectdojo.Test{}
+}
+
+func TestFakeDefectDojo_StoresTheBuildIDOfTheReimportAndListsIt(t *testing.T) {
+	f := newFakeDefectDojo()
+	r := contractRequest(vulnReport(t, appLabels()))
+	r.BuildID = "uid:100:0123456789ab"
+
+	id := reimport(t, f, r).TestID
+
+	assert.Equal(t, "uid:100:0123456789ab", f.test(id).buildID)
+	assert.Equal(t, "uid:100:0123456789ab", listedTest(t, f, id).BuildID)
+
+	r.BuildID = " uid:101:0123456789ab "
+	reimport(t, f, r)
+	assert.Equal(t, "uid:101:0123456789ab", f.test(id).buildID, "a reimport replaces it; a form value is stripped")
+
+	r.BuildID = ""
+	reimport(t, f, r)
+	assert.Empty(t, f.test(id).buildID, "a reimport without a build_id writes an empty one")
+	assert.Empty(t, listedTest(t, f, id).BuildID)
+}
+
+func TestFakeDefectDojo_RejectsABlankBuildID(t *testing.T) {
+	f := newFakeDefectDojo()
+	r := contractRequest(vulnReport(t, appLabels(), vulnA))
+	r.BuildID = "uid:100:0123456789ab"
+	id := reimport(t, f, r).TestID
+
+	r.BuildID = "  "
+
+	var apiErr *defectdojo.APIError
+
+	_, err := f.Reimport(context.Background(), r)
+
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+	assert.Contains(t, apiErr.Body, "build_id")
+	assert.Equal(t, "uid:100:0123456789ab", f.test(id).buildID)
+}
+
+func TestFakeDefectDojo_BuildIDOverTheColumnLimitFailsAfterTheFindingsChanged(t *testing.T) {
+	f := newFakeDefectDojo()
+	id := reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA))).TestID
+
+	r := contractRequest(vulnReport(t, appLabels()))
+	r.BuildID = strings.Repeat("é", 150)
+	reimport(t, f, r)
+	assert.Equal(t, strings.Repeat("é", 150), f.test(id).buildID, "150 characters fit")
+
+	r.BuildID = strings.Repeat("é", 151)
+
+	var apiErr *defectdojo.APIError
+
+	_, err := f.Reimport(context.Background(), r)
+
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
+	assert.Equal(t, strings.Repeat("é", 150), f.test(id).buildID, "the test is not saved")
+}
+
+func TestFakeDefectDojo_CloseClearsTheBuildID(t *testing.T) {
+	f := newFakeDefectDojo()
+	r := contractRequest(vulnReport(t, appLabels(), vulnA))
+	r.BuildID = "uid:100:0123456789ab"
+	id := reimport(t, f, r).TestID
+
+	require.NoError(t, f.CloseTest(context.Background(), listedTest(t, f, id)))
+
+	assert.Empty(t, f.test(id).buildID)
+	assert.Equal(t, 1, f.buildIDUpdates)
+	assert.Equal(t, map[string]string{cveA: statusClosed}, f.statuses(id, contractService))
+}
+
+func TestFakeDefectDojo_CloseOfATestListedWithoutBuildIDUpdatesNothing(t *testing.T) {
+	f := newFakeDefectDojo()
+	id := reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA))).TestID
+
+	require.NoError(t, f.CloseTest(context.Background(), listedTest(t, f, id)))
+
+	assert.Zero(t, f.buildIDUpdates)
+}
+
+func TestFakeDefectDojo_SetBuildIDWritesAndClearsIt(t *testing.T) {
+	f := newFakeDefectDojo()
+	id := reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA))).TestID
+
+	require.NoError(t, f.SetBuildID(context.Background(), id, "uid:100:0123456789ab"))
+	assert.Equal(t, "uid:100:0123456789ab", f.test(id).buildID)
+	assert.Equal(t, "uid:100:0123456789ab", listedTest(t, f, id).BuildID)
+
+	require.NoError(t, f.SetBuildID(context.Background(), id, ""))
+	assert.Empty(t, f.test(id).buildID)
+
+	var apiErr *defectdojo.APIError
+
+	require.ErrorAs(t, f.SetBuildID(context.Background(), id+1, "m"), &apiErr)
+	assert.Equal(t, http.StatusNotFound, apiErr.StatusCode)
+}
+
+func TestFakeDefectDojo_NewTestHasTheBuildIDWhenTheReportIsRejected(t *testing.T) {
+	f := newFakeDefectDojo()
+	r := contractRequest([]byte(`{`))
+	r.BuildID = "uid:100:0123456789ab"
+
+	var apiErr *defectdojo.APIError
+
+	_, err := f.Reimport(context.Background(), r)
+
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+	require.Len(t, f.testIDs(), 1, "DefectDojo creates the test before it reads the report")
+	assert.Equal(t, "uid:100:0123456789ab", f.test(f.testIDs()[0]).buildID,
+		"the build_id of a new test is saved with the test, before the findings")
+	assert.Empty(t, f.findingsIn(f.testIDs()[0]))
+}
+
+func TestFakeDefectDojo_ExistingTestKeepsItsBuildIDWhenTheReportIsRejected(t *testing.T) {
+	f := newFakeDefectDojo()
+	r := contractRequest(vulnReport(t, appLabels(), vulnA))
+	r.BuildID = "uid:100:0123456789ab"
+	id := reimport(t, f, r).TestID
+
+	r.BuildID = "uid:101:0123456789ab"
+	r.Report = []byte(`{`)
+
+	_, err := f.Reimport(context.Background(), r)
+
+	require.Error(t, err)
+	assert.Equal(t, "uid:100:0123456789ab", f.test(id).buildID, "the build_id of an existing test changes with its findings")
+}
+
+func TestFakeDefectDojo_NewTestWithABuildIDOverTheColumnLimitIsNotCreated(t *testing.T) {
+	f := newFakeDefectDojo()
+	r := contractRequest(vulnReport(t, appLabels(), vulnA))
+	r.BuildID = strings.Repeat("é", 151)
+
+	var apiErr *defectdojo.APIError
+
+	_, err := f.Reimport(context.Background(), r)
+
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
+	assert.Empty(t, f.testIDs())
+}
+
 func TestFakeDefectDojo_NeverReusesATestID(t *testing.T) {
 	f := newFakeDefectDojo()
 	f.seedTests(defectdojo.Test{ID: 120, Title: "seeded"})

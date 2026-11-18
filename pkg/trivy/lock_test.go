@@ -56,7 +56,7 @@ func TestImport_ReimportAndCloseOfTheListedTestShareALock(t *testing.T) {
 			page(map[string]any{"id": 21, "name": imp.Engagement})
 		case r.URL.Path == "/api/v2/tests/":
 			page(map[string]any{"id": 42, "title": imp.TestTitle, "scan_type": defectdojo.ScanTypeTrivyOperator})
-		case strings.HasPrefix(r.URL.Path, "/api/v2/findings/"):
+		case strings.HasPrefix(r.URL.Path, "/api/v2/findings/"), r.Method == http.MethodPatch:
 			mu.Lock()
 			findingsDuringImport = findingsDuringImport || reimporting
 			mu.Unlock()
@@ -84,7 +84,7 @@ func TestImport_ReimportAndCloseOfTheListedTestShareALock(t *testing.T) {
 	done := make(chan error, 1)
 
 	go func() {
-		_, reimportErr := c.Reimport(ctx, imp.Request("KubeRocketCI", time.Now(), []byte("{}")))
+		_, reimportErr := c.Reimport(ctx, imp.Request("KubeRocketCI", time.Now(), "", []byte("{}")))
 		done <- reimportErr
 	}()
 

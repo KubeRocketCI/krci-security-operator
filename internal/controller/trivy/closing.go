@@ -70,6 +70,90 @@ func (r *Reconciler) productTests(
 	return tests, nil
 }
 
+// remoteTests is the namespace product and its tests as DefectDojo lists them. A pass reads them once, when it first
+// needs them. found is false while no import has created the product.
+type remoteTests struct {
+	read       bool
+	product    defectdojo.Product
+	found      bool
+	productErr error
+	tests      []defectdojo.Test
+	testsErr   error
+	// latest holds, per title, the Trivy Operator Scan test with the highest ID in the last engagement: the one a
+	// reimport writes into.
+	latest map[string]defectdojo.Test
+}
+
+// readRemote reads the namespace product and its tests unless the pass did.
+func (r *Reconciler) readRemote(ctx context.Context, dd DefectDojo, p *pass) *remoteTests {
+	remote := &p.remote
+	if remote.read {
+		return remote
+	}
+
+	*remote = remoteTests{read: true}
+
+	remote.product, remote.found, remote.productErr = r.namespaceProduct(ctx, dd, p.target.Namespace)
+	if remote.productErr != nil || !remote.found {
+		return remote
+	}
+
+	remote.tests, remote.testsErr = r.productTests(ctx, dd, remote.product)
+
+	remote.latest = make(map[string]defectdojo.Test, len(remote.tests))
+	for _, test := range remote.tests {
+		if !test.LastEngagement || test.ScanType != defectdojo.ScanTypeTrivyOperator {
+			continue
+		}
+
+		if have, ok := remote.latest[test.Title]; !ok || test.ID > have.ID {
+			remote.latest[test.Title] = test
+		}
+	}
+
+	return remote
+}
+
+// remoteAfterUploads returns what DefectDojo lists once the uploads of the pass are done. The read before the
+// uploads is repeated when the pass sent a reimport, and when it did not find the product, which an upload may have
+// created; the failure of a read before the uploads fails the pass, so it is not kept here.
+func (r *Reconciler) remoteAfterUploads(ctx context.Context, dd DefectDojo, p *pass) *remoteTests {
+	if remote := &p.remote; remote.read && (p.uploaded || !remote.found) {
+		remote.read = false
+	}
+
+	return r.readRemote(ctx, dd, p)
+}
+
+// locateTest returns the test that a reimport of the upload writes into; exists is false when it creates one.
+// The test of a report reimported in this process is known by its ID and marker. Otherwise the tests of the
+// namespace product are read once per pass; a failed read, other than a Product Type that DefectDojo does not list,
+// is returned: the pass does not upload while it is unknown what DefectDojo holds.
+func (r *Reconciler) locateTest(
+	ctx context.Context,
+	dd DefectDojo,
+	p *pass,
+	u reportUpload,
+) (test defectdojo.Test, exists bool, err error) {
+	if u.prev != nil {
+		return defectdojo.Test{ID: u.prev.testID, BuildID: u.prev.marker}, true, nil
+	}
+
+	remote := r.readRemote(ctx, dd, p)
+
+	if remote.productErr != nil && !errors.Is(remote.productErr, defectdojo.ErrProductTypeNotFound) {
+		return defectdojo.Test{}, false, remote.productErr
+	}
+
+	if remote.testsErr != nil {
+		return defectdojo.Test{}, false, remote.testsErr
+	}
+
+	test, exists = remote.latest[u.key.title]
+
+	return test, exists, nil
+}
+
 // closeStaleTests closes the owned tests of the namespace product whose title is not the title of a container of a
 // live stable workload: the workload is gone or the container is no longer in its pod template.
 // A missing report and a workload scaled to zero close nothing.
@@ -77,14 +161,12 @@ func (r *Reconciler) closeStaleTests(
 	ctx context.Context,
 	dd DefectDojo,
 	target trivy.Target,
-	product defectdojo.Product,
+	tests []defectdojo.Test,
 ) error {
-	tests, err := r.productTests(ctx, dd, product)
-	if err != nil {
-		return err
-	}
-
-	var expected map[string]struct{}
+	var (
+		expected map[string]struct{}
+		err      error
+	)
 
 	listed := make(map[int]struct{}, len(tests))
 

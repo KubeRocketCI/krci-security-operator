@@ -32,7 +32,7 @@
 | `reconciler.go` | `Reconcile`, the credentials Secret and its cache, the pass over a namespace, the choice of the report of a test, the reimport of a report, and the in-memory state: reimported report versions, rejected report versions, closed tests, released namespaces |
 | `workload_report.go` | the report on the stable workload itself: the metadata index of the reports of a kind, and the check that it can be uploaded before the report of a ReplicaSet or Job is |
 | `namespace.go` | the live namespace and `excludeNamespaces` |
-| `closing.go` | the namespace product lookup, closing of stale and released tests, product tags; the sweeper that wakes namespaces for the controller |
+| `closing.go` | the namespace product lookup and the tests list of a pass (read before the first upload that no reimport of the process covers, and again after a pass that uploaded; the close rules use it), closing of stale and released tests, product tags; the sweeper that wakes namespaces for the controller |
 | `watch.go` | mapping of report events to namespaces |
 
 The unit tests use the fake client and a fake DefectDojo (`defectdojo_fake_test.go`) that models the DefectDojo reimport contract; `defectdojo_fake_contract_test.go` has one test per rule. There is no envtest suite. The event wiring in `SetupWithManager` is not unit-tested; the kind testbed covers it.
@@ -62,17 +62,25 @@ DefectDojo files that define the reimport contract:
 | `dojo/tools/trivy_operator/` | parser: title, severity, vulnerability ids, description and service of each finding; a report without labels or result list gives no findings |
 | `dojo/settings/settings.dist.py` | `HASHCODE_FIELDS_PER_SCANNER["Trivy Operator Scan"]`, `HASH_CODE_FIELDS_ALWAYS` (service) |
 | `dojo/finding/models.py` | `hash_fields`, `get_vulnerability_ids`: how the hash is built; `Finding.service` (200 characters) |
-| `dojo/test/models.py` | `Test.title` (255 characters), `Test.version` (100 characters) |
+| `dojo/test/models.py` | `Test.title` (255 characters), `Test.version` (100 characters), `Test.build_id` (150 characters; the operator keeps it within 100, [ADR 0006](adr/0006-upload-marker-in-build-id.md)) |
+| `dojo/test/api/serializer.py` | `TestSerializer`: the tests list returns every model field, `build_id` included; a `PATCH` of `build_id` sets the upload marker of a new test and clears it on a close |
 | `dojo/validators.py` | `TAG_PATTERN`: a tag has no space, comma or quote |
 | `dojo/db_migrations/0066_django_tagulous.py` | tag `name` column (255 characters) |
 | `dojo/importers/default_importer.py` | the import that creates a test: one finding per entry, no matching |
 | `dojo/importers/default_reimporter.py` | `get_original_findings` (close set by service), `process_matched_finding` (reactivation, kept triage states), `close_old_findings`; candidates of a hash in ascending ID, the first one matched for every entry of the hash |
-| `dojo/importers/base_importer.py` | `update_test_meta` (version), `update_test_tags`, `mitigate_finding` (risk acceptance removed) |
+| `dojo/importers/base_importer.py` | `update_test_meta` (version and `build_id`: an omitted field is stored as empty), `update_test_tags`, `mitigate_finding` (risk acceptance removed) |
 | `dojo/importers/auto_create_context.py` | product type conflict, last engagement and test by name |
-| `dojo/api_v2/serializers.py` | `ReImportScanSerializer`: form validation, context and test created before the parser runs |
+| `dojo/api_v2/serializers.py` | `ReImportScanSerializer`: form validation (`build_id` has no `max_length` and may not be blank), context and test created before the parser runs, a new test with its `build_id` |
 | `dojo/product/api/filters.py` `ApiProductFilter` | `name_exact`, an `iexact` match on the product name: the product lookup by exact name uses it |
 | `dojo/authorization/api_permissions.py` `check_auto_create_permission` | permissions of a reimport that creates the Product Type, product and engagement |
 | `dojo/authorization/authorization.py`, `roles_permissions.py` | staff, superuser and `authorized_users` only; role assignments are not read |
+
+Confirmed on a DefectDojo 3.5.200 testbed (`build_id`):
+
+- A reimport with `build_id` stores it, and `GET /api/v2/tests/` returns it.
+- A reimport without `build_id` writes `""`.
+- Up to 150 characters are accepted; 151 characters give HTTP 500.
+- `PATCH /api/v2/tests/<id>/` with `{"build_id":""}` is accepted and clears it.
 
 Trivy Operator files: `pkg/trivyoperator/constants.go` (report labels), `pkg/apis/aquasecurity/v1alpha1/` (report types, `report-ttl` annotation).
 

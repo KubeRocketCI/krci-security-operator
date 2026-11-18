@@ -92,6 +92,10 @@ _Avoid_: importer, client
 An upload of one current report into its runtime test, which matches existing findings and closes the ones the report no longer holds.
 _Avoid_: import, sync (for one upload)
 
+**Upload marker**:
+The `build_id` of a runtime test that names the report version and the request of the last completed reimport into it. A test whose reimport did not complete has no marker or the earlier one. A report whose marker equals it is already uploaded.
+_Avoid_: checkpoint, fingerprint (for the whole value), imported flag
+
 **Workload report**:
 A report whose resource is the stable workload itself, not a ReplicaSet or Job of it.
 _Avoid_: own report
