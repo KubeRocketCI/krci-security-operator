@@ -54,8 +54,8 @@ type DefectDojo interface {
 	ListProductsByName(ctx context.Context, productType, name string) ([]defectdojo.Product, error)
 	// ListTests returns the Trivy Operator Scan tests of the engagement of the product.
 	ListTests(ctx context.Context, product defectdojo.Product, engagement string) ([]defectdojo.Test, error)
-	// CloseTest mitigates the active findings of the test and keeps the test.
-	CloseTest(ctx context.Context, test defectdojo.Test) error
+	// CloseTest mitigates the findings of the test, by empty reimports and one by one, and keeps the test.
+	CloseTest(ctx context.Context, test defectdojo.Test) (defectdojo.CloseResult, error)
 	// SetBuildID sets the build_id of the test.
 	SetBuildID(ctx context.Context, testID int, buildID string) error
 	// SetProductTags replaces the tags of the product.

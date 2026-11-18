@@ -67,8 +67,11 @@ DefectDojo files that define the reimport contract:
 | `dojo/validators.py` | `TAG_PATTERN`: a tag has no space, comma or quote |
 | `dojo/db_migrations/0066_django_tagulous.py` | tag `name` column (255 characters) |
 | `dojo/importers/default_importer.py` | the import that creates a test: one finding per entry, no matching |
-| `dojo/importers/default_reimporter.py` | `get_original_findings` (close set by service), `process_matched_finding` (reactivation, kept triage states), `close_old_findings`; candidates of a hash in ascending ID, the first one matched for every entry of the hash |
-| `dojo/importers/base_importer.py` | `update_test_meta` (version and `build_id`: an omitted field is stored as empty), `update_test_tags`, `mitigate_finding` (risk acceptance removed) |
+| `dojo/importers/default_reimporter.py` | `get_original_findings` (close set by service, findings of the test that are or are not active), `process_matched_finding` (reactivation, kept triage states), `close_old_findings` (an empty report mitigates the close set: [How a test is closed](trivy.md#how-a-test-is-closed)); candidates of a hash in ascending ID, the first one matched for every entry of the hash |
+| `dojo/importers/base_importer.py` | `update_test_meta` (version and `build_id`: an omitted field is stored as empty), `update_test_tags` (only a non-empty list is written), `mitigate_finding` (risk acceptance removed, a note per finding) |
+| `dojo/models.py` | statistics of a test: `statistics.after.total.active` counts the active findings of the whole test, every service |
+| `dojo/authorization/api_permissions.py` `UserHasReimportPermission` | a reimport by `test` ID needs the import permission on the test; an unknown test gives 400 |
+| `dojo/finding/api/views.py`, `dojo/finding/helper.py` | `findings/<id>/close/`, the one-by-one close: sets the mitigation time to the request time and only active findings are read |
 | `dojo/importers/auto_create_context.py` | product type conflict, last engagement and test by name |
 | `dojo/api_v2/serializers.py` | `ReImportScanSerializer`: form validation (`build_id` has no `max_length` and may not be blank), context and test created before the parser runs, a new test with its `build_id` |
 | `dojo/product/api/filters.py` `ApiProductFilter` | `name_exact`, an `iexact` match on the product name: the product lookup by exact name uses it |
@@ -81,6 +84,13 @@ Confirmed on a DefectDojo 3.5.200 testbed (`build_id`):
 - A reimport without `build_id` writes `""`.
 - Up to 150 characters are accepted; 151 characters give HTTP 500.
 - `PATCH /api/v2/tests/<id>/` with `{"build_id":""}` is accepted and clears it.
+
+Confirmed on a DefectDojo 3.5.200 testbed (the close with a reimport of an empty report):
+
+- `POST /api/v2/reimport-scan/` with `test=<id>`, `scan_type=Trivy Operator Scan`, `service`, `close_old_findings=true`, the current `version` and a Trivy Operator report whose result list is empty answers 201 with `statistics.after.total.active` of `0`, and mitigates every finding of the service that is not mitigated, active or not: 73 findings in 0.46 s, 1,736 in 10.0 s.
+- False positive and out of scope flags are kept, the risk acceptance is removed, and the import history holds one reimport entry with the number of findings closed.
+- The test `version` is kept when sent and written empty when omitted; an omitted `build_id` is written empty.
+- Findings of another service in the same test stay active: `dojo/importers/default_reimporter.py` filters the close set by `service` (or by none when it is omitted), and the upstream `unittests/test_import_reimport.py` closes service A, then B. The operator reads `statistics.after.total.active` and repeats the close for the next service.
 
 Trivy Operator files: `pkg/trivyoperator/constants.go` (report labels), `pkg/apis/aquasecurity/v1alpha1/` (report types, `report-ttl` annotation).
 

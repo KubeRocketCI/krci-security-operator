@@ -1807,7 +1807,63 @@ func TestReconcile_ErrorSemantics(t *testing.T) {
 // failingClose is a DefectDojo whose CloseTest fails.
 type failingClose struct{ *fakeDefectDojo }
 
-func (failingClose) CloseTest(context.Context, defectdojo.Test) error { return errors.New("down") }
+func (failingClose) CloseTest(context.Context, defectdojo.Test) (defectdojo.CloseResult, error) {
+	return defectdojo.CloseResult{}, errors.New("down")
+}
+
+// reportingClose is a DefectDojo whose CloseTest closes as the fake does and answers with the given result.
+type reportingClose struct {
+	*fakeDefectDojo
+
+	result defectdojo.CloseResult
+}
+
+func (r reportingClose) CloseTest(ctx context.Context, test defectdojo.Test) (defectdojo.CloseResult, error) {
+	_, err := r.fakeDefectDojo.CloseTest(ctx, test)
+
+	return r.result, err
+}
+
+func TestReconcile_LogsHowATestWasClosed(t *testing.T) {
+	tests := map[string]struct {
+		result defectdojo.CloseResult
+		want   []string
+		absent string
+	}{
+		"by one reimport": {
+			result: defectdojo.CloseResult{Reimports: 1},
+			want:   []string{`"reimports"=1`, `"closedOneByOne"=0`},
+			absent: `"fallback"`,
+		},
+		"after a refusal": {
+			result: defectdojo.CloseResult{
+				OneByOne: 3, Fallback: &defectdojo.APIError{StatusCode: 400, Body: `{"service":["bad"]}`},
+			},
+			want: []string{`"reimports"=0`, `"closedOneByOne"=3`, `"fallback"="defectdojo answered 400: {\"service\":[\"bad\"]}"`},
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, goAppObjects())
+			h.dd.seedTests(ownedTest(7, "VulnerabilityReport deployment/removed/removed"))
+			h.reconciler.connect = func(string, string) DefectDojo { return reportingClose{h.dd, tt.result} }
+
+			logs, err := h.reconcileLoggedErr()
+
+			require.NoError(t, err)
+			assert.Contains(t, logs, `"Closed a test"`)
+
+			for _, want := range tt.want {
+				assert.Contains(t, logs, want)
+			}
+
+			if tt.absent != "" {
+				assert.NotContains(t, logs, tt.absent)
+			}
+		})
+	}
+}
 
 func TestReconcile_SecretIsReadOncePerTTL(t *testing.T) {
 	secretReads := 0

@@ -116,6 +116,14 @@ _Avoid_: deleted namespace, cleaned namespace
 Mark a finding mitigated. A closed finding stays in DefectDojo and can be reactivated.
 _Avoid_: delete, remove, resolve
 
+**Close a test**:
+Mitigate the active findings of an owned test and keep the test. A reimport of a report without results does it per service; findings that stay active are closed one by one.
+_Avoid_: delete a test, clean a test
+
+**Empty reimport**:
+A reimport of a report without results into a test, by test ID, so that DefectDojo mitigates every finding of one service. It is not an upload of a current report.
+_Avoid_: empty upload, bulk close
+
 **Reactivate**:
 A closed finding that a later reimport matches again becomes active again.
 _Avoid_: reopen, recreate

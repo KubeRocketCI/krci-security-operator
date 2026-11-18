@@ -434,7 +434,9 @@ func TestClient_Reimport_KnownContextIsKeyedByBaseURL(t *testing.T) {
 	assert.NotEqual(t, c.contextKey("app", "e"), moved.contextKey("app", "e"))
 }
 
-// findingsServer serves the active findings of test 42 page by page and records the closed ones.
+// findingsServer serves the active findings of test 42 page by page and records the closed ones. A reimport of
+// test 42 with an empty report closes the active findings of the request service, as DefectDojo does, and answers
+// with the statistics of the test.
 type findingsServer struct {
 	t      *testing.T
 	mu     sync.Mutex
@@ -446,6 +448,105 @@ type findingsServer struct {
 	// patches holds the test update bodies, in order; order records every request as "<method> <path>".
 	patches []map[string]any
 	order   []string
+	// limits holds the limit of each read of the findings, in order.
+	limits []string
+	// reimports holds the form fields and the file of each reimport request, in order.
+	reimports []reimportCall
+	// reimportStatus, when not zero, is the answer to a reimport; the findings stay active.
+	reimportStatus int
+	reimportBody   string
+	// noStatistics leaves the statistics out of the answer to a reimport.
+	noStatistics bool
+	// triaged holds findings that the list of active findings does not return: false positive, out of scope, risk
+	// accepted. A reimport mitigates those of its service, as DefectDojo 3.5.200 does, and removes the risk acceptance.
+	triaged []triagedFinding
+	// reimportKeeps answers a reimport with 201 and leaves every finding active.
+	reimportKeeps bool
+	// dropReimport closes the connection of a reimport without an answer. onReimport, when set, runs first.
+	dropReimport bool
+	onReimport   func()
+}
+
+type triagedFinding struct {
+	id        int
+	service   string
+	state     string
+	mitigated bool
+}
+
+const (
+	falsePositive = "false_p"
+	riskAccepted  = "risk_accepted"
+	outOfScope    = "out_of_scope"
+)
+
+type reimportCall struct {
+	fields map[string][]string
+	file   string
+}
+
+func (f *findingsServer) handleReimport(w http.ResponseWriter, r *http.Request) {
+	require.NoError(f.t, r.ParseMultipartForm(1<<20))
+
+	file, _, err := r.FormFile("file")
+	require.NoError(f.t, err)
+
+	content, err := io.ReadAll(file)
+	require.NoError(f.t, err)
+
+	call := reimportCall{fields: r.MultipartForm.Value, file: string(content)}
+	f.reimports = append(f.reimports, call)
+
+	if f.onReimport != nil {
+		f.onReimport()
+	}
+
+	if f.dropReimport {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		require.NoError(f.t, err)
+		require.NoError(f.t, conn.Close())
+
+		return
+	}
+
+	if f.reimportStatus != 0 {
+		w.WriteHeader(f.reimportStatus)
+		_, _ = w.Write([]byte(f.reimportBody))
+
+		return
+	}
+
+	service := ""
+	if s := call.fields["service"]; len(s) > 0 {
+		service = s[0]
+	}
+
+	if !f.reimportKeeps {
+		for i := range f.triaged {
+			if f.triaged[i].service == service {
+				f.triaged[i].mitigated = true
+
+				if f.triaged[i].state == riskAccepted {
+					f.triaged[i].state = ""
+				}
+			}
+		}
+
+		f.active = slices.DeleteFunc(f.active, func(a map[string]any) bool {
+			have, _ := a["service"].(string)
+
+			return have == service
+		})
+	}
+
+	answer := map[string]any{"test_id": 42}
+	if !f.noStatistics {
+		answer["statistics"] = map[string]any{
+			"after": map[string]any{"total": map[string]any{"active": len(f.active)}},
+		}
+	}
+
+	writeJSON(w, http.StatusCreated, answer)
 }
 
 func (f *findingsServer) handle(w http.ResponseWriter, r *http.Request) {
@@ -455,6 +556,12 @@ func (f *findingsServer) handle(w http.ResponseWriter, r *http.Request) {
 	assert.Equal(f.t, "Token "+testToken, r.Header.Get("Authorization"))
 
 	f.order = append(f.order, r.Method+" "+r.URL.Path)
+
+	if r.URL.Path == reimportPath {
+		f.handleReimport(w, r)
+
+		return
+	}
 
 	if r.Method == http.MethodPatch {
 		assert.Equal(f.t, "/api/v2/tests/42/", r.URL.Path)
@@ -474,6 +581,8 @@ func (f *findingsServer) handle(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(f.t, "42", r.URL.Query().Get("test"))
 		assert.Equal(f.t, "true", r.URL.Query().Get("active"))
 		assert.Equal(f.t, "false", r.URL.Query().Get("is_mitigated"))
+
+		f.limits = append(f.limits, r.URL.Query().Get("limit"))
 
 		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -516,31 +625,229 @@ func newFindingsServer(t *testing.T, services ...string) *findingsServer {
 	t.Helper()
 
 	f := &findingsServer{t: t}
+
 	for i, s := range services {
-		f.active = append(f.active, map[string]any{"id": i + 1, "service": s})
+		// DefectDojo answers null for a finding without a service.
+		var service any
+		if s != "" {
+			service = s
+		}
+
+		f.active = append(f.active, map[string]any{"id": i + 1, "service": service})
 	}
 
 	return f
 }
 
-var closableTest = Test{ID: 42, Title: "VulnerabilityReport deployment/app/app", Product: "a/ns", Engagement: "trivy-operator"}
+const closeService = "ns/Deployment/app/app"
 
-// markedTest is closableTest with an upload marker.
-var markedTest = Test{
-	ID: 42, Title: closableTest.Title, Product: closableTest.Product, Engagement: closableTest.Engagement,
-	BuildID: "uid-1:100:0123456789ab",
+// closableTest holds an upload marker in its build_id.
+var closableTest = Test{
+	ID: 42, Title: "VulnerabilityReport deployment/app/app", Version: "1.2.3", BuildID: "uid-1:100:0123456789ab",
+	Product: "a/ns", Engagement: "trivy-operator",
 }
 
-func TestClient_CloseTest_ClosesEveryActiveFinding(t *testing.T) {
-	services := make([]string, 250)
-	f := newFindingsServer(t, services...)
+const (
+	readFindings = "GET /api/v2/findings/"
+	reimportScan = "POST /api/v2/reimport-scan/"
+	patchTest    = "PATCH /api/v2/tests/42/"
+	closeOne     = "POST /api/v2/findings/%d/close/"
+)
+
+// closeTest closes the test and returns how it was closed.
+func closeTest(t *testing.T, c *Client, test Test) CloseResult {
+	t.Helper()
+
+	res, err := c.CloseTest(context.Background(), test)
+	require.NoError(t, err)
+
+	return res
+}
+
+func closeErr(ctx context.Context, c *Client, test Test) error {
+	_, err := c.CloseTest(ctx, test)
+
+	return err
+}
+
+func services(n int, service string) []string { return slices.Repeat([]string{service}, n) }
+
+func TestClient_CloseTest_ClosesATestOfThousandsOfFindingsWithOneRequest(t *testing.T) {
+	f := newFindingsServer(t, services(2000, closeService)...)
 	c := newTestClient(t, f.handle)
 
-	require.NoError(t, c.CloseTest(context.Background(), closableTest))
+	res := closeTest(t, c, closableTest)
 
-	assert.Len(t, f.closed, 250, "findings of every page are closed")
+	assert.Equal(t, CloseResult{Reimports: 1}, res)
 	assert.Empty(t, f.active)
-	require.Len(t, f.bodies, 250)
+	assert.Empty(t, f.closed, "no finding is closed one by one")
+	assert.Equal(t, []string{patchTest, readFindings, reimportScan}, f.order,
+		"the build_id is cleared, one finding is read for its service, then one reimport closes the test")
+	assert.Equal(t, []string{"1"}, f.limits, "only one finding is read, not the 2000")
+}
+
+func TestClient_CloseTest_TheReimportMitigatesTheTriagedFindingsOfItsServiceOnly(t *testing.T) {
+	f := newFindingsServer(t, closeService)
+	f.triaged = []triagedFinding{
+		{id: 10, service: closeService, state: falsePositive},
+		{id: 11, service: closeService, state: riskAccepted},
+		{id: 12, service: closeService, state: outOfScope},
+		{id: 13, service: "ns/Deployment/other/app", state: falsePositive},
+	}
+	c := newTestClient(t, f.handle)
+
+	closeTest(t, c, closableTest)
+
+	assert.Equal(t, []triagedFinding{
+		{id: 10, service: closeService, state: falsePositive, mitigated: true},
+		{id: 11, service: closeService, state: "", mitigated: true},
+		{id: 12, service: closeService, state: outOfScope, mitigated: true},
+		{id: 13, service: "ns/Deployment/other/app", state: falsePositive},
+	}, f.triaged, "flags stay, the risk acceptance goes, another service is untouched")
+}
+
+func TestClient_CloseTest_LeavesTheTriagedFindingsOfATestWithoutActiveFindings(t *testing.T) {
+	f := newFindingsServer(t)
+	f.triaged = []triagedFinding{{id: 10, service: closeService, state: riskAccepted}}
+	c := newTestClient(t, f.handle)
+
+	closeTest(t, c, closableTest)
+
+	assert.Equal(t, []triagedFinding{{id: 10, service: closeService, state: riskAccepted}}, f.triaged)
+	assert.Empty(t, f.reimports)
+}
+
+func TestClient_CloseTest_ClearsTheBuildIDBeforeTheReimport(t *testing.T) {
+	f := newFindingsServer(t, closeService)
+	c := newTestClient(t, f.handle)
+
+	closeTest(t, c, closableTest)
+
+	assert.Equal(t, []map[string]any{{"build_id": ""}}, f.patches)
+	assert.Equal(t, patchTest, f.order[0], "a reimport that is cut short before it saves the test leaves no marker")
+}
+
+func TestClient_CloseTest_LeavesAnEmptyBuildIDAlone(t *testing.T) {
+	f := newFindingsServer(t, closeService)
+	c := newTestClient(t, f.handle)
+
+	test := closableTest
+	test.BuildID = ""
+
+	closeTest(t, c, test)
+
+	assert.Equal(t, []string{readFindings, reimportScan}, f.order)
+	assert.Empty(t, f.patches)
+}
+
+func TestClient_CloseTest_ReimportsAnEmptyReportOfTheTestByID(t *testing.T) {
+	f := newFindingsServer(t, closeService)
+	c := newTestClient(t, f.handle)
+
+	closeTest(t, c, closableTest)
+
+	require.Len(t, f.reimports, 1)
+	assert.Equal(t, map[string][]string{
+		"test":               {"42"},
+		"scan_type":          {"Trivy Operator Scan"},
+		"service":            {closeService},
+		"version":            {"1.2.3"},
+		"close_old_findings": {"true"},
+	}, f.reimports[0].fields, "the test is named by its ID; tags, scan_date and build_id are left out")
+	assert.JSONEq(t, `{"metadata": {"labels": {}}, "report": {"vulnerabilities": []}}`, f.reimports[0].file)
+}
+
+func TestClient_CloseTest_TheEmptyReportIsTheSameForEveryTitle(t *testing.T) {
+	for _, title := range []string{
+		"VulnerabilityReport deployment/app/app", "ExposedSecretReport deployment/app/app", "scan of app",
+	} {
+		t.Run(title, func(t *testing.T) {
+			f := newFindingsServer(t, closeService)
+			c := newTestClient(t, f.handle)
+
+			test := closableTest
+			test.Title = title
+
+			closeTest(t, c, test)
+
+			require.Len(t, f.reimports, 1)
+			assert.JSONEq(t, `{"metadata": {"labels": {}}, "report": {"vulnerabilities": []}}`, f.reimports[0].file)
+		})
+	}
+}
+
+func TestClient_CloseTest_OmitsWhatTheTestAndItsFindingLack(t *testing.T) {
+	f := newFindingsServer(t, "")
+	c := newTestClient(t, f.handle)
+
+	test := closableTest
+	test.Version = ""
+
+	closeTest(t, c, test)
+
+	require.Len(t, f.reimports, 1)
+	assert.Equal(t, map[string][]string{
+		"test":               {"42"},
+		"scan_type":          {"Trivy Operator Scan"},
+		"close_old_findings": {"true"},
+	}, f.reimports[0].fields, "a finding without a service closes through a reimport without one; no blank version")
+	assert.Empty(t, f.active)
+}
+
+func TestClient_CloseTest_ReimportsOncePerServiceOfTheTest(t *testing.T) {
+	f := newFindingsServer(t, "", closeService, closeService, "ns/Deployment/other/app")
+	c := newTestClient(t, f.handle)
+
+	res := closeTest(t, c, closableTest)
+
+	assert.Equal(t, CloseResult{Reimports: 3}, res)
+	assert.Equal(t, []string{
+		patchTest, readFindings, reimportScan, readFindings, reimportScan, readFindings, reimportScan,
+	}, f.order, "the first finding listed is of no service: each service that stays active gets its own reimport")
+	assert.Empty(t, f.active)
+	assert.Empty(t, f.closed)
+	assert.Len(t, f.patches, 1, "the build_id is cleared once")
+
+	require.Len(t, f.reimports, 3)
+	assert.NotContains(t, f.reimports[0].fields, "service")
+	assert.Equal(t, []string{closeService}, f.reimports[1].fields["service"])
+	assert.Equal(t, []string{"ns/Deployment/other/app"}, f.reimports[2].fields["service"])
+}
+
+func TestClient_CloseTest_ClosesOneByOneWhatStaysActiveAfterTheBoundOfReimports(t *testing.T) {
+	names := make([]string, 0, maxCloseReimports+2)
+
+	for i := range maxCloseReimports + 2 {
+		names = append(names, fmt.Sprintf("ns/Deployment/app%d/app", i))
+	}
+
+	f := newFindingsServer(t, names...)
+	c := newTestClient(t, f.handle)
+
+	res := closeTest(t, c, closableTest)
+
+	assert.Equal(t, CloseResult{Reimports: maxCloseReimports, OneByOne: 2}, res)
+	assert.Len(t, f.reimports, maxCloseReimports)
+	assert.Equal(t, []int{maxCloseReimports + 1, maxCloseReimports + 2}, f.closed,
+		"the findings of the services beyond the bound are closed through the findings")
+	assert.Empty(t, f.active)
+}
+
+func TestClient_CloseTest_ClosesOneByOneWhenTheReimportOfAServiceClosesNothing(t *testing.T) {
+	f := newFindingsServer(t, closeService, "other")
+	f.reimportKeeps = true
+	c := newTestClient(t, f.handle)
+
+	res := closeTest(t, c, closableTest)
+
+	assert.Equal(t, CloseResult{Reimports: 1, OneByOne: 2}, res)
+	assert.Equal(t, []string{
+		patchTest, readFindings, reimportScan, readFindings, readFindings, fmt.Sprintf(closeOne, 1), fmt.Sprintf(closeOne, 2),
+	}, f.order, "the same service is first again: it is not reimported twice")
+	assert.Len(t, f.reimports, 1)
+	assert.Empty(t, f.active)
+
+	require.Len(t, f.bodies, 2)
 
 	for _, b := range f.bodies {
 		assert.Equal(t, true, b["is_mitigated"])
@@ -554,19 +861,114 @@ func TestClient_CloseTest_ClosesEveryActiveFinding(t *testing.T) {
 	}
 }
 
-func TestClient_CloseTest_ClearsTheBuildIDBeforeItClosesTheFindings(t *testing.T) {
-	f := newFindingsServer(t, "a", "b")
+func TestClient_CloseTest_ReadsTheActiveFindingsAgainWhenTheAnswerHasNoStatistics(t *testing.T) {
+	f := newFindingsServer(t, closeService)
+	f.noStatistics = true
 	c := newTestClient(t, f.handle)
 
-	require.NoError(t, c.CloseTest(context.Background(), markedTest))
+	closeTest(t, c, closableTest)
 
-	assert.Equal(t, []map[string]any{{"build_id": ""}}, f.patches)
-	assert.Equal(t, "PATCH /api/v2/tests/42/", f.order[0], "an interrupted close leaves no marker behind")
-	assert.Equal(t, []int{1, 2}, f.closed)
+	assert.Equal(t, []string{patchTest, readFindings, reimportScan, readFindings}, f.order,
+		"without statistics the active findings are read again, and none is left")
+}
+
+func TestClient_CloseTest_ClosesOneByOneWhenTheTestCannotBeReimported(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusNotFound} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			f := newFindingsServer(t, closeService, "other")
+			f.reimportStatus = status
+			f.reimportBody = `{"test":["Invalid pk \"42\" - object does not exist."]}`
+			c := newTestClient(t, f.handle)
+
+			res := closeTest(t, c, closableTest)
+
+			var apiErr *APIError
+
+			require.ErrorAs(t, res.Fallback, &apiErr, "the caller learns why the reimport was not used")
+			assert.Equal(t, status, apiErr.StatusCode)
+			assert.Contains(t, apiErr.Body, "Invalid pk", "the body of the refusal is kept")
+			assert.Equal(t, 2, res.OneByOne)
+			assert.Zero(t, res.Reimports)
+			assert.Equal(t, []string{
+				patchTest, readFindings, reimportScan, readFindings, fmt.Sprintf(closeOne, 1), fmt.Sprintf(closeOne, 2),
+			}, f.order, "the findings are closed through the findings after the rejected reimport")
+			assert.Equal(t, []map[string]any{{"build_id": ""}}, f.patches)
+			assert.Equal(t, []int{1, 2}, f.closed)
+		})
+	}
+}
+
+func TestClient_CloseTest_ClosesOneByOneWhenTheReimportFailsOnTheServer(t *testing.T) {
+	for _, status := range []int{
+		http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout,
+	} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			f := newFindingsServer(t, closeService, "other")
+			f.reimportStatus = status
+			c := newTestClient(t, f.handle)
+
+			res := closeTest(t, c, closableTest)
+
+			var apiErr *APIError
+
+			require.ErrorAs(t, res.Fallback, &apiErr)
+			assert.Equal(t, status, apiErr.StatusCode)
+			assert.Equal(t, []string{
+				patchTest, readFindings, reimportScan, readFindings, fmt.Sprintf(closeOne, 1), fmt.Sprintf(closeOne, 2),
+			}, f.order, "a close that fails the same way on every pass would never end: the findings are closed one by one")
+			assert.Equal(t, []int{1, 2}, f.closed)
+			assert.Len(t, f.reimports, 1, "the reimport is not repeated")
+		})
+	}
+}
+
+func TestClient_CloseTest_ClosesOneByOneWhenTheReimportAnswerIsLost(t *testing.T) {
+	f := newFindingsServer(t, closeService, "other")
+	f.dropReimport = true
+	c := newTestClient(t, f.handle)
+
+	res := closeTest(t, c, closableTest)
+
+	require.Error(t, res.Fallback)
+	assert.Equal(t, 2, res.OneByOne)
+	assert.Equal(t, []int{1, 2}, f.closed, "a transport error leaves the result unknown, as a 5xx does")
+}
+
+func TestClient_CloseTest_ReturnsTheFailureOfTheReimportThatDoesNotShowTheStateOfTheTest(t *testing.T) {
+	for _, status := range []int{
+		http.StatusUnauthorized, http.StatusForbidden, http.StatusRequestTimeout, http.StatusConflict,
+		http.StatusTooManyRequests,
+	} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			f := newFindingsServer(t, closeService)
+			f.reimportStatus = status
+			c := newTestClient(t, f.handle)
+
+			var apiErr *APIError
+
+			require.ErrorAs(t, closeErr(context.Background(), c, closableTest), &apiErr)
+			assert.Equal(t, status, apiErr.StatusCode)
+			assert.Equal(t, []string{patchTest, readFindings, reimportScan}, f.order[:3],
+				"authentication, throttling, timeout and an import in progress are not a refusal of this request; "+
+					"the build_id stays cleared")
+			assert.Empty(t, f.closed)
+		})
+	}
+}
+
+func TestClient_CloseTest_StopsWhenTheContextIsDone(t *testing.T) {
+	f := newFindingsServer(t, closeService)
+	ctx, cancel := context.WithCancel(context.Background())
+	f.onReimport = cancel
+	f.dropReimport = true
+	c := newTestClient(t, f.handle)
+
+	require.Error(t, closeErr(ctx, c, closableTest))
+	assert.Empty(t, f.closed, "a cancelled close does not start closing one by one")
 }
 
 func TestClient_CloseTest_BuildIDUpdateFailureClosesNothing(t *testing.T) {
-	f := newFindingsServer(t, "a")
+	f := newFindingsServer(t, closeService)
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPatch {
 			w.WriteHeader(http.StatusForbidden)
@@ -579,28 +981,21 @@ func TestClient_CloseTest_BuildIDUpdateFailureClosesNothing(t *testing.T) {
 
 	var apiErr *APIError
 
-	require.ErrorAs(t, c.CloseTest(context.Background(), markedTest), &apiErr)
+	require.ErrorAs(t, closeErr(context.Background(), c, closableTest), &apiErr)
 	assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
-	assert.Empty(t, f.closed)
-}
-
-func TestClient_CloseTest_LeavesATestWithoutBuildIDAsItIs(t *testing.T) {
-	f := newFindingsServer(t, "a", "b")
-	c := newTestClient(t, f.handle)
-
-	require.NoError(t, c.CloseTest(context.Background(), closableTest))
-
-	assert.Empty(t, f.patches, "there is no marker to clear")
-	assert.Equal(t, []int{1, 2}, f.closed)
+	assert.Empty(t, f.order, "nothing is read, re-imported or closed after the refused update")
+	assert.Len(t, f.active, 1)
 }
 
 func TestClient_CloseTest_NoActiveFindings(t *testing.T) {
 	f := newFindingsServer(t)
 	c := newTestClient(t, f.handle)
 
-	require.NoError(t, c.CloseTest(context.Background(), markedTest))
-	assert.Zero(t, f.posts.Load())
-	assert.Len(t, f.patches, 1, "a test without active findings is closed: its build_id is cleared")
+	closeTest(t, c, closableTest)
+
+	assert.Equal(t, []string{patchTest, readFindings}, f.order,
+		"a test without active findings is not reimported; its build_id is cleared")
+	assert.Equal(t, []map[string]any{{"build_id": ""}}, f.patches)
 }
 
 func TestClient_SetBuildID_PatchesTheTest(t *testing.T) {
@@ -628,12 +1023,13 @@ func TestClient_SetBuildID_RetriesAndReturnsTheFailure(t *testing.T) {
 	assert.Greater(t, patches.Load(), int32(1), "the update is idempotent and retried like a read")
 }
 
-func TestClient_CloseTest_RetriesClose(t *testing.T) {
-	f := newFindingsServer(t, "a")
+func TestClient_CloseTest_RetriesTheCloseOfAFinding(t *testing.T) {
+	f := newFindingsServer(t, closeService)
+	f.reimportStatus = http.StatusBadRequest
 	f.failOn = 1
 	c := newTestClient(t, f.handle)
 
-	require.NoError(t, c.CloseTest(context.Background(), closableTest))
+	closeTest(t, c, closableTest)
 
 	assert.Equal(t, []int{1}, f.closed)
 	assert.Equal(t, int32(2), f.posts.Load(), "the 503 was retried")
@@ -646,7 +1042,7 @@ func TestClient_CloseTest_ServerError(t *testing.T) {
 
 	var apiErr *APIError
 
-	require.ErrorAs(t, c.CloseTest(context.Background(), closableTest), &apiErr)
+	require.ErrorAs(t, closeErr(context.Background(), c, closableTest), &apiErr)
 	assert.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
 }
 
@@ -667,7 +1063,7 @@ func TestClient_Close_RequiresTheNamesOfTheTest(t *testing.T) {
 				writeJSON(w, http.StatusOK, map[string]any{"next": nil, "results": []map[string]any{{"id": 1}}})
 			})
 
-			require.ErrorIs(t, c.CloseTest(context.Background(), test), ErrTestNotNamed)
+			require.ErrorIs(t, closeErr(context.Background(), c, test), ErrTestNotNamed)
 
 			assert.Zero(t, requests.Load(), "no finding is read or closed")
 		})
@@ -853,7 +1249,7 @@ func TestClient_ListTests_ThroughEngagementOfProduct(t *testing.T) {
 			map[string]any{"id": 21, "name": "trivy-operator"},
 		},
 		testsPath: {
-			map[string]any{"id": 1, "title": "a", "scan_type": ScanTypeTrivyOperator, "tags": []string{"k8s-workload:x"}},
+			map[string]any{"id": 1, "title": "a", "scan_type": ScanTypeTrivyOperator, "tags": []string{"k8s-workload:x"}, "version": "1.2.3"},
 			map[string]any{"id": 2, "title": "b", "scan_type": ScanTypeTrivyOperator, "tags": []string{}},
 			map[string]any{"id": 3, "title": "c", "scan_type": "Trivy Scan"},
 		},
@@ -864,10 +1260,16 @@ func TestClient_ListTests_ThroughEngagementOfProduct(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, []Test{
-		{ID: 1, Title: "a", ScanType: ScanTypeTrivyOperator, Tags: []string{"k8s-workload:x"}, Product: "a/ns", Engagement: "trivy-operator", LastEngagement: true},
-		{ID: 2, Title: "b", ScanType: ScanTypeTrivyOperator, Tags: []string{}, Product: "a/ns", Engagement: "trivy-operator", LastEngagement: true},
+		{
+			ID: 1, Title: "a", ScanType: ScanTypeTrivyOperator, Tags: []string{"k8s-workload:x"}, Version: "1.2.3",
+			Product: "a/ns", Engagement: "trivy-operator", LastEngagement: true,
+		},
+		{
+			ID: 2, Title: "b", ScanType: ScanTypeTrivyOperator, Tags: []string{},
+			Product: "a/ns", Engagement: "trivy-operator", LastEngagement: true,
+		},
 		{ID: 3, Title: "c", ScanType: "Trivy Scan", Product: "a/ns", Engagement: "trivy-operator", LastEngagement: true},
-	}, tests, "scan type, tags and build_id are the ones of the response, also when the server ignores the scan type filter; a null build_id is empty")
+	}, tests, "scan type, tags, version and build_id are the ones of the response, also when the server ignores the scan type filter; a null build_id is empty")
 
 	require.Len(t, l.queries[engagementsPath], 1)
 	assert.Equal(t, "9", l.queries[engagementsPath][0].Get("product"))
@@ -1035,7 +1437,10 @@ func TestClient_CloseTest_WaitsForTheReimportOfTheSameTest(t *testing.T) {
 
 		time.Sleep(30 * time.Millisecond)
 
-		writeJSON(w, http.StatusCreated, ReimportResult{TestID: 42})
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"test_id":    42,
+			"statistics": map[string]any{"after": map[string]any{"total": map[string]any{"active": 0}}},
+		})
 	})
 
 	req := testRequest()
@@ -1060,7 +1465,7 @@ func TestClient_CloseTest_WaitsForTheReimportOfTheSameTest(t *testing.T) {
 	go func() {
 		defer wg.Done()
 
-		assert.NoError(t, c.CloseTest(context.Background(), closableTest))
+		assert.NoError(t, closeErr(context.Background(), c, closableTest))
 	}()
 
 	wg.Wait()
@@ -1093,7 +1498,7 @@ func TestClient_CloseTest_OtherTestsDoNotWait(t *testing.T) {
 	<-reached
 
 	other := Test{ID: 7, Title: "another", Product: req.Product, Engagement: req.Engagement}
-	require.NoError(t, c.CloseTest(context.Background(), other))
+	closeTest(t, c, other)
 
 	close(release)
 }
