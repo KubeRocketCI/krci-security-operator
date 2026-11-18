@@ -20,7 +20,7 @@ import (
 // and the reimport of the test do not wait for each other.
 func TestImport_ReimportAndCloseOfTheListedTestShareALock(t *testing.T) {
 	imp := NewReimport(testTarget(), loadFixture(t, "vulnerabilityreport_replicaset.json"),
-		Workload{"deployment", "test-go-app"}, "go-app")
+		Workload{"deployment", "test-go-app"}, "go-app", "")
 
 	var (
 		mu                   sync.Mutex

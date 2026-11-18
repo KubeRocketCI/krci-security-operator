@@ -175,7 +175,8 @@ type Reimport struct {
 	TestTitle  string
 	// Service is the finding service, see Service.
 	Service string
-	// Version is the image tag, else "sha256:" and the first 12 characters of the digest.
+	// Version is the image tag of the report, else "sha256:" and the first 12 characters of its digest. The tag of the
+	// report is ignored when the container reference in the pod template is its digest without a tag.
 	Version string
 	// Tags are the tags of the test: "k8s-cluster", "k8s-namespace", "k8s-workload", "k8s-container", "oci-image"
 	// and, when component is not empty, "app". A tag with an empty value is left out; a tag over MaxTagLen has
@@ -185,9 +186,15 @@ type Reimport struct {
 
 // NewReimport derives the DefectDojo destination of a report of a workload container in a namespace:
 // the namespace product, the engagement of the integration and the test of the container.
-// component is the value of the app tag; empty gives no app tag.
-func NewReimport(target Target, report *unstructured.Unstructured, workload Workload, component string) Reimport {
-	image := ImageOf(report)
+// component is the value of the app tag; empty gives no app tag. imageRef is the image reference of the container
+// in the pod template of the workload, see ImageOf.
+func NewReimport(
+	target Target,
+	report *unstructured.Unstructured,
+	workload Workload,
+	component, imageRef string,
+) Reimport {
+	image := ImageOf(report, imageRef)
 
 	return Reimport{
 		Product:    ProductName(target.Cluster, target.Namespace),

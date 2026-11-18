@@ -219,15 +219,18 @@ func TestWorkloadResolver_Resolve_JobListError(t *testing.T) {
 	require.ErrorIs(t, err, assert.AnError)
 }
 
+// imageOf is the image reference the test objects give a container.
+func imageOf(container string) string { return "registry.example.com/" + container + ":1" }
+
 func TestWorkloadResolver_Containers(t *testing.T) {
 	spec := func(containers, initContainers []string) corev1.PodSpec {
 		out := corev1.PodSpec{}
 		for _, c := range containers {
-			out.Containers = append(out.Containers, corev1.Container{Name: c})
+			out.Containers = append(out.Containers, corev1.Container{Name: c, Image: imageOf(c)})
 		}
 
 		for _, c := range initContainers {
-			out.InitContainers = append(out.InitContainers, corev1.Container{Name: c})
+			out.InitContainers = append(out.InitContainers, corev1.Container{Name: c, Image: imageOf(c)})
 		}
 
 		return out
@@ -255,7 +258,9 @@ func TestWorkloadResolver_Containers(t *testing.T) {
 		}}},
 		&corev1.Pod{ObjectMeta: objMeta("debug"), Spec: func() corev1.PodSpec {
 			s := spec([]string{"shell"}, nil)
-			s.EphemeralContainers = []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: "tools"}}}
+			s.EphemeralContainers = []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+				Name: "tools", Image: imageOf("tools"),
+			}}}
 
 			return s
 		}()},
@@ -283,6 +288,10 @@ func TestWorkloadResolver_Containers(t *testing.T) {
 			require.NoError(t, err)
 			assert.True(t, found)
 			assert.ElementsMatch(t, tt.want, slices.Collect(maps.Keys(names)))
+
+			for container, image := range names {
+				assert.Equal(t, imageOf(container), image, "the image reference of %s", container)
+			}
 		})
 	}
 }

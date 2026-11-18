@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 func TestNormalizeImage(t *testing.T) {
@@ -66,9 +68,49 @@ func TestImageOf(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, ImageOf(loadFixture(t, tt.fixture)))
+			assert.Equal(t, tt.want, ImageOf(loadFixture(t, tt.fixture), ""))
 		})
 	}
+}
+
+func TestImageOf_ImageReferenceOfTheContainer(t *testing.T) {
+	const (
+		digest = "sha256:8fb099199b9f2d70342674bd9dbccd3ed03a258f26bbd1d556822c6dfc60c317"
+		newer  = "sha256:1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d"
+	)
+
+	// Trivy Operator writes the last segment of the repository as the tag of a digest-only image.
+	report := loadFixture(t, "vulnerabilityreport_dockerhub.json")
+	require.NoError(t, unstructured.SetNestedField(report.Object, "postgres", "report", "artifact", "tag"))
+	require.NoError(t, unstructured.SetNestedField(report.Object, digest, "report", "artifact", "digest"))
+
+	asReported := Image{Name: "postgres", Tag: "postgres", Digest: digest}
+
+	tests := []struct {
+		name string
+		ref  string
+		want Image
+	}{
+		{name: "digest only, the digest of the report: no tag", ref: "postgres@" + digest, want: Image{Name: "postgres", Digest: digest}},
+		{name: "digest only, another digest: the report", ref: "postgres@" + newer, want: asReported},
+		{name: "tag only", ref: "postgres:16", want: asReported},
+		{name: "tag and digest", ref: "postgres:16@" + digest, want: asReported},
+		{name: "registry port without a tag", ref: "registry.example.com:5000/postgres", want: asReported},
+		{name: "no tag and no digest", ref: "postgres", want: asReported},
+		{name: "no reference", ref: "", want: asReported},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ImageOf(report, tt.ref))
+		})
+	}
+}
+
+func TestImageOf_ReportWithoutADigestKeepsItsTag(t *testing.T) {
+	report := loadFixture(t, "vulnerabilityreport_dockerhub.json")
+
+	assert.Equal(t, Image{Name: "postgres", Tag: "16-alpine"}, ImageOf(report, "postgres@sha256:abc"))
 }
 
 func TestTagOf(t *testing.T) {
