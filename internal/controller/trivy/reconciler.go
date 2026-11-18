@@ -8,6 +8,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -284,31 +285,46 @@ type pass struct {
 	components map[trivy.Workload]string
 	// current holds the tests the pass imported or found up to date.
 	current map[importKey]importedReport
-	// keepOpenTitles holds the titles of tests that stay open although no import of this pass reached them:
-	// those whose workload only has superseded reports so far, and those whose report DefectDojo rejected.
-	keepOpenTitles map[string]struct{}
+	// claimed holds, per test, the report the pass takes it from.
+	claimed map[importKey]claim
 	// rejected holds the versions of the reports of this pass that DefectDojo rejected, in this pass or before.
 	rejected map[importKey]reportVersion
 	// unlisted holds the configured report kinds the pass could not list completely.
 	unlisted []string
-	// unattributed holds the report kinds with a skipped report that names no resource or no container: no test is
-	// known for it.
-	unattributed map[string]struct{}
+	// uploadErrors holds the uploads that failed in this pass; the reports are tried again in the next pass.
+	uploadErrors []error
+	// ownReports holds, per report kind, the metadata of its reports by resource and container. It is listed at the
+	// first report that needs it.
+	ownReports map[string]map[ownKey][]ownCandidate
+	// ignored holds the reports whose ignoring the pass logged.
+	ignored map[ignoredReport]struct{}
 }
 
-// keepOpenKind keeps the tests of a report kind open in this pass.
-func (p *pass) keepOpenKind(kind string) {
-	if p.unattributed == nil {
-		p.unattributed = map[string]struct{}{}
+// ignoredReport identifies a report that lost the choice of its test.
+type ignoredReport struct {
+	title  string
+	report string
+}
+
+// claim ranks the current reports of one test: the report on the stable workload itself comes first (the CronJob
+// before its Jobs), then the lowest report name.
+type claim struct {
+	report string
+	// own is true when the report names the stable workload, not a ReplicaSet or Job of it.
+	own bool
+}
+
+func (c claim) before(other claim) bool {
+	if c.own != other.own {
+		return c.own
 	}
 
-	p.unattributed[kind] = struct{}{}
+	return c.report < other.report
 }
 
-// reject records a report version DefectDojo rejected: its test stays open and keeps reflecting the earlier import.
-func (p *pass) reject(key importKey, version reportVersion, title string, prev importedReport, hasPrev bool) {
+// reject records a report version DefectDojo rejected: its test keeps reflecting the earlier import.
+func (p *pass) reject(key importKey, version reportVersion, prev importedReport, hasPrev bool) {
 	p.rejected[key] = version
-	p.keepOpenTitles[title] = struct{}{}
 
 	if hasPrev {
 		p.current[key] = prev
@@ -320,74 +336,60 @@ func (p *pass) listed(title string) bool {
 	return !slices.Contains(p.unlisted, trivy.TitleKind(title))
 }
 
-// keepsOpen reports whether a test that no import of the pass reached stays open: its workload only has superseded
-// reports so far, DefectDojo rejected its report, or the pass could not list its report kind.
-func (p *pass) keepsOpen(title string) bool {
-	if _, ok := p.keepOpenTitles[title]; ok {
-		return true
-	}
-
-	if _, ok := p.unattributed[trivy.TitleKind(title)]; ok {
-		return true
-	}
-
-	return !p.listed(title)
-}
-
 // forget drops what the pass found for the reports of a kind, before a restarted listing delivers them again.
-// A report deleted in between then no longer counts as live.
+// A report deleted in between then no longer counts as current.
 func (p *pass) forget(kind string) {
 	ofKind := func(title string) bool { return trivy.TitleKind(title) == kind }
 
 	maps.DeleteFunc(p.current, func(key importKey, _ importedReport) bool { return ofKind(key.title) })
+	maps.DeleteFunc(p.claimed, func(key importKey, _ claim) bool { return ofKind(key.title) })
 	maps.DeleteFunc(p.rejected, func(key importKey, _ reportVersion) bool { return ofKind(key.title) })
-	maps.DeleteFunc(p.keepOpenTitles, func(title string, _ struct{}) bool { return ofKind(title) })
-	delete(p.unattributed, kind)
 }
 
-// syncNamespace imports the reports of an imported namespace page by page, closes the tests of workloads
-// that are gone and makes sure the namespace product has its tags. Tests are closed only after every report was
-// imported: a failed import hides which tests are still alive. The tests of a report kind the pass could not list
-// stay as they are.
+// syncNamespace imports the reports of an imported namespace page by page, closes the tests of workloads and
+// containers that are gone and makes sure the namespace product has its tags.
+// A report that is missing closes nothing. A failed upload keeps its report for the next pass and does not stop
+// the other uploads and the closing; its error is returned with the others.
 func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target trivy.Target) error {
 	p := &pass{
-		target:         target,
-		resolver:       trivy.NewWorkloadResolver(r.reader, target.Namespace),
-		components:     map[trivy.Workload]string{},
-		current:        map[importKey]importedReport{},
-		keepOpenTitles: map[string]struct{}{},
-		rejected:       map[importKey]reportVersion{},
+		target:     target,
+		resolver:   trivy.NewWorkloadResolver(r.reader, target.Namespace),
+		components: map[trivy.Workload]string{},
+		current:    map[importKey]importedReport{},
+		claimed:    map[importKey]claim{},
+		rejected:   map[importKey]reportVersion{},
+		ownReports: map[string]map[ownKey][]ownCandidate{},
+		ignored:    map[ignoredReport]struct{}{},
 	}
 
 	if err := r.importReports(ctx, dd, p); err != nil {
 		return err
 	}
 
-	if len(p.unlisted) > 0 {
-		ctrl.LoggerFrom(ctx).Info("Report kinds are not served by the cluster, their tests stay as they are",
-			"kinds", p.unlisted)
-	}
+	// The close builds its own lists, see expectedTitles.
+	p.resolver, p.ownReports = nil, nil
 
-	if len(p.unlisted) == len(r.config.ReportKinds) {
-		return nil
+	if len(p.unlisted) > 0 {
+		ctrl.LoggerFrom(ctx).Info("Report kinds are not served by the cluster, their reports are not imported",
+			"kinds", p.unlisted)
 	}
 
 	r.keepImports(target.Namespace, p)
 
 	product, found, err := r.namespaceProduct(ctx, dd, target.Namespace)
 	if err != nil && !r.productTypeMissing(ctx, err) {
-		return err
+		return errors.Join(append(p.uploadErrors, err)...)
 	}
 
 	if !found {
 		r.pruneTests(target.Namespace, nil)
 
-		return nil
+		return errors.Join(p.uploadErrors...)
 	}
 
-	closeErr := r.closeStaleTests(ctx, dd, target, p, product)
+	closeErr := r.closeStaleTests(ctx, dd, target, product)
 
-	return errors.Join(closeErr, r.setProductTags(ctx, dd, target.Namespace, product))
+	return errors.Join(append(p.uploadErrors, closeErr, r.setProductTags(ctx, dd, target.Namespace, product))...)
 }
 
 // importPage resolves and imports the reports of one page.
@@ -407,25 +409,31 @@ func (r *Reconciler) importPage(ctx context.Context, dd DefectDojo, p *pass, pag
 	return nil
 }
 
-// importOne resolves and imports one report.
+// importOne resolves and imports one report. A report is not imported when it is broken, marked for deletion,
+// of a workload that is gone, superseded or of a kind the operator does not read, of a container that is not in the
+// pod template of its workload, or when another current report of the same test comes first.
 func (r *Reconciler) importOne(ctx context.Context, dd DefectDojo, p *pass, report *unstructured.Unstructured) error {
-	log := ctrl.LoggerFrom(ctx)
+	log := ctrl.LoggerFrom(ctx).WithValues("report", report.GetName(), "kind", report.GetKind())
 
 	if report.GetDeletionTimestamp() != nil {
 		return nil
 	}
 
 	if reason := trivy.BrokenReport(report); reason != "" {
-		return r.skipBroken(ctx, p, report, reason)
-	}
+		log.Info("Skipped a broken report", "reason", reason)
 
-	workload, state, err := p.resolver.ResolveReport(ctx, report)
-	if err != nil {
-		return err
-	}
-
-	if state == trivy.WorkloadGone {
 		return nil
+	}
+
+	if trivy.ExpiredReport(report) {
+		log.V(1).Info("Skipped a report that Trivy Operator deletes at once")
+
+		return nil
+	}
+
+	workload, ok, err := r.currentWorkload(ctx, p, report)
+	if err != nil || !ok {
+		return err
 	}
 
 	component, err := r.component(ctx, p.components, p.target.Namespace, workload)
@@ -434,17 +442,25 @@ func (r *Reconciler) importOne(ctx context.Context, dd DefectDojo, p *pass, repo
 	}
 
 	imp := trivy.ReportImport(p.target, report, workload, component)
+	key := importKey{product: imp.Product, engagement: imp.Engagement, title: imp.TestTitle}
+	mine := claim{report: report.GetName(), own: namesWorkload(report, workload)}
 
-	if state == trivy.WorkloadSuperseded {
-		p.keepOpenTitles[imp.TestTitle] = struct{}{}
+	version := reportVersion{uid: report.GetUID(), resourceVersion: report.GetResourceVersion()}
+	prev, hasPrev := r.lastImport(p.target.Namespace, key)
+	rejected := r.isRejected(p.target.Namespace, key, version)
+
+	// A rejected report on the workload itself is not a current report: it does not hold the test against the others.
+	if rejected && mine.own {
+		p.reject(key, version, prev, hasPrev)
+
+		log.V(1).Info("Report version was rejected before, not uploaded again")
 
 		return nil
 	}
 
-	key := importKey{product: imp.Product, engagement: imp.Engagement, title: imp.TestTitle}
-
-	version := reportVersion{uid: report.GetUID(), resourceVersion: report.GetResourceVersion()}
-	prev, hasPrev := r.lastImport(p.target.Namespace, key)
+	if !p.claim(ctx, key, mine) {
+		return nil
+	}
 
 	if hasPrev && prev.uid == version.uid && prev.resourceVersion == version.resourceVersion {
 		p.current[key] = prev
@@ -452,62 +468,151 @@ func (r *Reconciler) importOne(ctx context.Context, dd DefectDojo, p *pass, repo
 		return nil
 	}
 
-	if r.isRejected(p.target.Namespace, key, version) {
-		p.reject(key, version, imp.TestTitle, prev, hasPrev)
+	if rejected {
+		p.reject(key, version, prev, hasPrev)
 
-		log.V(1).Info("Report version was rejected before, not uploaded again",
-			"report", report.GetName(), "kind", report.GetKind())
+		log.V(1).Info("Report version was rejected before, not uploaded again")
+
+		return nil
+	}
+
+	used, err := r.ownReport(ctx, p, key, report, workload)
+	if err != nil {
+		return err
+	}
+
+	if used != "" {
+		p.logIgnored(ctx, key.title, used, report.GetName())
 
 		return nil
 	}
 
 	entry, err := r.importReport(ctx, dd, imp, report, workload)
 	if err != nil {
-		if !defectdojo.IsRejectedReport(err) {
-			return err
-		}
-
-		log.Error(err, "DefectDojo rejected a report version, it is not uploaded again until it changes",
-			"report", report.GetName(), "kind", report.GetKind())
-		rejectedReports.WithLabelValues(report.GetKind()).Inc()
-
-		r.recordRejection(p.target.Namespace, key, version)
-		p.reject(key, version, imp.TestTitle, prev, hasPrev)
-
-		return nil
+		return r.uploadFailed(ctx, p, report, key, version, prev, hasPrev, err)
 	}
 
 	p.current[key] = entry
 
 	r.recordImport(p.target.Namespace, key, entry)
 
-	log.Info("Imported a report", "report", report.GetName(), "kind", report.GetKind(),
-		"product", imp.Product, "engagement", imp.Engagement, "test", entry.testID)
+	log.Info("Imported a report", "product", imp.Product, "engagement", imp.Engagement, "test", entry.testID)
 
 	return nil
 }
 
-// skipBroken logs a report that is not uploaded (see trivy.BrokenReport) and keeps its test open.
-// It is not recorded as imported. A report that names no resource or no container names no test: every test of its
-// report kind stays open.
-func (r *Reconciler) skipBroken(ctx context.Context, p *pass, report *unstructured.Unstructured, reason string) error {
-	ctrl.LoggerFrom(ctx).Info("Skipped a broken report",
-		"report", report.GetName(), "kind", report.GetKind(), "reason", reason)
+// currentWorkload returns the stable workload of a report that describes it as it is now. ok is false, without an
+// error, when the report is not imported for that reason.
+func (r *Reconciler) currentWorkload(
+	ctx context.Context,
+	p *pass,
+	report *unstructured.Unstructured,
+) (workload trivy.Workload, ok bool, err error) {
+	log := ctrl.LoggerFrom(ctx).WithValues("report", report.GetName(), "kind", report.GetKind())
 
-	if !trivy.NamesTest(report) {
-		p.keepOpenKind(report.GetKind())
+	workload, state, err := p.resolver.ResolveReport(ctx, report)
+	if err != nil {
+		return trivy.Workload{}, false, err
+	}
+
+	switch state {
+	case trivy.WorkloadGone:
+		log.V(1).Info("Skipped a report of a workload that is gone", "workload", workload.String())
+
+		return workload, false, nil
+	case trivy.WorkloadSuperseded:
+		log.V(1).Info("Skipped a report of a superseded revision", "workload", workload.String())
+
+		return workload, false, nil
+	case trivy.WorkloadUnsupported:
+		log.V(1).Info("Skipped a report of a resource kind the operator does not read", "workload", workload.String())
+
+		return workload, false, nil
+	case trivy.WorkloadCurrent:
+		// The container is checked below.
+	}
+
+	containers, _, err := p.resolver.Containers(ctx, workload)
+	if err != nil {
+		return trivy.Workload{}, false, fmt.Errorf("failed to read the containers of %s: %w", workload, err)
+	}
+
+	container := report.GetLabels()[trivy.LabelContainerName]
+	if _, in := containers[container]; !in {
+		log.V(1).Info("Skipped a report of a container that is not in the pod template",
+			"workload", workload.String(), "container", container)
+
+		return workload, false, nil
+	}
+
+	return workload, true, nil
+}
+
+// namesWorkload reports whether the report is on the stable workload itself, not on a ReplicaSet or Job of it.
+func namesWorkload(report *unstructured.Unstructured, workload trivy.Workload) bool {
+	return strings.EqualFold(report.GetLabels()[trivy.LabelResourceKind], workload.Kind)
+}
+
+// claim records the report as the one its test is imported from, unless another current report of the same test
+// comes first. The report that loses is logged.
+func (p *pass) claim(ctx context.Context, key importKey, mine claim) bool {
+	held, taken := p.claimed[key]
+	if !taken || mine.before(held) {
+		if taken {
+			p.logIgnored(ctx, key.title, mine.report, held.report)
+		}
+
+		p.claimed[key] = mine
+
+		return true
+	}
+
+	p.logIgnored(ctx, key.title, held.report, mine.report)
+
+	return false
+}
+
+// logIgnored logs a report of a test that another current report takes the place of, once per report and pass.
+func (p *pass) logIgnored(ctx context.Context, title, used, ignored string) {
+	if _, done := p.ignored[ignoredReport{title: title, report: ignored}]; done {
+		return
+	}
+
+	p.ignored[ignoredReport{title: title, report: ignored}] = struct{}{}
+
+	ctrl.LoggerFrom(ctx).Info("Ignored a report of a test that has another current report",
+		"test", title, "used", used, "ignored", ignored)
+}
+
+// uploadFailed handles a failed upload. A rejection by DefectDojo is permanent for the report version: it is
+// remembered and not uploaded again. Any other failure leaves the result in DefectDojo unknown: the operator closes
+// nothing for the report, keeps the error for the end of the pass and uploads the report again in the next pass.
+func (r *Reconciler) uploadFailed(
+	ctx context.Context,
+	p *pass,
+	report *unstructured.Unstructured,
+	key importKey,
+	version reportVersion,
+	prev importedReport,
+	hasPrev bool,
+	err error,
+) error {
+	if !defectdojo.IsRejectedReport(err) {
+		if ctx.Err() != nil {
+			return err
+		}
+
+		p.uploadErrors = append(p.uploadErrors, err)
 
 		return nil
 	}
 
-	workload, state, err := p.resolver.ResolveReport(ctx, report)
-	if err != nil {
-		return err
-	}
+	ctrl.LoggerFrom(ctx).Error(err, "DefectDojo rejected a report version, it is not uploaded again until it changes",
+		"report", report.GetName(), "kind", report.GetKind())
+	rejectedReports.WithLabelValues(report.GetKind()).Inc()
 
-	if state != trivy.WorkloadGone {
-		p.keepOpenTitles[trivy.ReportTitle(report, workload)] = struct{}{}
-	}
+	r.recordRejection(p.target.Namespace, key, version)
+	p.reject(key, version, prev, hasPrev)
 
 	return nil
 }
@@ -667,8 +772,8 @@ func (r *Reconciler) recordRejection(namespace string, key importKey, version re
 	put(r.rejectedVersions, namespace, key, version)
 }
 
-// keepImports forgets the tests that no report reflects any more, and the rejected versions of reports that are
-// gone. What is remembered about a kind the pass could not list stays, and its tests count as live in the pass.
+// keepImports forgets the tests that no current report reflects any more, and the rejected versions of reports that
+// are not current. What is remembered about a kind the pass could not list stays.
 func (r *Reconciler) keepImports(namespace string, p *pass) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -722,13 +827,6 @@ func (r *Reconciler) markClosed(namespace string, testID int) {
 	defer r.mu.Unlock()
 
 	put(r.closed, namespace, testID, struct{}{})
-}
-
-func (r *Reconciler) markOpen(namespace string, testID int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	delete(r.closed[namespace], testID)
 }
 
 // pruneTests keeps the closed IDs that DefectDojo still lists for the namespace.

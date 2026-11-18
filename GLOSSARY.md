@@ -75,7 +75,7 @@ The finding field that names the stable workload and container: `<namespace>/<Ki
 _Avoid_: component, workload (for the field)
 
 **Tag**:
-A `<key>:<value>` label on a product or test, used for filters. The operator writes none on findings. On a test, `k8s-workload` and `k8s-container` also name its stable workload and container, and the operator reads them from the listed test.
+A `<key>:<value>` label on a product or test, used for filters. The operator writes none on findings. On a test, `k8s-workload` and `k8s-container` also name its stable workload and container.
 _Avoid_: label (for DefectDojo tags)
 
 ## Sync

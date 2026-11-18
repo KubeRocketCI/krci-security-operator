@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8sLabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -134,10 +135,28 @@ func replicaSet(name, deployment, revision string) *appsv1.ReplicaSet {
 	}
 }
 
-func deployment(name, revision string) *appsv1.Deployment {
-	return &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
-		Name: name, Namespace: appNS, Annotations: map[string]string{revisionAnnotation: revision},
-	}}
+// podTemplate is a pod template with the containers.
+func podTemplate(containers ...string) corev1.PodTemplateSpec {
+	spec := corev1.PodSpec{}
+	for _, c := range containers {
+		spec.Containers = append(spec.Containers, corev1.Container{Name: c})
+	}
+
+	return corev1.PodTemplateSpec{Spec: spec}
+}
+
+// deployment runs the containers; without any it runs one container named like the Deployment.
+func deployment(name, revision string, containers ...string) *appsv1.Deployment {
+	if len(containers) == 0 {
+		containers = []string{name}
+	}
+
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: appNS, Annotations: map[string]string{revisionAnnotation: revision},
+		},
+		Spec: appsv1.DeploymentSpec{Template: podTemplate(containers...)},
+	}
 }
 
 // goAppDeployment is the index of the Deployment in goAppObjects.
@@ -161,15 +180,41 @@ type harness struct {
 	reconciler *Reconciler
 }
 
+// rejectInvalidSelectors makes a list with a label selector that the API server would not parse, a value over 63
+// characters for example, fail with a 400, as the API server does; the fake client accepts any selector.
+func rejectInvalidSelectors(next interceptor.Funcs) interceptor.Funcs {
+	inner := next.List
+
+	next.List = func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+		lo := &client.ListOptions{}
+		lo.ApplyOptions(opts)
+
+		if lo.LabelSelector != nil {
+			if _, err := k8sLabels.Parse(lo.LabelSelector.String()); err != nil {
+				return k8sErrors.NewBadRequest(err.Error())
+			}
+		}
+
+		if inner != nil {
+			return inner(ctx, c, list, opts...)
+		}
+
+		return c.List(ctx, list, opts...)
+	}
+
+	return next
+}
+
 func newHarness(t *testing.T, objects []client.Object, funcs ...interceptor.Funcs) *harness {
 	t.Helper()
 
-	b := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...)
+	var user interceptor.Funcs
 	if len(funcs) > 0 {
-		b = b.WithInterceptorFuncs(funcs[0])
+		user = funcs[0]
 	}
 
-	c := b.Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).
+		WithInterceptorFuncs(rejectInvalidSelectors(user)).Build()
 	dd := newFakeDefectDojo()
 
 	r := NewReconciler(c, c, baseConfig(), func(string, string) DefectDojo { return dd })
@@ -370,13 +415,13 @@ func TestReconcile_DefectDojoServerErrorReturnsError(t *testing.T) {
 	h.dd.seedTests(ownedTest(7, "VulnerabilityReport deployment/gone/gone"))
 
 	require.Error(t, h.reconcileErr())
-	assert.Len(t, h.dd.reimports, 1, "the pass stops at the first failure")
-	assert.Empty(t, h.dd.closed, "nothing is closed while an import failed")
+	assert.Len(t, h.dd.reimports, 2, "a failed upload does not stop the other uploads")
+	assert.Equal(t, []int{7}, h.dd.closed, "a failed upload does not stop the closing of a workload that is gone")
 
 	h.dd.reimportErr = nil
 
 	h.reconcile()
-	assert.Len(t, h.dd.reimports, 3, "the failed report is retried")
+	assert.Len(t, h.dd.reimports, 4, "the failed reports are retried")
 }
 
 func rejectGoApp(r defectdojo.ReimportRequest) error {
@@ -504,12 +549,14 @@ func TestReconcile_NoOps(t *testing.T) {
 		objects     []client.Object
 		funcs       []interceptor.Funcs
 		wantRequeue time.Duration
+		wantClosed  []int
 	}{
 		{
 			name:        "Trivy Operator CRDs are absent",
 			objects:     goAppObjects(),
 			funcs:       []interceptor.Funcs{noMatch},
 			wantRequeue: resync,
+			wantClosed:  []int{7},
 		},
 		{
 			name: "Secret is absent",
@@ -540,7 +587,7 @@ func TestReconcile_NoOps(t *testing.T) {
 
 			assert.Equal(t, tt.wantRequeue, res.RequeueAfter)
 			assert.Empty(t, h.dd.reimports)
-			assert.Empty(t, h.dd.closed)
+			assert.Equal(t, tt.wantClosed, h.dd.closed, "the tests of a workload that is gone close without reports")
 		})
 	}
 }
@@ -556,43 +603,46 @@ func TestReconcile_ClosesTestOfWorkloadThatIsGone(t *testing.T) {
 
 	h.reconcile()
 
-	// Test 5 has the title of the running workload but is not the test the report was imported into: DefectDojo
-	// takes the latest test of a title, 6.
-	assert.ElementsMatch(t, []int{5, 7}, h.dd.closed)
+	assert.Equal(t, []int{7}, h.dd.closed, "the tests with the title of a running workload stay open")
 
 	h.reconcile()
-	assert.ElementsMatch(t, []int{5, 7}, h.dd.closed, "a closed test is not closed again")
+	assert.Equal(t, []int{7}, h.dd.closed, "a closed test is not closed again")
 }
 
-func TestReconcile_ClosesAllTestsWhenNamespaceHasNoReports(t *testing.T) {
+func TestReconcile_NamespaceWithoutReportsKeepsTheTestsOfItsWorkloads(t *testing.T) {
 	h := newHarness(t, goAppObjects())
-	h.dd.seedTests(ownedTest(7, goAppTitle))
+	h.dd.seedTests(ownedTest(7, goAppTitle), ownedTest(8, "VulnerabilityReport deployment/removed/removed"))
 
 	h.reconcile()
 
-	assert.Equal(t, []int{7}, h.dd.closed)
-	assert.Empty(t, h.dd.reimports, "a test is closed without a re-import")
+	assert.Equal(t, []int{8}, h.dd.closed, "a missing report closes nothing, a missing workload does")
+	assert.Empty(t, h.dd.reimports)
 	assert.NotContains(t, h.reconciler.imported, appNS, "a namespace without reports keeps no memory")
 }
 
 func TestReconcile_ReopenedTestIsClosedAgainWhenWorkloadGoesAgain(t *testing.T) {
-	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
+	objects := goAppObjects()
+
+	h := newHarness(t, withReports(objects, goApp(t)))
 	h.dd.seedTestsIn(goAppContext, ownedTest(100, goAppTitle))
 
 	h.reconcile()
 	assert.Empty(t, h.dd.closed, "the imported test is live")
 
-	h.deleteReport(goApp(t))
+	h.remove(objects[goAppDeployment])
+	h.remove(objects[goAppDeployment+1])
 
 	h.reconcile()
 	assert.Equal(t, []int{100}, h.dd.closed)
 
-	h.setReport(goApp(t))
+	h.create(deployment("test-go-app", "1"))
+	h.create(replicaSet("test-go-app-9dc66c9c6", "test-go-app", "1"))
 
 	h.reconcile()
 	require.Len(t, h.dd.reimports, 2, "the report is imported again into the closed test")
 
-	h.deleteReport(goApp(t))
+	h.remove(objects[goAppDeployment])
+	h.remove(objects[goAppDeployment+1])
 
 	h.reconcile()
 	assert.Equal(t, []int{100, 100}, h.dd.closed)
@@ -686,7 +736,7 @@ func pagedObjects() []client.Object {
 		namespaceObject(appNS, nil),
 		deployment("test-go-app", "1"),
 		replicaSet("test-go-app-9dc66c9c6", "test-go-app", "1"),
-		deployment("defectdojo-primary", "1"),
+		deployment("defectdojo-primary", "1", "postgres"),
 		replicaSet("defectdojo-primary-55747b486", "defectdojo-primary", "1"),
 	}
 }
@@ -715,7 +765,8 @@ func TestReconcile_PagesThroughReports(t *testing.T) {
 	assert.Len(t, h.dd.reimports, 2)
 }
 
-func TestReconcile_UnservedReportKindKeepsItsTestsOpen(t *testing.T) {
+func TestReconcile_UnservedReportKindClosesByWorkloadLikeAnyOther(t *testing.T) {
+	// VulnerabilityReport is the unserved kind.
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -727,12 +778,13 @@ func TestReconcile_UnservedReportKindKeepsItsTestsOpen(t *testing.T) {
 			unserved := true
 
 			h := newHarness(t, withReports(goAppObjects(), goApp(t), goAppSecrets(t)), unservedReports(tc.err, &unserved))
-			h.dd.seedTests(ownedTest(7, goAppTitle), ownedTest(8, staleSecretsTitle))
+			h.dd.seedTests(ownedTest(7, goAppTitle), ownedTest(8, staleSecretsTitle), ownedTest(9, staleTitle))
 
 			require.NoError(t, h.reconcileErr())
 
 			assert.Len(t, h.dd.reimports, 1, "the served kind is imported")
-			assert.Equal(t, []int{8}, h.dd.closed, "the served kind closes its stale test, the other kind closes nothing")
+			assert.Equal(t, []int{8, 9}, h.dd.closed,
+				"the tests of a workload that is gone close in both kinds; the test of a live workload stays open")
 		})
 	}
 }
@@ -760,7 +812,7 @@ func TestReconcile_UnservedReportKindKeepsWhatIsRemembered(t *testing.T) {
 	assert.Empty(t, h.dd.closed)
 }
 
-func TestReconcile_ReportKindGoneOnALaterPageKeepsItsTestsOpen(t *testing.T) {
+func TestReconcile_ReportKindGoneOnALaterPageClosesByWorkload(t *testing.T) {
 	var calls []string
 
 	h := newHarness(t, pagedObjects(), pagedReports(t, &calls, noKindMatch(), 1))
@@ -768,7 +820,7 @@ func TestReconcile_ReportKindGoneOnALaterPageKeepsItsTestsOpen(t *testing.T) {
 
 	require.NoError(t, h.reconcileErr())
 	assert.Equal(t, []string{"", "page-2"}, calls)
-	assert.Equal(t, []int{8}, h.dd.closed, "an incomplete listing closes nothing of its kind")
+	assert.Equal(t, []int{7, 8}, h.dd.closed, "the tests of workloads that are gone close whatever the listing found")
 }
 
 func TestReconcile_ExpiredContinueTokenStartsTheListAgain(t *testing.T) {
@@ -804,7 +856,7 @@ func TestReconcile_RestartedListDoesNotUploadARejectedReportAgain(t *testing.T) 
 	assert.Equal(t, 1, h.uploadsOf(goAppTitle), "the version rejected on the first listing is not uploaded again")
 }
 
-func TestReconcile_ReportDeletedBeforeARestartIsNotLive(t *testing.T) {
+func TestReconcile_ReportDeletedBeforeARestartClosesNothing(t *testing.T) {
 	listings := 0
 
 	funcs := interceptor.Funcs{
@@ -843,7 +895,7 @@ func TestReconcile_ReportDeletedBeforeARestartIsNotLive(t *testing.T) {
 
 	assert.Equal(t, 2, listings)
 	require.Len(t, h.dd.reimports, 2)
-	assert.Equal(t, []int{100}, h.dd.closed, "the test the deleted report was imported into closes in the same pass")
+	assert.Empty(t, h.dd.closed, "the workload of the deleted report is running")
 }
 
 func TestReconcile_RejectedVersionIsNotUploadedAgainAfterAFailedPass(t *testing.T) {
@@ -1011,6 +1063,7 @@ func jobReport(t *testing.T, job string) *unstructured.Unstructured {
 func TestReconcile_CronJobRunsShareOneService(t *testing.T) {
 	objects := []client.Object{
 		integrationSecret(), namespaceObject(appNS, nil), cronJob("nightly-1", time.Hour), cronJob("nightly-2", 0),
+		kindsOfWorkload()["CronJob"].objects("nightly", "app")[0],
 	}
 
 	h := newHarness(t, withReports(objects, jobReport(t, "nightly-1"), jobReport(t, "nightly-2")))
@@ -1024,6 +1077,11 @@ func TestReconcile_CronJobRunsShareOneService(t *testing.T) {
 	assert.Equal(t, "CronJob", labels[trivy.LabelResourceKind])
 	assert.Equal(t, "nightly", labels[trivy.LabelResourceName])
 	assert.Equal(t, "krci-demo-dev/CronJob/nightly/app", h.dd.reimports[0].Service)
+
+	h.reconcile()
+
+	assert.Empty(t, h.dd.closed, "the test imported from the report of a Job stays open while the CronJob exists")
+	assert.Len(t, h.dd.reimports, 1)
 }
 
 func TestReconcile_NamespaceDeletionClosesItsOwnedTestsOnce(t *testing.T) {
@@ -1165,7 +1223,7 @@ func TestReconcile_ComponentTag(t *testing.T) {
 			objects[goAppDeployment] = &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
 				Name: "test-go-app", Namespace: appNS, Labels: tt.labels,
 				Annotations: map[string]string{revisionAnnotation: "1"},
-			}}
+			}, Spec: appsv1.DeploymentSpec{Template: podTemplate("test-go-app")}}
 
 			for k, v := range tt.annotations {
 				objects[goAppDeployment].(*appsv1.Deployment).Annotations[k] = v
@@ -1201,36 +1259,42 @@ func TestReconcile_ComponentOfTopWorkload(t *testing.T) {
 		objects []client.Object
 		report  *unstructured.Unstructured
 		want    string
+		// notImported is true for a report that names no current workload.
+		notImported bool
 	}{
 		{
 			name: "StatefulSet",
-			objects: []client.Object{
-				&appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: appNS, Labels: labels}},
-			},
+			objects: []client.Object{&appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: appNS, Labels: labels},
+				Spec:       appsv1.StatefulSetSpec{Template: podTemplate("app")},
+			}},
 			report: report("StatefulSet", "db"),
 			want:   "suite",
 		},
 		{
 			name: "DaemonSet",
-			objects: []client.Object{
-				&appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: appNS, Labels: labels}},
-			},
+			objects: []client.Object{&appsv1.DaemonSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: appNS, Labels: labels},
+				Spec:       appsv1.DaemonSetSpec{Template: podTemplate("app")},
+			}},
 			report: report("DaemonSet", "agent"),
 			want:   "suite",
 		},
 		{
 			name: "Pod",
-			objects: []client.Object{
-				&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "tool", Namespace: appNS, Labels: labels}},
-			},
+			objects: []client.Object{&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "tool", Namespace: appNS, Labels: labels},
+				Spec:       podTemplate("app").Spec,
+			}},
 			report: report("Pod", "tool"),
 			want:   "suite",
 		},
 		{
 			name: "Job without a CronJob",
-			objects: []client.Object{
-				&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "once", Namespace: appNS, Labels: labels}},
-			},
+			objects: []client.Object{&batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{Name: "once", Namespace: appNS, Labels: labels},
+				Spec:       batchv1.JobSpec{Template: podTemplate("app")},
+			}},
 			report: report("Job", "once"),
 			want:   "suite",
 		},
@@ -1238,20 +1302,25 @@ func TestReconcile_ComponentOfTopWorkload(t *testing.T) {
 			name: "CronJob of a Job",
 			objects: []client.Object{
 				cronJob("nightly-1", 0),
-				&batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: "nightly", Namespace: appNS, Labels: labels}},
+				&batchv1.CronJob{
+					ObjectMeta: metav1.ObjectMeta{Name: "nightly", Namespace: appNS, Labels: labels},
+					Spec: batchv1.CronJobSpec{JobTemplate: batchv1.JobTemplateSpec{
+						Spec: batchv1.JobSpec{Template: podTemplate("app")},
+					}},
+				},
 			},
 			report: report("Job", "nightly-1"),
 			want:   "suite",
 		},
 		{
-			name:    "workload object is gone",
-			objects: nil,
-			report:  report("StatefulSet", "db"),
+			name:        "workload object is gone",
+			report:      report("StatefulSet", "db"),
+			notImported: true,
 		},
 		{
-			name:    "kind without a component source",
-			objects: nil,
-			report:  report("ReplicationController", "rc"),
+			name:        "ReplicationController reports are not imported",
+			report:      report("ReplicationController", "rc"),
+			notImported: true,
 		},
 	}
 
@@ -1262,6 +1331,12 @@ func TestReconcile_ComponentOfTopWorkload(t *testing.T) {
 			h := newHarness(t, withReports(objects, tt.report))
 
 			h.reconcile()
+
+			if tt.notImported {
+				assert.Empty(t, h.dd.reimports)
+
+				return
+			}
 
 			require.Len(t, h.dd.reimports, 1)
 			assert.Equal(t, tt.want, appTagOf(h.dd.reimports[0].Tags))
@@ -1548,7 +1623,7 @@ func TestReconcile_ErrorSemantics(t *testing.T) {
 			name:    "closing a test fails",
 			objects: goAppObjects(),
 			setup: func(h *harness) {
-				h.dd.seedTests(ownedTest(7, goAppTitle))
+				h.dd.seedTests(ownedTest(7, "VulnerabilityReport deployment/removed/removed"))
 				h.reconciler.connect = func(string, string) DefectDojo { return failingClose{h.dd} }
 			},
 			wantErr: true,

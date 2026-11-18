@@ -274,33 +274,32 @@ func (h *harness) activeFindingsOf(title string) int {
 	return 0
 }
 
-func TestReconcile_ReportWithoutLabelsHoldsOnlyTheTestsOfItsKind(t *testing.T) {
-	tests := map[string]struct {
-		unlabelled func(*testing.T) *unstructured.Unstructured
-		held       string
-		closed     string
-	}{
-		"vulnerability report":  {unlabelled: goApp, held: goAppTitle, closed: secretsTitle},
-		"exposed secret report": {unlabelled: goAppSecrets, held: secretsTitle, closed: goAppTitle},
-	}
-
-	for name, tc := range tests {
+func TestReconcile_ReportWithoutLabelsHoldsNoTestAndClosesNone(t *testing.T) {
+	for name, unlabelled := range map[string]func(*testing.T) *unstructured.Unstructured{
+		"vulnerability report":  goApp,
+		"exposed secret report": goAppSecrets,
+	} {
 		t.Run(name, func(t *testing.T) {
 			objects := goAppObjects()
 			h := newHarness(t, withReports(objects, goApp(t), goAppSecrets(t)))
 			h.reconcile()
 
-			require.NotZero(t, h.activeFindingsOf(tc.held))
-			require.NotZero(t, h.activeFindingsOf(tc.closed))
+			require.NotZero(t, h.activeFindingsOf(goAppTitle))
+			require.NotZero(t, h.activeFindingsOf(secretsTitle))
 
-			h.setReport(withoutField(t, tc.unlabelled(t), "metadata", "labels"))
+			h.setReport(withoutField(t, unlabelled(t), "metadata", "labels"))
+			h.reconcile()
+
+			assert.NotZero(t, h.activeFindingsOf(goAppTitle), "the workload is running")
+			assert.NotZero(t, h.activeFindingsOf(secretsTitle), "the workload is running")
+
 			h.remove(objects[goAppDeployment])
 			h.remove(objects[goAppDeployment+1])
 
 			h.reconcile()
 
-			assert.NotZero(t, h.activeFindingsOf(tc.held), "the test of the kind of the report without labels stays open")
-			assert.Zero(t, h.activeFindingsOf(tc.closed), "the tests of the other report kind are closed")
+			assert.Zero(t, h.activeFindingsOf(goAppTitle), "the workload is gone")
+			assert.Zero(t, h.activeFindingsOf(secretsTitle), "the workload is gone")
 		})
 	}
 }

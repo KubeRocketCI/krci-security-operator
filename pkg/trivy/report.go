@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
@@ -27,6 +28,9 @@ const (
 
 	LabelResourceNamespace = "trivy-operator.resource.namespace"
 	LabelContainerName     = "trivy-operator.container.name"
+
+	// AnnotationReportTTL is the time Trivy Operator keeps a report. It marks a report it deletes at once with 0s.
+	AnnotationReportTTL = "trivy-operator.aquasecurity.github.io/report-ttl"
 
 	// EngagementTrivyOperator is the engagement of a namespace product that holds the tests of this operator.
 	EngagementTrivyOperator = "trivy-operator"
@@ -72,7 +76,7 @@ func ReportTitle(report *unstructured.Unstructured, workload Workload) string {
 // ResourceRef returns the kind and the name of the resource a report was produced for.
 // The name is the label, else the annotation of the same key: Trivy Operator writes a name that is not a valid
 // label value only to the annotation.
-func ResourceRef(report *unstructured.Unstructured) (kind, name string) {
+func ResourceRef(report metav1.Object) (kind, name string) {
 	name = report.GetLabels()[LabelResourceName]
 	if name == "" {
 		name = report.GetAnnotations()[LabelResourceName]
@@ -86,12 +90,6 @@ func NamesResource(report *unstructured.Unstructured) bool {
 	kind, name := ResourceRef(report)
 
 	return kind != "" && name != ""
-}
-
-// NamesTest reports whether the report carries the kind and the name of its resource and its container name: the
-// parts of the test title.
-func NamesTest(report *unstructured.Unstructured) bool {
-	return NamesResource(report) && report.GetLabels()[LabelContainerName] != ""
 }
 
 // TitleKind returns the report kind of a title written by ImportTitle.
@@ -253,6 +251,19 @@ func BrokenReport(report *unstructured.Unstructured) string {
 	}
 
 	return ""
+}
+
+// ExpiredReport reports whether Trivy Operator marked the report for deletion: its TTL annotation is 0s.
+// Such a report is not current and is not imported.
+func ExpiredReport(report metav1.Object) bool {
+	ttl, ok := report.GetAnnotations()[AnnotationReportTTL]
+	if !ok {
+		return false
+	}
+
+	d, err := time.ParseDuration(ttl)
+
+	return err == nil && d == 0
 }
 
 // Payload returns the report ready to be marshalled, without the fields DefectDojo does not need.

@@ -21,15 +21,15 @@ func (w Workload) GVK() (gvk schema.GroupVersionKind, ok bool) {
 	switch w.Kind {
 	case workloadDeployment:
 		return schema.GroupVersionKind{Group: groupApps, Version: "v1", Kind: kindDeployment}, true
-	case "statefulset":
+	case workloadStatefulSet:
 		return schema.GroupVersionKind{Group: groupApps, Version: "v1", Kind: "StatefulSet"}, true
-	case "daemonset":
+	case workloadDaemonSet:
 		return schema.GroupVersionKind{Group: groupApps, Version: "v1", Kind: "DaemonSet"}, true
 	case workloadCronJob:
 		return schema.GroupVersionKind{Group: groupBatch, Version: "v1", Kind: kindCronJob}, true
 	case workloadJob:
 		return schema.GroupVersionKind{Group: groupBatch, Version: "v1", Kind: kindJob}, true
-	case "pod":
+	case workloadPod:
 		return schema.GroupVersionKind{Version: "v1", Kind: "Pod"}, true
 	default:
 		return schema.GroupVersionKind{}, false
