@@ -50,8 +50,7 @@ func (r *Reconciler) productTypeMissing(ctx context.Context, err error) bool {
 	}
 
 	r.productTypeLogged.Do(func() {
-		ctrl.LoggerFrom(ctx).Info("Could not find the Product Type in DefectDojo, no product is looked up until it exists",
-			"productType", r.config.ProductType)
+		ctrl.LoggerFrom(ctx).Info("Could not find the Product Type in DefectDojo", "productType", r.config.ProductType)
 	})
 
 	return true
@@ -137,7 +136,7 @@ func (r *Reconciler) expectedTitles(ctx context.Context, namespace string) (map[
 
 		for container := range containers {
 			for _, kind := range r.config.ReportKinds {
-				titles[trivy.ImportTitle(kind, workload, container)] = struct{}{}
+				titles[trivy.TestTitle(kind, workload, container)] = struct{}{}
 			}
 		}
 	}
@@ -269,7 +268,7 @@ func (r *Reconciler) runSweeper(ctx context.Context) error {
 
 	for {
 		if err := r.sweep(ctx); err != nil {
-			ctrl.LoggerFrom(ctx).Error(err, "Sweep failed, will retry")
+			ctrl.LoggerFrom(ctx).Error(err, "Failed to sweep the namespace products of the cluster")
 		}
 
 		select {
@@ -295,7 +294,7 @@ func (r *Reconciler) sweep(ctx context.Context) error {
 		return nil
 	}
 
-	products, err := dd.ListProducts(ctx, r.config.ProductType, r.config.ClusterName+"/")
+	products, err := dd.ListProducts(ctx, r.config.ProductType, trivy.ProductPrefix(r.config.ClusterName))
 	if r.productTypeMissing(ctx, err) {
 		return nil
 	}

@@ -7,7 +7,7 @@
 | `cmd/main.go` | manager setup: metrics, health probes, leader election; loads the module configuration and registers the module |
 | `internal/controller/trivy/` | the Trivy module: `Config` (environment parsing and validation), `SetupWithManager` (controller and sweeper), `Reconciler` (pass over a namespace), namespace exclusion, closing, event mapping |
 | `pkg/defectdojo/` | minimal DefectDojo API v2 client with one lock per test for the reimport and the close |
-| `pkg/trivy/` | Trivy report parsing, image and workload resolution, the namespace product, engagement, test title, tags and ownership, component tag |
+| `pkg/trivy/` | Trivy report parsing, image and workload resolution, paged listing, the namespace product, engagement, test title, tags and ownership, component tag |
 | `deploy-templates/` | Helm chart, the only deployment artifact |
 | `test/deploy/` | chart render tests: `helm template` checked against the configuration the code reads and the read-only access |
 | `ct-configs/` | chart-testing configuration used by CI |
@@ -20,7 +20,7 @@
 - A module returns transient errors from `Reconcile`; only an absent optional dependency requeues with a nil error.
 - Background work that must change state wakes the controller through a channel source instead of acting itself, so the workqueue serializes it per key.
 - A module watches the metadata of large objects only and reads everything else through the API reader, so big objects never sit in the cache.
-- A module lists large objects in pages and finishes each page before it reads the next; only small sets (IDs, titles) are kept across pages.
+- A module lists large objects in pages and finishes each page before it reads the next. Across pages it keeps the report metadata index of one kind and the container names of the workloads for one pass, bounded by pages of 500 objects, and the test IDs and titles of the namespace. Every list goes through `trivy.ListPages`: a continue token that expired (HTTP 410) restarts the listing, at most 3 times, then the pass fails.
 - The ClusterRole stays read-only and lists exactly what the code calls. A new module that needs more access adds its rules to `deploy-templates/templates/role.yaml` and to the access table of [trivy.md](trivy.md#access); `test/deploy` fails on a write verb in the ClusterRole.
 
 ## The Trivy module
@@ -28,7 +28,9 @@
 | File | Contents |
 |---|---|
 | `trivy.go` | `SetupWithManager`: the controller keyed by namespace, the metadata watches of the reports, the Namespace watch, the sweeper |
-| `reconciler.go` | `Reconcile`, the import of a namespace, the in-memory state of imported reports |
+| `config.go` | `Config`, its environment variables, defaults and validation |
+| `reconciler.go` | `Reconcile`, the credentials Secret and its cache, the pass over a namespace, the choice of the report of a test, the reimport of a report, and the in-memory state: reimported report versions, rejected report versions, closed tests, released namespaces |
+| `workload_report.go` | the report on the stable workload itself: the metadata index of the reports of a kind, and the check that it can be uploaded before the report of a ReplicaSet or Job is |
 | `namespace.go` | the live namespace and `excludeNamespaces` |
 | `closing.go` | the namespace product lookup, closing of stale and released tests, product tags; the sweeper that wakes namespaces for the controller |
 | `watch.go` | mapping of report events to namespaces |
@@ -41,7 +43,7 @@ The operator depends on DefectDojo and Trivy Operator behavior that no API docum
 
 | Project | Supported | Contract unchanged across |
 |---|---|---|
-| DefectDojo | 2.55 or later, 3.4.200 or later recommended; verified with 2.55.2 and 3.5.200 | 2.55.2 to 3.5.200, except that only 3.4.200 and later serialize two imports into one test |
+| DefectDojo | 2.55 or later; 3.5.200 is the version the platform targets and the tests follow; verified with 2.55.2 and 3.5.200 | 2.55.2 to 3.5.200, except that only 3.4.200 and later serialize two imports into one test, and that 3.5.200 has no Product Type roles (see [trivy.md](trivy.md#defectdojo-requirements)) |
 | Trivy Operator | 0.34.0 or later, verified with 0.36.1 | 0.34.0 to 0.36.1 |
 
 Supported means the releases of the last three months. On a new upstream release, compare the files below between the old and the new tag, update the fake and this table, and move the lower bound.
@@ -67,6 +69,9 @@ DefectDojo files that define the reimport contract:
 | `dojo/importers/base_importer.py` | `update_test_meta` (version), `update_test_tags`, `mitigate_finding` (risk acceptance removed) |
 | `dojo/importers/auto_create_context.py` | product type conflict, last engagement and test by name |
 | `dojo/api_v2/serializers.py` | `ReImportScanSerializer`: form validation, context and test created before the parser runs |
+| `dojo/filters.py` `ApiProductFilter` (`dojo/product/api/filters.py` in 3.5) | `name_exact`, an `iexact` match on the product name: the product lookup by exact name uses it; verified in 2.55.2 and 3.5.200 |
+| `dojo/api_v2/permissions.py` `check_auto_create_permission` (`dojo/authorization/api_permissions.py` in 3.5) | permissions of a reimport that creates the Product Type, product and engagement |
+| `dojo/authorization/authorization.py`, `roles_permissions.py` | 2.55: roles per Product Type and product, global roles. 3.5: staff, superuser and `authorized_users` only, no roles |
 
 Trivy Operator files: `pkg/trivyoperator/constants.go` (report labels), `pkg/apis/aquasecurity/v1alpha1/` (report types, `report-ttl` annotation).
 

@@ -183,13 +183,13 @@ func TestReconcile_ReleasePrunesTheNamespaceAndImportingForgetsIt(t *testing.T) 
 	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
 
 	h.reconcile()
-	require.Contains(t, h.reconciler.imported, appNS)
+	require.Contains(t, h.reconciler.reimported, appNS)
 
 	h.reconciler.config.ExcludeNamespaces = []string{appNS}
 
 	h.reconcile()
 	assert.True(t, h.reconciler.isReleased(appNS))
-	assert.NotContains(t, h.reconciler.imported, appNS)
+	assert.NotContains(t, h.reconciler.reimported, appNS)
 	assert.NotContains(t, h.reconciler.closed, appNS)
 
 	h.reconciler.config.ExcludeNamespaces = nil

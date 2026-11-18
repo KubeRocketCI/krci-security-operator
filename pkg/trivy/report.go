@@ -1,4 +1,4 @@
-// Package trivy maps Trivy Operator reports to DefectDojo imports.
+// Package trivy maps Trivy Operator reports to DefectDojo reimports.
 package trivy
 
 import (
@@ -61,16 +61,16 @@ func ReportGVK(kind string) schema.GroupVersionKind {
 	return schema.GroupVersionKind{Group: TrivyGroup, Version: TrivyVersion, Kind: kind}
 }
 
-// ImportTitle is the title of the DefectDojo test of a workload container:
+// TestTitle is the title of the DefectDojo test of a workload container:
 // "<ReportKind> <kind>/<name>/<container>", shortened to MaxTitleLen. It has no namespace: the namespace product
 // names it.
-func ImportTitle(reportKind string, workload Workload, container string) string {
+func TestTitle(reportKind string, workload Workload, container string) string {
 	return Shorten(reportKind+" "+workload.String()+"/"+container, MaxTitleLen)
 }
 
 // ReportTitle is the title of the DefectDojo test of a report of a workload.
 func ReportTitle(report *unstructured.Unstructured, workload Workload) string {
-	return ImportTitle(report.GetKind(), workload, report.GetLabels()[LabelContainerName])
+	return TestTitle(report.GetKind(), workload, ContainerOf(report))
 }
 
 // ResourceRef returns the kind and the name of the resource a report was produced for.
@@ -85,6 +85,9 @@ func ResourceRef(report metav1.Object) (kind, name string) {
 	return report.GetLabels()[LabelResourceKind], name
 }
 
+// ContainerOf returns the name of the container a report was produced for; "" when the report names none.
+func ContainerOf(report metav1.Object) string { return report.GetLabels()[LabelContainerName] }
+
 // NamesResource reports whether the report carries both the kind and the name of its resource.
 func NamesResource(report *unstructured.Unstructured) bool {
 	kind, name := ResourceRef(report)
@@ -92,26 +95,29 @@ func NamesResource(report *unstructured.Unstructured) bool {
 	return kind != "" && name != ""
 }
 
-// TitleKind returns the report kind of a title written by ImportTitle.
+// TitleKind returns the report kind of a title written by TestTitle.
 func TitleKind(title string) string {
 	kind, _, _ := strings.Cut(title, " ")
 
 	return kind
 }
 
+// ProductPrefix is the start of the name of every namespace product of the cluster: "<cluster name>/".
+func ProductPrefix(cluster string) string { return cluster + "/" }
+
 // ProductName is the name of a namespace product: "<cluster name>/<namespace>".
-func ProductName(cluster, namespace string) string { return cluster + "/" + namespace }
+func ProductName(cluster, namespace string) string { return ProductPrefix(cluster) + namespace }
 
 // IsOwned reports whether the operator of the cluster may close the test: its product name starts with
 // "<cluster name>/" and its scan type is Trivy Operator Scan. Tags are not used.
 func IsOwned(test defectdojo.Test, cluster string) bool {
-	return strings.HasPrefix(test.Product, cluster+"/") && test.ScanType == defectdojo.ScanTypeTrivyOperator
+	return strings.HasPrefix(test.Product, ProductPrefix(cluster)) && test.ScanType == defectdojo.ScanTypeTrivyOperator
 }
 
 // NamespaceOfProduct returns the namespace of a namespace product of the cluster, "<cluster name>/<namespace>".
 // Any other product name, one without the prefix or with a further "/" for example, is not one.
 func NamespaceOfProduct(cluster, product string) (string, bool) {
-	namespace, ok := strings.CutPrefix(product, cluster+"/")
+	namespace, ok := strings.CutPrefix(product, ProductPrefix(cluster))
 	if !ok || namespace == "" || strings.Contains(namespace, "/") {
 		return "", false
 	}
@@ -162,8 +168,8 @@ type Target struct {
 	Cluster string
 }
 
-// Import is the DefectDojo destination and the descriptive fields of one report.
-type Import struct {
+// Reimport is the DefectDojo destination and the descriptive fields of the reimport of one report.
+type Reimport struct {
 	Product    string
 	Engagement string
 	TestTitle  string
@@ -177,13 +183,13 @@ type Import struct {
 	Tags []string
 }
 
-// ReportImport derives the DefectDojo destination of a report of a workload container in a namespace:
+// NewReimport derives the DefectDojo destination of a report of a workload container in a namespace:
 // the namespace product, the engagement of the integration and the test of the container.
 // component is the value of the app tag; empty gives no app tag.
-func ReportImport(target Target, report *unstructured.Unstructured, workload Workload, component string) Import {
+func NewReimport(target Target, report *unstructured.Unstructured, workload Workload, component string) Reimport {
 	image := ImageOf(report)
 
-	return Import{
+	return Reimport{
 		Product:    ProductName(target.Cluster, target.Namespace),
 		Engagement: EngagementTrivyOperator,
 		TestTitle:  ReportTitle(report, workload),
@@ -193,15 +199,15 @@ func ReportImport(target Target, report *unstructured.Unstructured, workload Wor
 			tag(TagKeyCluster, target.Cluster),
 			tag(TagKeyNamespace, target.Namespace),
 			tag(TagKeyWorkload, workload.Tag()),
-			tag(TagKeyContainer, report.GetLabels()[LabelContainerName]),
+			tag(TagKeyContainer, ContainerOf(report)),
 			tag(TagKeyImage, image.Name),
 			tag(TagKeyApp, component),
 		}, func(t string) bool { return t == "" }),
 	}
 }
 
-// Request completes the import into a DefectDojo re-import request.
-func (i Import) Request(productType string, scanDate time.Time, report []byte) defectdojo.ReimportRequest {
+// Request completes the reimport into a DefectDojo reimport request.
+func (i Reimport) Request(productType string, scanDate time.Time, report []byte) defectdojo.ReimportRequest {
 	return defectdojo.ReimportRequest{
 		ProductType: productType,
 		Product:     i.Product,
@@ -232,7 +238,7 @@ func BrokenReport(report *unstructured.Unstructured) string {
 		return "no resource kind or name"
 	}
 
-	if report.GetLabels()[LabelContainerName] == "" {
+	if ContainerOf(report) == "" {
 		return "no container name"
 	}
 
@@ -320,7 +326,7 @@ func serviceResource(report *unstructured.Unstructured, workload Workload) (kind
 func Service(report *unstructured.Unstructured, workload Workload) string {
 	kind, name := serviceResource(report, workload)
 
-	return Shorten(serviceNamespace(report)+"/"+kind+"/"+name+"/"+report.GetLabels()[LabelContainerName], MaxServiceLen)
+	return Shorten(serviceNamespace(report)+"/"+kind+"/"+name+"/"+ContainerOf(report), MaxServiceLen)
 }
 
 // serviceNamespace returns the resource namespace label, else the namespace of the report.

@@ -14,7 +14,7 @@ import (
 	"github.com/KubeRocketCI/krci-security-operator/pkg/trivy"
 )
 
-// reconcileLogged reconciles the Stage namespace and returns what the pass logged.
+// reconcileLogged reconciles the namespace appNS and returns what the pass logged.
 func (h *harness) reconcileLogged() string {
 	h.t.Helper()
 
