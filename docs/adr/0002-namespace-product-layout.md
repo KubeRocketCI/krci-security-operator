@@ -21,11 +21,12 @@ Product Type   <product type>                              setting, default Kube
                          app:<component>                   only when a source exists
               └── Finding
                     service   <namespace>/<Kind>/<name>/<container>
-                    tags      the test tags
+                    tags      none from the operator; filter findings by test tag
 ```
 
 - `<ReportKind>`: `VulnerabilityReport` or `ExposedSecretReport`.
-- `<kind>/<name>`: the stable workload, lower-case kind: `deployment`, `statefulset`, `daemonset`, `cronjob`, `job`, `replicaset` (a ReplicaSet without a Deployment), `pod`.
+- `<kind>/<name>`: the stable workload, lower-case kind: `deployment`, `statefulset`, `daemonset`, `cronjob`, `job`, `replicaset` (a ReplicaSet without a Deployment), `pod`. ReplicationController reports are not imported.
+- Product tags are set when the product has none of them, on the first reimport and on every sweep, so a failed first attempt is repaired.
 - `<Kind>` in the service: the same kind in Kubernetes spelling: `Deployment`, `CronJob`, …
 - The CI pipeline writes codebase products under the same Product Type (`<codebase>`, engagements `code-security-<branch>` and `image:<registry>/<repository>`). The operator never reads or writes them.
 
@@ -73,7 +74,7 @@ Product Type: KubeRocketCI
 
 ## Consequences
 
-- The Product Type is a setting with the default `KubeRocketCI`, so a platform without KubeRocketCI sets its own name. All operators that write to one DefectDojo must use the same value, because a reimport fails when a product exists under another Product Type. Changing the value later leaves the existing namespace products under the old Product Type, and their reimports fail until the products are moved.
+- The Product Type is a setting with the default `KubeRocketCI`, so a platform without KubeRocketCI sets its own name. All operators that write to one DefectDojo should use the same value, so that all namespace products are in one group. Changing the value later leaves the existing namespace products under the old Product Type, and their reimports fail until the products are moved.
 - The cluster name is mandatory and must be unique per DefectDojo. Two clusters with the same name write into, and close, the same products.
 - The CI pipeline writes codebase products under the same Product Type. A codebase name has no `/`, so the names never clash.
 - The engagement name is fixed, because DefectDojo engagement names are not unique and a lookup takes the last one with the name.
