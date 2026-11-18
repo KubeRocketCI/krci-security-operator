@@ -14,6 +14,9 @@ const (
 	MaxTitleLen   = 255
 	MaxVersionLen = 100
 	MaxTagLen     = 255
+	// MaxBuildIDLen is the length the operator keeps the build_id of a test within. DefectDojo accepts 150; the
+	// DefectDojo reimport form accepts 100.
+	MaxBuildIDLen = 100
 
 	// hashLen is the number of hex characters of the hash a shortened value ends with.
 	hashLen = 12

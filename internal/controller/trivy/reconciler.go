@@ -56,6 +56,8 @@ type DefectDojo interface {
 	ListTests(ctx context.Context, product defectdojo.Product, engagement string) ([]defectdojo.Test, error)
 	// CloseTest mitigates the active findings of the test and keeps the test.
 	CloseTest(ctx context.Context, test defectdojo.Test) error
+	// SetBuildID sets the build_id of the test.
+	SetBuildID(ctx context.Context, testID int, buildID string) error
 	// SetProductTags replaces the tags of the product.
 	SetProductTags(ctx context.Context, productID int, tags []string) error
 }
@@ -97,6 +99,8 @@ type testKey struct {
 // reimportedReport is the report version a DefectDojo test currently reflects.
 type reimportedReport struct {
 	reportVersion
+	// marker is the upload marker of the request that went with the report version.
+	marker string
 	testID int
 }
 
@@ -130,7 +134,7 @@ type Reconciler struct {
 
 	mu sync.Mutex
 	// reimported holds, per namespace, the report each test was last reimported from.
-	// It is lost on restart; the next pass reimports every report.
+	// It is lost on restart; the next pass takes the report versions from the build_id of the tests.
 	reimported map[string]map[testKey]reimportedReport
 	// closed holds, per namespace, the tests closed by the operator that DefectDojo still lists.
 	closed map[string]map[int]struct{}
@@ -307,6 +311,10 @@ type pass struct {
 	reportIndex map[string]map[containerKey][]indexedReport
 	// ignored holds the reports whose ignoring the pass logged.
 	ignored map[ignoredReport]struct{}
+	// remote holds what DefectDojo lists for the namespace product, once it was needed.
+	remote remoteTests
+	// uploaded is true once the pass sent a reimport: the tests list read before it is out of date.
+	uploaded bool
 }
 
 // ignoredReport identifies a report that lost the choice of its test.
@@ -336,6 +344,8 @@ type reportUpload struct {
 	report  *unstructured.Unstructured
 	key     testKey
 	version reportVersion
+	// marker is the upload marker of the report with the request of its test.
+	marker string
 	// prev is the report the test reflects; nil when none is known.
 	prev *reimportedReport
 	// rejection is the remembered rejection of this version; nil when there is none.
@@ -395,20 +405,24 @@ func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target tr
 
 	r.keepReimported(target.Namespace, p)
 
-	product, found, err := r.namespaceProduct(ctx, dd, target.Namespace)
-	if err != nil && !r.productTypeMissing(ctx, err) {
-		return errors.Join(append(p.uploadErrors, err)...)
+	remote := r.remoteAfterUploads(ctx, dd, p)
+
+	if remote.productErr != nil && !r.productTypeMissing(ctx, remote.productErr) {
+		return errors.Join(append(p.uploadErrors, remote.productErr)...)
 	}
 
-	if !found {
+	if !remote.found {
 		r.pruneTests(target.Namespace, nil)
 
 		return errors.Join(p.uploadErrors...)
 	}
 
-	closeErr := r.closeStaleTests(ctx, dd, target, product)
+	closeErr := remote.testsErr
+	if closeErr == nil {
+		closeErr = r.closeStaleTests(ctx, dd, target, remote.tests)
+	}
 
-	return errors.Join(append(p.uploadErrors, closeErr, r.setProductTags(ctx, dd, target.Namespace, product))...)
+	return errors.Join(append(p.uploadErrors, closeErr, r.setProductTags(ctx, dd, target.Namespace, remote.product))...)
 }
 
 // reimportPage reimports the reports of one page.
@@ -452,7 +466,7 @@ func (r *Reconciler) reimportOne(ctx context.Context, dd DefectDojo, p *pass, re
 	key := testKey{product: dest.Product, engagement: dest.Engagement, title: dest.TestTitle}
 	mine := choice{report: report.GetName(), onWorkload: namesWorkload(report, workload)}
 
-	u := reportUpload{report: report, key: key, version: versionOf(report)}
+	u := reportUpload{report: report, key: key, version: versionOf(report), marker: dest.UploadMarker(report)}
 	u.prev = r.lastReimport(p.target.Namespace, key)
 	u.rejection = r.rejectionOf(p.target.Namespace, key, u.version)
 	held := u.rejection != nil && !r.retryDue(*u.rejection)
@@ -468,7 +482,7 @@ func (r *Reconciler) reimportOne(ctx context.Context, dd DefectDojo, p *pass, re
 		return nil
 	}
 
-	if u.prev != nil && u.prev.reportVersion == u.version {
+	if u.prev != nil && u.prev.reportVersion == u.version && u.prev.marker == u.marker {
 		p.current[key] = *u.prev
 
 		return nil
@@ -491,14 +505,51 @@ func (r *Reconciler) reimportOne(ctx context.Context, dd DefectDojo, p *pass, re
 		return nil
 	}
 
-	entry, err := r.uploadReport(ctx, dd, dest, report, workload)
+	return r.upload(ctx, dd, p, dest, u, workload)
+}
+
+// upload reimports the report unless its test already holds it, and remembers the result. A reimport that creates the
+// test is followed by the update of its build_id.
+func (r *Reconciler) upload(
+	ctx context.Context,
+	dd DefectDojo,
+	p *pass,
+	dest trivy.Reimport,
+	u reportUpload,
+	workload trivy.Workload,
+) error {
+	log := ctrl.LoggerFrom(ctx).WithValues("report", u.report.GetName(), "kind", u.report.GetKind())
+
+	test, exists, err := r.locateTest(ctx, dd, p, u)
+	if err != nil {
+		return err
+	}
+
+	if exists && test.BuildID == u.marker {
+		entry := reimportedReport{reportVersion: u.version, marker: u.marker, testID: test.ID}
+		p.current[u.key] = entry
+
+		r.recordReimport(p.target.Namespace, u.key, entry)
+
+		log.V(1).Info("Skipped a report that DefectDojo already holds", "test", test.ID)
+
+		return nil
+	}
+
+	entry, err := r.uploadReport(ctx, dd, p, dest, u, workload, exists)
 	if err != nil {
 		return r.uploadFailed(ctx, p, u, err)
 	}
 
-	p.current[key] = entry
+	if !exists {
+		if err = dd.SetBuildID(ctx, entry.testID, u.marker); err != nil {
+			return r.markerFailed(ctx, p, entry.testID, err)
+		}
+	}
 
-	r.recordReimport(p.target.Namespace, key, entry)
+	p.current[u.key] = entry
+
+	r.recordReimport(p.target.Namespace, u.key, entry)
 
 	log.Info("Reimported a report", "product", dest.Product, "engagement", dest.Engagement, "test", entry.testID)
 
@@ -657,28 +708,54 @@ func (r *Reconciler) uploadFailed(ctx context.Context, p *pass, u reportUpload, 
 	return nil
 }
 
+// markerFailed handles a failed update of the build_id of the test a reimport created. The test holds the report and
+// has no marker: the error is kept for the end of the pass, the report is not remembered as reimported and is
+// uploaded again in the next pass.
+func (r *Reconciler) markerFailed(ctx context.Context, p *pass, testID int, err error) error {
+	err = fmt.Errorf("failed to set the upload marker of DefectDojo test %d: %w", testID, err)
+
+	if ctx.Err() != nil {
+		return err
+	}
+
+	p.uploadErrors = append(p.uploadErrors, err)
+
+	return nil
+}
+
+// uploadReport reimports the report of the upload. The upload marker goes with the request only when the test exists:
+// DefectDojo saves the build_id of a new test before it reads the report, and a failed reimport must not leave it.
 func (r *Reconciler) uploadReport(
 	ctx context.Context,
 	dd DefectDojo,
+	p *pass,
 	dest trivy.Reimport,
-	report *unstructured.Unstructured,
+	u reportUpload,
 	workload trivy.Workload,
+	testExists bool,
 ) (reimportedReport, error) {
-	payload, err := json.Marshal(trivy.Payload(report, workload))
+	payload, err := json.Marshal(trivy.Payload(u.report, workload))
 	if err != nil {
-		return reimportedReport{}, fmt.Errorf("failed to marshal report %s: %w", report.GetName(), err)
+		return reimportedReport{}, fmt.Errorf("failed to marshal report %s: %w", u.report.GetName(), err)
 	}
 
-	res, err := dd.Reimport(ctx, dest.Request(r.config.ProductType, r.now(), payload))
+	buildID := ""
+	if testExists {
+		buildID = u.marker
+	}
+
+	p.uploaded = true
+
+	res, err := dd.Reimport(ctx, dest.Request(r.config.ProductType, r.now(), buildID, payload))
 	if err != nil {
-		return reimportedReport{}, fmt.Errorf("failed to import report %s: %w", report.GetName(), err)
+		return reimportedReport{}, fmt.Errorf("failed to import report %s: %w", u.report.GetName(), err)
 	}
 
 	if res.TestID == 0 {
-		return reimportedReport{}, fmt.Errorf("defectdojo did not return a test for report %s", report.GetName())
+		return reimportedReport{}, fmt.Errorf("defectdojo did not return a test for report %s", u.report.GetName())
 	}
 
-	return reimportedReport{reportVersion: versionOf(report), testID: res.TestID}, nil
+	return reimportedReport{reportVersion: u.version, marker: u.marker, testID: res.TestID}, nil
 }
 
 // component returns the app tag value of a workload: it reads the labels and annotations of the top

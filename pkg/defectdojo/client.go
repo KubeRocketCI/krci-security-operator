@@ -88,8 +88,13 @@ type ReimportRequest struct {
 	TestTitle   string
 	// Service replaces the service of every finding and limits the findings the reimport closes to that service.
 	// Required. DefectDojo stores at most 200 characters; the caller shortens a longer value.
-	Service  string
-	Version  string
+	Service string
+	Version string
+	// BuildID is stored on the test. Empty: the field is omitted and DefectDojo stores an empty value, as it does for
+	// an omitted version. DefectDojo stores at most 150 characters; the caller keeps it within 100.
+	// DefectDojo creates a new test with the build_id before it reads the report, so a failed first reimport keeps
+	// it: send it only for a test that exists, and set it with SetBuildID after a reimport that creates the test.
+	BuildID  string
 	Tags     []string
 	ScanDate time.Time
 	// Report is the JSON document handed to the Trivy Operator parser.
@@ -118,6 +123,10 @@ type Test struct {
 	ScanType string `json:"scan_type"`
 	// Tags are the tags of the test. They are not used for ownership.
 	Tags []string `json:"tags"`
+	// BuildID is the build_id the last reimport stored; empty when none was sent.
+	BuildID string `json:"build_id"`
+	// LastEngagement is true for a test of the last engagement with the listed name, the one a reimport writes into.
+	LastEngagement bool `json:"-"`
 	// Product and Engagement are the names of the product and the engagement the test was listed through.
 	// Closing a test requires them with Title.
 	Product    string `json:"-"`
@@ -219,6 +228,10 @@ func (c *Client) Reimport(ctx context.Context, r ReimportRequest) (ReimportResul
 		{"scan_date", r.ScanDate.Format(time.DateOnly)},
 	}...)
 
+	if r.BuildID != "" {
+		fields = append(fields, [2]string{"build_id", r.BuildID})
+	}
+
 	for _, tag := range r.Tags {
 		fields = append(fields, [2]string{"tags", tag})
 	}
@@ -246,6 +259,7 @@ func (c *Client) Reimport(ctx context.Context, r ReimportRequest) (ReimportResul
 
 // CloseTest mitigates every active finding of the test and keeps the test. A test without active findings
 // is closed. It takes the lock of the re-import of the same test.
+// A test with a build_id has it cleared first, so the report of a closed test is imported again.
 func (c *Client) CloseTest(ctx context.Context, test Test) error {
 	// The lock key is the product, engagement and title that Reimport uses.
 	if test.Product == "" || test.Engagement == "" || test.Title == "" {
@@ -254,6 +268,12 @@ func (c *Client) CloseTest(ctx context.Context, test Test) error {
 
 	unlock := c.testLocks.lock(testLockKey(c.contextKey(test.Product, test.Engagement), test.Title))
 	defer unlock()
+
+	if test.BuildID != "" {
+		if err := c.SetBuildID(ctx, test.ID, ""); err != nil {
+			return err
+		}
+	}
 
 	// The list is read completely before anything is closed so closing does not shift the pages.
 	ids, err := c.activeFindingIDs(ctx, test.ID)
@@ -333,6 +353,23 @@ func listAll[T any](ctx context.Context, c *Client, endpoint, what string, filte
 		// A server may answer with fewer results than the limit.
 		offset += len(page.Results)
 	}
+}
+
+// SetBuildID sets the build_id of the test; empty clears it. It does not take the lock of the test: the caller
+// serializes it with the re-imports and closes of the test.
+func (c *Client) SetBuildID(ctx context.Context, testID int, buildID string) error {
+	payload, err := json.Marshal(map[string]any{"build_id": buildID})
+	if err != nil {
+		return fmt.Errorf("failed to encode test update: %w", err)
+	}
+
+	// Setting the same value twice is harmless, so the call is retried like a read.
+	_, err = c.do(ctx, retryAll, defaultRequestTimeout, func(ctx context.Context) (*http.Request, error) {
+		return c.newRequest(ctx, http.MethodPatch, fmt.Sprintf("%s%d/", testsPath, testID),
+			bytes.NewReader(payload), "application/json")
+	})
+
+	return err
 }
 
 func (c *Client) closeFinding(ctx context.Context, findingID int) error {
@@ -442,11 +479,14 @@ func (c *Client) productTypeID(ctx context.Context, name string) (id int, found 
 	return id, true, nil
 }
 
-// ListTests returns the tests of the engagement with exactly this name in the product, asking DefectDojo for
+// ListTests returns the tests of the engagements with exactly this name in the product, asking DefectDojo for
 // the Trivy Operator Scan tests. Each test carries the scan type DefectDojo reports; the caller checks it.
+// Tests of the engagement with the highest ID are marked LastEngagement.
 // The engagement name filter is a contains match, so the name is checked here.
 func (c *Client) ListTests(ctx context.Context, product Product, engagement string) ([]Test, error) {
 	var engagementIDs []int
+
+	lastEngagement := 0
 
 	filter := url.Values{}
 	filter.Set("product", strconv.Itoa(product.ID))
@@ -460,6 +500,7 @@ func (c *Client) ListTests(ctx context.Context, product Product, engagement stri
 	err := listAll(ctx, c, engagementsPath, "engagements", filter, func(e engagementRef) {
 		if e.Name == engagement {
 			engagementIDs = append(engagementIDs, e.ID)
+			lastEngagement = max(lastEngagement, e.ID)
 		}
 	})
 	if err != nil {
@@ -474,7 +515,7 @@ func (c *Client) ListTests(ctx context.Context, product Product, engagement stri
 		filter.Set("scan_type", ScanTypeTrivyOperator)
 
 		err = listAll(ctx, c, testsPath, "tests", filter, func(t Test) {
-			t.Product, t.Engagement = product.Name, engagement
+			t.Product, t.Engagement, t.LastEngagement = product.Name, engagement, id == lastEngagement
 			tests = append(tests, t)
 		})
 		if err != nil {

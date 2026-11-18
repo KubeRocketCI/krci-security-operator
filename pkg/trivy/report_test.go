@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/KubeRocketCI/krci-security-operator/pkg/defectdojo"
 )
@@ -253,7 +254,7 @@ func TestImport_Request(t *testing.T) {
 	scanDate := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
 	i := Reimport{Product: "p", Engagement: "e", TestTitle: "t", Service: "s", Version: "v", Tags: []string{"a"}}
 
-	req := i.Request("KubeRocketCI", scanDate, []byte("{}"))
+	req := i.Request("KubeRocketCI", scanDate, "uid:1:abc", []byte("{}"))
 
 	assert.Equal(t, "KubeRocketCI", req.ProductType)
 	assert.Equal(t, "p", req.Product)
@@ -261,9 +262,77 @@ func TestImport_Request(t *testing.T) {
 	assert.Equal(t, "t", req.TestTitle)
 	assert.Equal(t, "s", req.Service)
 	assert.Equal(t, "v", req.Version)
+	assert.Equal(t, "uid:1:abc", req.BuildID)
 	assert.Equal(t, []string{"a"}, req.Tags)
 	assert.Equal(t, scanDate, req.ScanDate)
 	assert.Equal(t, []byte("{}"), req.Report)
+}
+
+func markedReport(uid, resourceVersion string) *unstructured.Unstructured {
+	report := &unstructured.Unstructured{Object: map[string]any{}}
+	report.SetUID(types.UID(uid))
+	report.SetResourceVersion(resourceVersion)
+
+	return report
+}
+
+func TestUploadMarker_IsTheReportVersionAndAHashOfTheRequest(t *testing.T) {
+	i := Reimport{TestTitle: "t", Service: "s", Version: "v", Tags: []string{"a:1", "b:2"}}
+	uid := "0f7b2c1e-4d3a-4b8e-9c55-1a2b3c4d5e6f"
+
+	marker := i.UploadMarker(markedReport(uid, "4711"))
+
+	assert.Regexp(t, `^`+uid+`:4711:[0-9a-f]{12}$`, marker)
+	assert.Equal(t, marker, i.UploadMarker(markedReport(uid, "4711")), "the same report version gives the same marker")
+	assert.NotEqual(t, marker, i.UploadMarker(markedReport(uid, "4712")), "another resourceVersion")
+	assert.NotEqual(t, marker, i.UploadMarker(markedReport("another-uid", "4711")), "another UID")
+}
+
+func TestUploadMarker_ChangesWithWhatTheRequestSends(t *testing.T) {
+	report := markedReport("uid", "1")
+	base := Reimport{TestTitle: "t", Service: "s", Version: "v", Tags: []string{"a:1", "b:2"}}
+
+	for name, changed := range map[string]Reimport{
+		"title":   {TestTitle: "t2", Service: "s", Version: "v", Tags: []string{"a:1", "b:2"}},
+		"service": {TestTitle: "t", Service: "s2", Version: "v", Tags: []string{"a:1", "b:2"}},
+		"version": {TestTitle: "t", Service: "s", Version: "v2", Tags: []string{"a:1", "b:2"}},
+		"a tag":   {TestTitle: "t", Service: "s", Version: "v", Tags: []string{"a:1", "b:3"}},
+		"no tag":  {TestTitle: "t", Service: "s", Version: "v", Tags: []string{"a:1"}},
+		"a tag moved to another field": {
+			TestTitle: "t", Service: "s", Version: "v" + "\x00a:1", Tags: []string{"b:2"},
+		},
+	} {
+		assert.NotEqual(t, base.UploadMarker(report), changed.UploadMarker(report), name)
+	}
+
+	reordered := Reimport{TestTitle: "t", Service: "s", Version: "v", Tags: []string{"b:2", "a:1"}}
+	assert.Equal(t, base.UploadMarker(report), reordered.UploadMarker(report), "the order of the tags does not matter")
+}
+
+func TestUploadMarker_ChangesWithTheRequestFormat(t *testing.T) {
+	i := Reimport{TestTitle: "t", Service: "s", Version: "v", Tags: []string{"a:1"}}
+
+	assert.NotEqual(t, i.fingerprint(requestFormat), i.fingerprint(requestFormat+1),
+		"a changed payload or constant field gives another marker for every report")
+	assert.True(t, strings.HasSuffix(i.UploadMarker(markedReport("uid", "1")), ":"+i.fingerprint(requestFormat)))
+}
+
+func TestUploadMarker_FitsTheBuildIDLimit(t *testing.T) {
+	i := Reimport{TestTitle: "t", Service: "s", Version: "v"}
+	uid := "0f7b2c1e-4d3a-4b8e-9c55-1a2b3c4d5e6f"
+
+	// An etcd resourceVersion has at most 20 digits; the API does not promise that.
+	atLimit := strings.Repeat("9", MaxBuildIDLen-len(uid)-len(":")-len(":")-hashLen)
+	assert.Len(t, i.UploadMarker(markedReport(uid, atLimit)), MaxBuildIDLen)
+	assert.True(t, strings.HasPrefix(i.UploadMarker(markedReport(uid, atLimit)), uid+":"+atLimit+":"))
+
+	long := markedReport(uid, strings.Repeat("9", 500))
+	marker := i.UploadMarker(long)
+
+	assert.Len(t, marker, MaxBuildIDLen)
+	assert.Equal(t, marker, i.UploadMarker(long), "a shortened marker is the same on every pass")
+	assert.NotEqual(t, marker, i.UploadMarker(markedReport(uid, strings.Repeat("9", 499)+"8")),
+		"a shortened marker still tells report versions apart")
 }
 
 func TestPayload(t *testing.T) {

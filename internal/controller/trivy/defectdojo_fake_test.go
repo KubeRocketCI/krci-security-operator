@@ -29,6 +29,9 @@ const (
 	statusInactive      = "inactive"
 )
 
+// maxBuildIDLen is the length of the build_id column of a test.
+const maxBuildIDLen = 150
+
 // firstTestID is the smallest ID the fake gives a new test. A new test gets an ID above every test seeded or
 // created before; IDs are never reused.
 const firstTestID = 100
@@ -64,6 +67,7 @@ type ddTest struct {
 	scanType   string
 	title      string
 	version    string
+	buildID    string
 	tags       []string
 }
 
@@ -143,12 +147,17 @@ func (p parsedFinding) hash() string {
 //   - the close set is the findings of the test with the request service, or without a service when none is sent;
 //   - a matched closed finding is reactivated; false positive, risk accepted and out of scope are kept;
 //     a finding of the close set missing from the report is closed and loses its risk acceptance;
-//   - the version is written, empty included; the test tags are replaced when tags are sent;
+//   - the version and the build_id are written, empty included, after the findings changed; a new test is saved with
+//     its build_id before the report is read; the test tags are replaced when tags are sent;
 //   - the lists are filtered as DefectDojo does: products by product type ID and name (contains, case-insensitive),
 //     engagements by product and name, tests by engagement and scan type; PATCH of product tags replaces them;
 //   - a form value of only whitespace or over its limit (service 200, version 100, test title and product name 255
-//     characters) is rejected with 400; a tag with a space, comma or quote or over 255 characters is rejected with
-//     400 and stored in lower case; invalid JSON gives 400, an unknown severity 500.
+//     characters) is rejected with 400; a build_id has no limit in the form and fails at the save of the test with 500
+//     over 150 characters (the model limit), after the findings changed; a tag with a space, comma or quote or over
+//     255 characters is rejected with 400 and stored in lower case; invalid JSON gives 400, an unknown severity 500;
+//   - the lists return the build_id of each test and mark the tests of the last engagement with the name;
+//     SetBuildID writes it; closing a test clears its build_id when the test has one as it was listed, as the client
+//     does before it closes the findings.
 //
 // It also records the calls of the controller. The error hooks fail a call before it changes the state.
 type fakeDefectDojo struct {
@@ -167,10 +176,17 @@ type fakeDefectDojo struct {
 	// tagCalls holds the product tag lists the controller sent.
 	tagCalls  []tagCall
 	listCalls int
+	// testReads counts the ListTests calls.
+	testReads int
+	// buildIDUpdates counts the updates of the build_id of a test: SetBuildID and the clearing of a close.
+	buildIDUpdates int
 
 	reimportErr func(defectdojo.ReimportRequest) error
-	listErr     error
-	tagErr      error
+	// reimportAfterTestErr fails a reimport after DefectDojo resolved or created its test, before the findings change.
+	reimportAfterTestErr func(defectdojo.ReimportRequest) error
+	listErr              error
+	tagErr               error
+	buildIDErr           error
 }
 
 type tagCall struct {
@@ -218,6 +234,12 @@ func (f *fakeDefectDojo) reimport(r defectdojo.ReimportRequest) (defectdojo.Reim
 		return defectdojo.ReimportResult{}, err
 	}
 
+	if f.reimportAfterTestErr != nil {
+		if err = f.reimportAfterTestErr(r); err != nil {
+			return defectdojo.ReimportResult{}, err
+		}
+	}
+
 	parsed, err := parseTrivyOperatorReport(r.Report)
 	if err != nil {
 		return defectdojo.ReimportResult{}, err
@@ -229,7 +251,14 @@ func (f *fakeDefectDojo) reimport(r defectdojo.ReimportRequest) (defectdojo.Reim
 		f.applyFindings(test.id, r.Service, parsed)
 	}
 
+	if utf8.RuneCountInString(r.BuildID) > maxBuildIDLen {
+		return defectdojo.ReimportResult{}, &defectdojo.APIError{
+			StatusCode: http.StatusInternalServerError, Body: "Internal Server Error",
+		}
+	}
+
 	test.version = r.Version
+	test.buildID = r.BuildID
 
 	if len(r.Tags) > 0 {
 		test.tags = slices.Clone(r.Tags)
@@ -253,6 +282,7 @@ func validateForm(r defectdojo.ReimportRequest) (defectdojo.ReimportRequest, err
 		"test_title":        {&r.TestTitle, 255},
 		"service":           {&r.Service, 200},
 		"version":           {&r.Version, 100},
+		"build_id":          {&r.BuildID, 0},
 	} {
 		if *field.value == "" {
 			continue
@@ -298,7 +328,7 @@ func validateTags(tags []string) ([]string, error) {
 }
 
 // targetTest finds the test of the request, or creates it with its missing product type, product and engagement;
-// created reports the latter.
+// created reports the latter. A new test is saved with the build_id of the request.
 func (f *fakeDefectDojo) targetTest(r defectdojo.ReimportRequest) (test *ddTest, created bool, err error) {
 	product := f.productNamed(r.Product)
 
@@ -319,9 +349,16 @@ func (f *fakeDefectDojo) targetTest(r defectdojo.ReimportRequest) (test *ddTest,
 		return nil, false, badRequest("product_type_name parameter missing")
 	}
 
+	if utf8.RuneCountInString(r.BuildID) > maxBuildIDLen {
+		return nil, false, &defectdojo.APIError{StatusCode: http.StatusInternalServerError, Body: "Internal Server Error"}
+	}
+
 	engagement := f.ensureContext(ddContext{productType: r.ProductType, product: r.Product, engagement: r.Engagement})
 
-	return f.addTest(engagement.id, f.nextID("test"), defectdojo.ScanTypeTrivyOperator, r.TestTitle, nil), true, nil
+	test = f.addTest(engagement.id, f.nextID("test"), defectdojo.ScanTypeTrivyOperator, r.TestTitle, nil)
+	test.buildID = r.BuildID
+
+	return test, true, nil
 }
 
 // createFindings stores one finding per parsed entry, as the import into a new test does: no matching, so entries
@@ -440,12 +477,15 @@ func (f *fakeDefectDojo) ListTests(_ context.Context, product defectdojo.Product
 	defer f.mu.Unlock()
 
 	f.listCalls++
+	f.testReads++
 
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
 
 	var out []defectdojo.Test
+
+	last := f.lastEngagement(product.ID, engagement)
 
 	for _, id := range slices.Sorted(maps.Keys(f.tests)) {
 		test := f.tests[id]
@@ -454,7 +494,7 @@ func (f *fakeDefectDojo) ListTests(_ context.Context, product defectdojo.Product
 		if e.product == product.ID && e.name == engagement && test.scanType == defectdojo.ScanTypeTrivyOperator {
 			out = append(out, defectdojo.Test{
 				ID: test.id, Title: test.title, ScanType: test.scanType, Tags: slices.Clone(test.tags),
-				Product: product.Name, Engagement: engagement,
+				BuildID: test.buildID, LastEngagement: e == last, Product: product.Name, Engagement: engagement,
 			})
 		}
 	}
@@ -468,7 +508,37 @@ func (f *fakeDefectDojo) CloseTest(_ context.Context, test defectdojo.Test) erro
 	defer f.mu.Unlock()
 
 	f.closed = append(f.closed, test.ID)
+
+	if test.BuildID != "" {
+		f.buildIDUpdates++
+
+		if stored, ok := f.tests[test.ID]; ok {
+			stored.buildID = ""
+		}
+	}
+
 	f.closeActive(test.ID)
+
+	return nil
+}
+
+// SetBuildID sets the build_id of the test, as PATCH of the test does.
+func (f *fakeDefectDojo) SetBuildID(_ context.Context, testID int, buildID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.buildIDUpdates++
+
+	if f.buildIDErr != nil {
+		return f.buildIDErr
+	}
+
+	test, ok := f.tests[testID]
+	if !ok {
+		return &defectdojo.APIError{StatusCode: http.StatusNotFound, Body: `{"detail":"Not found."}`}
+	}
+
+	test.buildID = buildID
 
 	return nil
 }
@@ -500,6 +570,17 @@ func (f *fakeDefectDojo) closeActive(testID int) {
 			found.mitigate()
 		}
 	}
+}
+
+// addEngagement creates another engagement with the name of the context, which becomes its last one, and the
+// product and product type when they are missing.
+func (f *fakeDefectDojo) addEngagement(c ddContext) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	product := f.ensureContext(c)
+	engagement := &ddEngagement{id: f.nextID("engagement"), product: product.product, name: c.engagement}
+	f.engagements[engagement.id] = engagement
 }
 
 // seedTests stores tests in the namespace product of the cluster under test and the namespace appNS, as written
@@ -561,7 +642,7 @@ func (f *fakeDefectDojo) seedScanTest(c ddContext, scanType string, test defectd
 		panic(fmt.Sprintf("test %d is seeded twice", test.ID))
 	}
 
-	f.addTest(f.ensureContext(c).id, test.ID, scanType, test.Title, test.Tags)
+	f.addTest(f.ensureContext(c).id, test.ID, scanType, test.Title, test.Tags).buildID = test.BuildID
 	f.lastID["test"] = max(f.lastID["test"], test.ID)
 }
 

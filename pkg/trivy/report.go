@@ -2,8 +2,12 @@
 package trivy
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +51,11 @@ const (
 	TagKeyContainer = "k8s-container"
 	TagKeyImage     = "oci-image"
 	TagKeyApp       = "app"
+
+	// requestFormat is part of the upload marker. Bump it with every change to what a reimport sends that the marker
+	// does not hold otherwise: Payload, the scan_date rule, a constant form field of defectdojo.Client.Reimport.
+	// The next pass uploads every report once.
+	requestFormat = 1
 
 	// digestHexLen is the number of digest characters in a version without a tag.
 	digestHexLen = 12
@@ -213,8 +222,38 @@ func NewReimport(
 	}
 }
 
-// Request completes the reimport into a DefectDojo reimport request.
-func (i Reimport) Request(productType string, scanDate time.Time, report []byte) defectdojo.ReimportRequest {
+// UploadMarker returns the build_id that marks the upload of the report with this request:
+// "<report UID>:<resourceVersion>:<12 hex characters of the SHA-256 of the request>", shortened to MaxBuildIDLen.
+// The request is the request format, the test title, the service, the version and the tags; a change of any of them
+// changes the marker, so a report whose request changed is uploaded again. The same report version and request
+// always give the same marker. The marker is only compared, never parsed.
+func (i Reimport) UploadMarker(report metav1.Object) string {
+	return Shorten(string(report.GetUID())+":"+report.GetResourceVersion()+":"+i.fingerprint(requestFormat), MaxBuildIDLen)
+}
+
+// fingerprint returns the first hashLen hex characters of the SHA-256 of the request for the request format.
+func (i Reimport) fingerprint(format int) string {
+	tags := slices.Sorted(slices.Values(i.Tags))
+	sum := sha256.New()
+
+	for _, field := range append([]string{strconv.Itoa(format), i.TestTitle, i.Service, i.Version}, tags...) {
+		var length [8]byte
+
+		binary.BigEndian.PutUint64(length[:], uint64(len(field)))
+		sum.Write(length[:])
+		sum.Write([]byte(field))
+	}
+
+	return hex.EncodeToString(sum.Sum(nil))[:hashLen]
+}
+
+// Request completes the reimport into a DefectDojo reimport request; buildID is the UploadMarker of the report.
+func (i Reimport) Request(
+	productType string,
+	scanDate time.Time,
+	buildID string,
+	report []byte,
+) defectdojo.ReimportRequest {
 	return defectdojo.ReimportRequest{
 		ProductType: productType,
 		Product:     i.Product,
@@ -222,6 +261,7 @@ func (i Reimport) Request(productType string, scanDate time.Time, report []byte)
 		TestTitle:   i.TestTitle,
 		Service:     i.Service,
 		Version:     i.Version,
+		BuildID:     buildID,
 		Tags:        i.Tags,
 		ScanDate:    scanDate,
 		Report:      report,

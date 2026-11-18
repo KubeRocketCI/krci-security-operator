@@ -41,6 +41,7 @@ func testRequest() ReimportRequest {
 		TestTitle:   "VulnerabilityReport deployment/app/app",
 		Service:     "ns/Deployment/app/app",
 		Version:     "1.0.0",
+		BuildID:     "uid-1:100:0123456789ab",
 		Tags:        []string{"k8s-cluster:c", "k8s-workload:deployment.app", "app:shop"},
 		ScanDate:    time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC),
 		Report:      []byte(`{"kind":"VulnerabilityReport"}`),
@@ -95,6 +96,7 @@ func TestClient_Reimport_SendsMultipartFields(t *testing.T) {
 		"test_title":                  {"VulnerabilityReport deployment/app/app"},
 		"service":                     {"ns/Deployment/app/app"},
 		"version":                     {"1.0.0"},
+		"build_id":                    {"uid-1:100:0123456789ab"},
 		"auto_create_context":         {"true"},
 		"close_old_findings":          {"true"},
 		"deduplication_on_engagement": {"true"},
@@ -105,7 +107,27 @@ func TestClient_Reimport_SendsMultipartFields(t *testing.T) {
 		"push_to_jira":                {"false"},
 		"scan_date":                   {"2026-11-10"},
 		"tags":                        {"k8s-cluster:c", "k8s-workload:deployment.app", "app:shop"},
-	}, fields, "the form has the service, the version and one tags field per tag, and no apply_tags_to_findings")
+	}, fields, "the form has the service, the version, the build_id and one tags field per tag, and no apply_tags_to_findings")
+}
+
+func TestClient_Reimport_OmitsAnEmptyBuildID(t *testing.T) {
+	var fields map[string][]string
+
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseMultipartForm(1<<20))
+
+		fields = r.MultipartForm.Value
+
+		writeJSON(w, http.StatusCreated, ReimportResult{TestID: 7})
+	})
+
+	req := testRequest()
+	req.BuildID = ""
+
+	_, err := c.Reimport(context.Background(), req)
+
+	require.NoError(t, err)
+	assert.NotContains(t, fields, "build_id", "DefectDojo refuses a blank build_id; an omitted one is stored as empty")
 }
 
 func TestClient_Reimport_RejectsAnEmptyService(t *testing.T) {
@@ -421,6 +443,9 @@ type findingsServer struct {
 	bodies []map[string]any
 	posts  atomic.Int32
 	failOn int32
+	// patches holds the test update bodies, in order; order records every request as "<method> <path>".
+	patches []map[string]any
+	order   []string
 }
 
 func (f *findingsServer) handle(w http.ResponseWriter, r *http.Request) {
@@ -428,6 +453,21 @@ func (f *findingsServer) handle(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 
 	assert.Equal(f.t, "Token "+testToken, r.Header.Get("Authorization"))
+
+	f.order = append(f.order, r.Method+" "+r.URL.Path)
+
+	if r.Method == http.MethodPatch {
+		assert.Equal(f.t, "/api/v2/tests/42/", r.URL.Path)
+
+		body := map[string]any{}
+		require.NoError(f.t, json.NewDecoder(r.Body).Decode(&body))
+
+		f.patches = append(f.patches, body)
+
+		writeJSON(w, http.StatusOK, map[string]any{})
+
+		return
+	}
 
 	if r.Method == http.MethodGet {
 		assert.Equal(f.t, "/api/v2/findings/", r.URL.Path)
@@ -485,6 +525,12 @@ func newFindingsServer(t *testing.T, services ...string) *findingsServer {
 
 var closableTest = Test{ID: 42, Title: "VulnerabilityReport deployment/app/app", Product: "a/ns", Engagement: "trivy-operator"}
 
+// markedTest is closableTest with an upload marker.
+var markedTest = Test{
+	ID: 42, Title: closableTest.Title, Product: closableTest.Product, Engagement: closableTest.Engagement,
+	BuildID: "uid-1:100:0123456789ab",
+}
+
 func TestClient_CloseTest_ClosesEveryActiveFinding(t *testing.T) {
 	services := make([]string, 250)
 	f := newFindingsServer(t, services...)
@@ -508,12 +554,78 @@ func TestClient_CloseTest_ClosesEveryActiveFinding(t *testing.T) {
 	}
 }
 
+func TestClient_CloseTest_ClearsTheBuildIDBeforeItClosesTheFindings(t *testing.T) {
+	f := newFindingsServer(t, "a", "b")
+	c := newTestClient(t, f.handle)
+
+	require.NoError(t, c.CloseTest(context.Background(), markedTest))
+
+	assert.Equal(t, []map[string]any{{"build_id": ""}}, f.patches)
+	assert.Equal(t, "PATCH /api/v2/tests/42/", f.order[0], "an interrupted close leaves no marker behind")
+	assert.Equal(t, []int{1, 2}, f.closed)
+}
+
+func TestClient_CloseTest_BuildIDUpdateFailureClosesNothing(t *testing.T) {
+	f := newFindingsServer(t, "a")
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			w.WriteHeader(http.StatusForbidden)
+
+			return
+		}
+
+		f.handle(w, r)
+	})
+
+	var apiErr *APIError
+
+	require.ErrorAs(t, c.CloseTest(context.Background(), markedTest), &apiErr)
+	assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+	assert.Empty(t, f.closed)
+}
+
+func TestClient_CloseTest_LeavesATestWithoutBuildIDAsItIs(t *testing.T) {
+	f := newFindingsServer(t, "a", "b")
+	c := newTestClient(t, f.handle)
+
+	require.NoError(t, c.CloseTest(context.Background(), closableTest))
+
+	assert.Empty(t, f.patches, "there is no marker to clear")
+	assert.Equal(t, []int{1, 2}, f.closed)
+}
+
 func TestClient_CloseTest_NoActiveFindings(t *testing.T) {
 	f := newFindingsServer(t)
 	c := newTestClient(t, f.handle)
 
-	require.NoError(t, c.CloseTest(context.Background(), closableTest))
+	require.NoError(t, c.CloseTest(context.Background(), markedTest))
 	assert.Zero(t, f.posts.Load())
+	assert.Len(t, f.patches, 1, "a test without active findings is closed: its build_id is cleared")
+}
+
+func TestClient_SetBuildID_PatchesTheTest(t *testing.T) {
+	f := newFindingsServer(t)
+	c := newTestClient(t, f.handle)
+
+	require.NoError(t, c.SetBuildID(context.Background(), 42, "uid-1:100:0123456789ab"))
+
+	assert.Equal(t, []map[string]any{{"build_id": "uid-1:100:0123456789ab"}}, f.patches)
+	assert.Equal(t, []string{"PATCH /api/v2/tests/42/"}, f.order)
+}
+
+func TestClient_SetBuildID_RetriesAndReturnsTheFailure(t *testing.T) {
+	var patches atomic.Int32
+
+	c := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		patches.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+
+	var apiErr *APIError
+
+	require.ErrorAs(t, c.SetBuildID(context.Background(), 42, "m"), &apiErr)
+	assert.Equal(t, http.StatusServiceUnavailable, apiErr.StatusCode)
+	assert.Greater(t, patches.Load(), int32(1), "the update is idempotent and retried like a read")
 }
 
 func TestClient_CloseTest_RetriesClose(t *testing.T) {
@@ -752,10 +864,10 @@ func TestClient_ListTests_ThroughEngagementOfProduct(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, []Test{
-		{ID: 1, Title: "a", ScanType: ScanTypeTrivyOperator, Tags: []string{"k8s-workload:x"}, Product: "a/ns", Engagement: "trivy-operator"},
-		{ID: 2, Title: "b", ScanType: ScanTypeTrivyOperator, Tags: []string{}, Product: "a/ns", Engagement: "trivy-operator"},
-		{ID: 3, Title: "c", ScanType: "Trivy Scan", Product: "a/ns", Engagement: "trivy-operator"},
-	}, tests, "scan type and tags are the ones of the response, also when the server ignores the scan type filter")
+		{ID: 1, Title: "a", ScanType: ScanTypeTrivyOperator, Tags: []string{"k8s-workload:x"}, Product: "a/ns", Engagement: "trivy-operator", LastEngagement: true},
+		{ID: 2, Title: "b", ScanType: ScanTypeTrivyOperator, Tags: []string{}, Product: "a/ns", Engagement: "trivy-operator", LastEngagement: true},
+		{ID: 3, Title: "c", ScanType: "Trivy Scan", Product: "a/ns", Engagement: "trivy-operator", LastEngagement: true},
+	}, tests, "scan type, tags and build_id are the ones of the response, also when the server ignores the scan type filter; a null build_id is empty")
 
 	require.Len(t, l.queries[engagementsPath], 1)
 	assert.Equal(t, "9", l.queries[engagementsPath][0].Get("product"))
@@ -767,6 +879,66 @@ func TestClient_ListTests_ThroughEngagementOfProduct(t *testing.T) {
 		assert.Equal(t, "21", q.Get("engagement"), "the engagement whose name is exactly the requested one")
 		assert.Equal(t, "Trivy Operator Scan", q.Get("scan_type"))
 	}
+}
+
+func TestClient_ListTests_MarksTheTestsOfTheLastEngagementWithTheName(t *testing.T) {
+	engagements := []any{
+		map[string]any{"id": 20, "name": "trivy-operator"},
+		map[string]any{"id": 22, "name": "trivy-operator"},
+		map[string]any{"id": 21, "name": "trivy-operator-extra"},
+	}
+	tests := map[string][]any{
+		"20": {map[string]any{"id": 1, "title": "a", "scan_type": ScanTypeTrivyOperator}},
+		"22": {
+			map[string]any{"id": 5, "title": "a", "scan_type": ScanTypeTrivyOperator},
+			map[string]any{"id": 6, "title": "b", "scan_type": ScanTypeTrivyOperator},
+		},
+	}
+
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		results := engagements
+		if r.URL.Path == testsPath {
+			results = tests[r.URL.Query().Get("engagement")]
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{"next": nil, "results": results})
+	})
+
+	listed, err := c.ListTests(context.Background(), Product{ID: 9, Name: "a/ns"}, "trivy-operator")
+
+	require.NoError(t, err)
+
+	last := map[int]bool{}
+	for _, test := range listed {
+		last[test.ID] = test.LastEngagement
+	}
+
+	assert.Equal(t, map[int]bool{1: false, 5: true, 6: true}, last,
+		"a reimport writes into the last engagement with the name: the one with the highest ID")
+}
+
+func TestClient_ListTests_NoTestIsMarkedWhenTheLastEngagementHasNone(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		results := []any{
+			map[string]any{"id": 20, "name": "trivy-operator"},
+			map[string]any{"id": 23, "name": "trivy-operator"},
+		}
+
+		if r.URL.Path == testsPath {
+			results = nil
+			if r.URL.Query().Get("engagement") == "20" {
+				results = []any{map[string]any{"id": 1, "title": "a", "scan_type": ScanTypeTrivyOperator}}
+			}
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{"next": nil, "results": results})
+	})
+
+	listed, err := c.ListTests(context.Background(), Product{ID: 9, Name: "a/ns"}, "trivy-operator")
+
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	assert.False(t, listed[0].LastEngagement, "a reimport would create a test in the empty last engagement")
 }
 
 func TestClient_ListTests_NoEngagement(t *testing.T) {
@@ -901,7 +1073,7 @@ func TestClient_CloseTest_OtherTestsDoNotWait(t *testing.T) {
 	reached := make(chan struct{}, 1)
 
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == findingsPath {
+		if (r.Method == http.MethodGet && r.URL.Path == findingsPath) || r.Method == http.MethodPatch {
 			writeJSON(w, http.StatusOK, map[string]any{"next": nil, "results": []map[string]any{}})
 
 			return
