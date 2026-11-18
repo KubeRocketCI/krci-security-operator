@@ -38,7 +38,7 @@ Chart values: [deploy-templates/README.md](deploy-templates/README.md). Naming, 
 
 - Two clusters with the same `clusterName` in one DefectDojo write into, and close, the same products.
 - A report CRD installed after the operator started is imported on each resync (30 minutes by default) until a restart makes the operator watch it.
-- Metrics are off by default; `metrics.enabled=true` serves them over plain HTTP on port 8080 of the pod.
+- Metrics are off by default; `metrics.enabled=true` serves them over plain HTTP on port 8080 of the pod. Without them, count the Error log entries `DefectDojo rejected a report version` instead of `krci_security_operator_rejected_reports_total` (see [docs/trivy.md](docs/trivy.md)).
 
 ## Develop
 

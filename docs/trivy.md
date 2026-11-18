@@ -31,15 +31,17 @@ The unit of work is a namespace. The operator reconciles a namespace when a `Vul
 
 The manager serves `controller_runtime_reconcile_errors_total` and `krci_security_operator_rejected_reports_total` when `metrics.enabled` is true: plain HTTP on `metrics.port` (8080) of the pod. The chart creates no Service for them.
 
+`metrics.enabled` is `false` by default and then nothing is served. To read the metrics, set it to `true`, forward the port and request the path `/metrics`: `kubectl -n <namespace> port-forward <pod> <metrics.port>:<metrics.port>`, then `curl -s localhost:<metrics.port>/metrics | grep krci_security_operator_rejected_reports_total`. Without metrics, a newly rejected report version is also in the pod log as one Error entry `DefectDojo rejected a report version` with the fields `report` and `kind`; the counter and the entries count the same versions, and both start again at a restart.
+
 ### Sizing
 
-Reports are listed 10 at a time (`reportsPageSize` in `internal/controller/trivy/reconciler.go`). Each page is resolved and imported before the next is read, a report is released as soon as it is imported, and the payload shares the report body instead of copying it, so only the small sets of reimported tests and chosen reports are kept across pages. The peak per reconcile is one page of reports plus the marshalled payload of one report. The memory of the manager scales with `concurrency` multiplied by that peak (a report can reach 3 MB, so a page is up to 30 MB), plus the metadata of all reports in the cluster, plus the names and container names of the workloads of a namespace and the metadata of the reports of one kind of a namespace (see Watches and reads). The chart defaults are a 128Mi request and a 512Mi limit; raise the limit when `concurrency`, the report sizes or the number of workloads grow.
+Reports are listed 10 at a time (`reportsPageSize` in `internal/controller/trivy/reconciler.go`). Each page is resolved and imported before the next is read, a report is released as soon as it is imported, and the payload shares the report body instead of copying it, so only the small sets of reimported tests and chosen reports are kept across pages. The peak per reconcile is one page of reports plus the marshalled payload of one report. The memory of the manager scales with `concurrency` multiplied by that peak (a report can reach 3 MB, so a page is up to 30 MB), plus the metadata of all reports in the cluster, plus the names, container names and container image references of the workloads of a namespace and the metadata of the reports of one kind of a namespace (see Watches and reads). The chart defaults are a 128Mi request and a 512Mi limit; raise the limit when `concurrency`, the report sizes or the number of workloads grow.
 
 ### Watches and reads
 
 - The controller watches the metadata of `VulnerabilityReport` and `ExposedSecretReport` only (`metav1.PartialObjectMetadata`), because a report can reach 3 MB. Each event enqueues the namespace of the report.
 - It also watches Namespaces (creation, deletion and the start of the termination).
-- Everything else is read without a cache, through the API reader: the full reports of a namespace, the workloads (ReplicaSets, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs; of Pods only the metadata, and the full object of each Pod without a controller), the labels and annotations of the top workload and the credentials Secret. Each kind is listed at most once while the reports are imported and once more when the close decision is made, so a workload created in between is seen. The lists of the import are released before the lists of the close decision are read. ReplicaSets, Deployments, Jobs, StatefulSets, DaemonSets, CronJobs and the metadata of Pods are listed 500 at a time, and only names, owners, revisions, creation times and container names are kept. The metadata of the reports of a kind is listed 500 at a time, once per pass, when a report of a ReplicaSet or Job is compared with the reports on its workload.
+- Everything else is read without a cache, through the API reader: the full reports of a namespace, the workloads (ReplicaSets, Deployments, StatefulSets, DaemonSets, Jobs, CronJobs; of Pods only the metadata, and the full object of each Pod without a controller), the labels and annotations of the top workload and the credentials Secret. Each kind is listed at most once while the reports are imported and once more when the close decision is made, so a workload created in between is seen. The lists of the import are released before the lists of the close decision are read. ReplicaSets, Deployments, Jobs, StatefulSets, DaemonSets, CronJobs and the metadata of Pods are listed 500 at a time, and only names, owners, revisions, creation times, container names and the image reference of each container are kept. The metadata of the reports of a kind is listed 500 at a time, once per pass, when a report of a ReplicaSet or Job is compared with the reports on its workload.
 
 ### DefectDojo naming
 
@@ -69,10 +71,14 @@ KubeRocketCI
   | `k8s-namespace` | `<namespace>` |
   | `k8s-workload` | `<kind>.<name>` of the stable workload, the kind in lower case (`deployment`, `statefulset`, `daemonset`, `cronjob`, `job`, `replicaset`, `pod`), so the kind ends at the first `.` |
   | `k8s-container` | `<container>` |
-  | `oci-image` | `<registry>/<repository>` of the image, without tag and digest; Docker Hub without host and `library/`. Left out when the report names no image |
+  | `oci-image` | `<registry>/<repository>` of the image of the report, without tag and digest; Docker Hub without host and `library/`. Left out when the report names no image. |
   | `app` | the component, only when a source exists (see Component) |
 
-  The tags are for filtering; the operator never reads them back to identify a test. A `k8s-workload` tag over 255 characters has its value shortened, so it is not the full workload name. Findings carry no operator tags: DefectDojo adds the tags of a request to findings and never removes them, so they would keep old images and apps. Filter findings by the tags of their test (`test__tags`).
+  The tags are for filtering; the operator never reads them back to identify a test. A `k8s-workload` tag over 255 characters has its value shortened, so it is not the full workload name. Findings carry no operator tags: DefectDojo adds the tags of a request to findings and never removes them, so they would keep old images and apps. Filter findings by the tags of their test (`test__tags`). The tags that findings do carry come from the DefectDojo parser, see Findings.
+- **Findings.** The DefectDojo Trivy Operator parser builds them from the report; the operator sends no finding fields, only the report with its labels rewritten to the stable workload.
+  - Identity: DefectDojo hashes the title, the severity, the vulnerability ids and the description of a finding, and always the service (`HASH_CODE_FIELDS_ALWAYS`). The workload is in the hash through the description. For a vulnerability finding the title is `<vulnerability id> <package> <installed version>` and the description holds the vulnerability title, the fixed version, the container and the resource kind, name and namespace. For an exposed secret finding the title is `Secret detected in <target> - <title>`, there are no vulnerability ids, and the description holds the title, the category, the match, the container, the resource kind, name and namespace, and the rule id.
+  - Tags: the parser tags a vulnerability finding with the namespace (the value of the label `trivy-operator.resource.namespace`), the package type and the class of its target (`os-pkgs`, `lang-pkgs`), and an exposed secret finding with the namespace.
+  - Severity: `CRITICAL`, `HIGH`, `MEDIUM` and `LOW` map to `Critical`, `High`, `Medium` and `Low`; `UNKNOWN` is imported as `Info`. `minimum_severity` is `Info`, so no severity is left out.
 - Every namespace product carries the tags `k8s-cluster:<clusterName>` and `k8s-namespace:<namespace>`. The operator sets them when the product has them wrong or missing, on every pass over the namespace (a sweep wakes the namespaces that need it), and keeps the other tags of the product. An update replaces the tags of a product, so the full list is sent.
 - The same namespace name in two clusters gives two products, because the cluster name is part of the product name. The cluster name is required and must be unique per DefectDojo; two clusters with one name write into the same products.
 - Use one Product Type value for every operator that writes to the same DefectDojo. A reimport fails when the product already exists under another Product Type, so changing the value later leaves the existing products under the old one.
@@ -88,7 +94,7 @@ KubeRocketCI
   | `scan_type` | `Trivy Operator Scan` |
   | `product_type_name`, `product_name`, `engagement_name`, `test_title` | the layout above |
   | `service` | `<namespace>/<Kind>/<name>/<container>`, the kind and name of the stable workload (`Deployment`, `CronJob`, else the kind of the report). It is the service the Trivy Operator parser builds from the report labels `trivy-operator.resource.namespace`, `.kind`, `.name` and `trivy-operator.container.name`, which the operator rewrites to the stable workload and the namespace before the upload, so a rollout keeps one service; the request service replaces the parser service of every finding, and a value over 200 characters is shortened as described under Length limits. DefectDojo closes, on reimport, only the findings of the request service |
-  | `version` | the image tag, else `sha256:` and the first 12 characters of the digest |
+  | `version` | the `artifact.tag` of the report, else `sha256:` and the first 12 characters of `artifact.digest`. A container reference in the pod template of the stable workload that is a digest without a tag, equal to `artifact.digest`, has no tag: `artifact.tag` is not used for it. In every other case the report decides |
   | `tags` | one field per tag of the test |
   | `auto_create_context`, `close_old_findings`, `deduplication_on_engagement`, `active` | `true` |
   | `verified`, `push_to_jira` | `false` |
@@ -177,4 +183,12 @@ The ClusterRole is read-only and grants what the code calls:
 | `statefulsets`, `daemonsets` (`apps`), `cronjobs` (`batch`), `pods` | `get`, `list` | `list`: the containers of the workloads and the close rules, Pods by metadata only; `get`: the component tag and the full object of a Pod without a controller |
 | `namespaces` | `list`, `watch` | the reconcile key, deleted and excluded namespaces |
 
-In its own namespace the operator can `get` the credentials Secret, use `leases` for leader election and `create` events. It writes nothing else to the cluster.
+A Role in the release namespace (`leader_election_role.yaml`) grants the rest:
+
+| Resource | Verbs | Used for |
+|---|---|---|
+| `secrets`, only the name in `defectdojo.secretName` (`resourceNames`) | `get` | the credentials Secret; no other Secret can be read, and the Secret cannot be listed or watched |
+| `leases` (`coordination.k8s.io`) | `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` | leader election |
+| `events` | `create` | events of the manager |
+
+The operator writes nothing else to the cluster.

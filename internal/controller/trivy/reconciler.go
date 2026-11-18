@@ -438,7 +438,7 @@ func (r *Reconciler) reimportOne(ctx context.Context, dd DefectDojo, p *pass, re
 		return nil
 	}
 
-	workload, ok, err := r.currentWorkload(ctx, p, report)
+	workload, image, ok, err := r.currentWorkload(ctx, p, report)
 	if err != nil || !ok {
 		return err
 	}
@@ -448,7 +448,7 @@ func (r *Reconciler) reimportOne(ctx context.Context, dd DefectDojo, p *pass, re
 		return err
 	}
 
-	dest := trivy.NewReimport(p.target, report, workload, component)
+	dest := trivy.NewReimport(p.target, report, workload, component, image)
 	key := testKey{product: dest.Product, engagement: dest.Engagement, title: dest.TestTitle}
 	mine := choice{report: report.GetName(), onWorkload: namesWorkload(report, workload)}
 
@@ -527,51 +527,54 @@ func skipReport(log logr.Logger, report *unstructured.Unstructured) bool {
 	return false
 }
 
-// currentWorkload returns the stable workload of a report that describes it as it is now. ok is false, without an
-// error, when the report is not reimported for that reason.
+// currentWorkload returns the stable workload of a report that describes it as it is now and the image reference of
+// the container of the report in its pod template. ok is false, without an error, when the report is not reimported
+// for that reason.
 func (r *Reconciler) currentWorkload(
 	ctx context.Context,
 	p *pass,
 	report *unstructured.Unstructured,
-) (workload trivy.Workload, ok bool, err error) {
+) (workload trivy.Workload, image string, ok bool, err error) {
 	log := ctrl.LoggerFrom(ctx).WithValues("report", report.GetName(), "kind", report.GetKind())
 
 	workload, state, err := p.resolver.ResolveReport(ctx, report)
 	if err != nil {
-		return trivy.Workload{}, false, err
+		return trivy.Workload{}, "", false, err
 	}
 
 	switch state {
 	case trivy.WorkloadGone:
 		log.V(1).Info("Skipped a report of a workload that is gone", "workload", workload.String())
 
-		return workload, false, nil
+		return workload, "", false, nil
 	case trivy.WorkloadSuperseded:
 		log.V(1).Info("Skipped a report of a superseded revision", "workload", workload.String())
 
-		return workload, false, nil
+		return workload, "", false, nil
 	case trivy.WorkloadUnsupported:
 		log.V(1).Info("Skipped a report of a resource kind the operator does not read", "workload", workload.String())
 
-		return workload, false, nil
+		return workload, "", false, nil
 	case trivy.WorkloadCurrent:
 		// The container is checked below.
 	}
 
 	containers, _, err := p.resolver.Containers(ctx, workload)
 	if err != nil {
-		return trivy.Workload{}, false, fmt.Errorf("failed to read the containers of %s: %w", workload, err)
+		return trivy.Workload{}, "", false, fmt.Errorf("failed to read the containers of %s: %w", workload, err)
 	}
 
 	container := trivy.ContainerOf(report)
-	if _, in := containers[container]; !in {
+
+	image, in := containers[container]
+	if !in {
 		log.V(1).Info("Skipped a report of a container that is not in the pod template",
 			"workload", workload.String(), "container", container)
 
-		return workload, false, nil
+		return workload, "", false, nil
 	}
 
-	return workload, true, nil
+	return workload, image, true, nil
 }
 
 // namesWorkload reports whether the report is on the stable workload itself, not on a ReplicaSet or Job of it.
