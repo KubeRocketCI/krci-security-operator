@@ -6,6 +6,7 @@ Go operator (controller-runtime), one module per security integration; the Trivy
 - Before triage or labeling: `docs/agents/triage-labels.md`.
 - Before domain work: `GLOSSARY.md` (its terms go into code names, logs and notes), then the ADRs of the area in `docs/adr/` (`docs/agents/domain.md`).
 - Before changing reconcile, watches, closing or error handling: the module rules in `docs/development.md#rules-for-a-module`, then the behavior in `docs/trivy.md`.
+- Before writing or reviewing Go code: `docs/development.md#code-rules`.
 - DefectDojo or Trivy Operator behavior (reimport rules, parser, report labels, the fake DefectDojo): `docs/development.md#upstream-sources`, checked in the upstream source at the supported versions. DefectDojo 3.5.200 or later is supported (ADR 0007); earlier versions may work but are not tested.
 - The fake DefectDojo follows the fixtures recorded on a live DefectDojo, not a reading of the source: a change to it or to a client call goes with its scenario in `internal/ddcontract` and `make defectdojo-record` (`docs/development.md#defectdojo-contract`).
 
