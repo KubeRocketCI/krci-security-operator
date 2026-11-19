@@ -19,11 +19,41 @@
 - A module lives in its own package under `internal/controller/` and exposes `Config`, `LoadConfig` and `SetupWithManager`.
 - The module reads its configuration from environment variables that the chart sets from its values. `cmd/main.go` only loads and passes it on.
 - The operator reads Kubernetes objects and the Trivy reports (as unstructured objects) only: no KubeRocketCI resource or label (ADR 0001), so the repository depends on no other KubeRocketCI operator module.
-- A module returns transient errors from `Reconcile`; only an absent optional dependency requeues with a nil error.
+- A module returns a transient error from `Reconcile` with a zero `Result` (controller-runtime ignores the `Result` of an error); with a nil error it requeues only through `Result.RequeueAfter` (the resync, an absent optional dependency), never through `Result.Requeue`.
 - Background work that must change state wakes the controller through a channel source instead of acting itself, so the workqueue serializes it per key.
 - A module watches the metadata of large objects only and reads everything else through the API reader, so big objects never sit in the cache.
 - A module lists large objects in pages and finishes each page before it reads the next. Across pages it keeps the report metadata index of one kind and the container names and image references of the workloads for one pass, bounded by pages of 500 objects, and the test IDs and titles of the namespace. Every list goes through `trivy.ListPages`: a continue token that expired (HTTP 410) restarts the listing, at most 3 times, then the pass fails.
 - The ClusterRole stays read-only and lists exactly what the code calls. A new module that needs more access adds its rules to `deploy-templates/templates/role.yaml` and to the access table of [trivy.md](trivy.md#access); `test/deploy` fails on a write verb in the ClusterRole.
+
+## Code rules
+
+Checked in review. `make lint` checks formatting, line length, complexity, whitespace, unused code and shadowed predeclared identifiers (`.golangci.yaml`); test tooling is `internal/ddcontract` and `cmd/ddcontract`.
+
+Comments and names:
+
+- A body comment states a constraint, default, limit, unit, order or upstream fact the code does not show, in present tense; one that restates the code or narrates history is deleted. A doc comment starts with its name; a const-block group comment is exempt. An unexported symbol has a doc comment only when it adds such a fact.
+- A DefectDojo or Trivy Operator behavior the code relies on has a row in [Upstream sources](#upstream-sources) or a scenario in `internal/ddcontract`; a change that relies on a new one adds the row or the scenario.
+- In production code a value with one meaning is declared once; another package uses the exported constant. Test tooling keeps its own values, independent of the code it checks.
+
+Errors and context:
+
+- An error is wrapped with `%w` where the function adds the action or an object the callee does not name (kind, report, test or finding ID, product); a `Reconcile` path does not add the namespace, controller-runtime logs the request. An error without a cause is `errors.New`, or `fmt.Errorf` without `%w` when it formats values; an error callers match is an exported sentinel checked with `errors.Is`.
+- A returned error is not also logged.
+- A function that returns a non-nil error returns zero values for its other results, unless its doc comment says what they hold.
+- Production code passes on the ctx it received; `context.Background()` appears only in `cmd/*/main.go`.
+- A loop that collects per-item errors returns at once when `ctx.Err() != nil`.
+
+Controller:
+
+- A `Reconciler` field shared across passes is accessed only under its mutex: `r.mu` for the in-memory state, `credMu` for the credentials. State of one pass lives in `pass`.
+- In `internal/controller`, time and randomness come from `r.now` and `r.random`.
+- Output that leaves the process (a request, tags, a logged list, a fixture) and is built from a map has a fixed order; a returned slice in map order says so in its doc comment.
+
+Tests:
+
+- An expected value is a literal, a recorded fixture or an invariant between two outputs; never the output of the code under test or a copy of its logic.
+- A new check or comparison has a test that fails when the check is removed or inverted.
+- A test that changes a fixture step finds the step by name or asserts its name first.
 
 ## The Trivy module
 
