@@ -41,11 +41,13 @@ func (t *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error
 
 	if req.Body != nil {
 		var err error
-		if reqBody, err = io.ReadAll(req.Body); err != nil {
+
+		reqBody, err = io.ReadAll(req.Body)
+		_ = req.Body.Close()
+
+		if err != nil {
 			return nil, fmt.Errorf("read the request body: %w", err)
 		}
-
-		_ = req.Body.Close()
 	}
 
 	out := req.Clone(req.Context())

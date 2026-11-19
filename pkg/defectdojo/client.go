@@ -39,6 +39,7 @@ const (
 	defaultBackoff    = time.Second
 	maxBackoff        = 30 * time.Second
 	pageSize          = 100
+	contentTypeJSON   = "application/json"
 )
 
 // ErrTestNotNamed is returned for a test without product, engagement or title: only ListTests fills them.
@@ -290,13 +291,19 @@ func (c *Client) CloseTest(ctx context.Context, test Test) (CloseResult, error) 
 	}
 
 	res, done, err := c.closeByReimports(ctx, test)
-	if err != nil || done {
-		return res, err
+	if err != nil {
+		return CloseResult{}, err
 	}
 
-	res.OneByOne, err = c.closeActiveFindings(ctx, test.ID)
+	if done {
+		return res, nil
+	}
 
-	return res, err
+	if res.OneByOne, err = c.closeActiveFindings(ctx, test.ID); err != nil {
+		return CloseResult{}, err
+	}
+
+	return res, nil
 }
 
 // CloseResult tells how CloseTest closed a test.
@@ -561,7 +568,7 @@ func (c *Client) SetBuildID(ctx context.Context, testID int, buildID string) err
 	// Setting the same value twice is harmless, so the call is retried like a read.
 	_, err = c.do(ctx, retryAll, defaultRequestTimeout, func(ctx context.Context) (*http.Request, error) {
 		return c.newRequest(ctx, http.MethodPatch, fmt.Sprintf("%s%d/", testsPath, testID),
-			bytes.NewReader(payload), "application/json")
+			bytes.NewReader(payload), contentTypeJSON)
 	})
 
 	return err
@@ -579,10 +586,13 @@ func (c *Client) closeFinding(ctx context.Context, findingID int) error {
 	// Idempotent: retried like a read.
 	_, err = c.do(ctx, retryAll, defaultRequestTimeout, func(ctx context.Context) (*http.Request, error) {
 		return c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s%d/close/", findingsPath, findingID),
-			bytes.NewReader(payload), "application/json")
+			bytes.NewReader(payload), contentTypeJSON)
 	})
+	if err != nil {
+		return fmt.Errorf("failed to close DefectDojo finding %d: %w", findingID, err)
+	}
 
-	return err
+	return nil
 }
 
 // ListProducts returns the products of the product type whose name contains name, with their tags.
@@ -732,7 +742,7 @@ func (c *Client) SetProductTags(ctx context.Context, productID int, tags []strin
 	// Setting the same list twice is harmless, so the call is retried like a read.
 	_, err = c.do(ctx, retryAll, defaultRequestTimeout, func(ctx context.Context) (*http.Request, error) {
 		return c.newRequest(ctx, http.MethodPatch, fmt.Sprintf("%s%d/", productsPath, productID),
-			bytes.NewReader(payload), "application/json")
+			bytes.NewReader(payload), contentTypeJSON)
 	})
 
 	return err
@@ -954,7 +964,7 @@ func multipartBody(fields [][2]string, report []byte) ([]byte, string, error) {
 
 	h := textproto.MIMEHeader{}
 	h.Set("Content-Disposition", `form-data; name="file"; filename="report.json"`)
-	h.Set("Content-Type", "application/json")
+	h.Set("Content-Type", contentTypeJSON)
 
 	part, err := w.CreatePart(h)
 	if err != nil {

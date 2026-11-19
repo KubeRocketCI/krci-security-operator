@@ -1630,6 +1630,35 @@ func TestSweep_Failures(t *testing.T) {
 	assert.Zero(t, h.dd.listCalls)
 }
 
+func TestSweep_StopsAtTheFirstNamespaceReadAfterTheContextEnds(t *testing.T) {
+	reads := 0
+	h := newHarness(t, []client.Object{integrationSecret()}, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*corev1.Namespace); ok {
+				reads++
+
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
+
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	h.dd.seedNamespace(cluster, "a", anyTest(1))
+	h.dd.seedNamespace(cluster, "b", anyTest(2))
+	h.dd.seedNamespace(cluster, "c", anyTest(3))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := h.reconciler.sweep(ctx)
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 1, reads, "no namespace is read after the context ended")
+	assert.Empty(t, wakes(h))
+}
+
 func TestSweep_StopsWhenTheContextEndsWhileWaking(t *testing.T) {
 	h := newHarness(t, []client.Object{integrationSecret()})
 	h.reconciler.wake = make(chan event.GenericEvent)
