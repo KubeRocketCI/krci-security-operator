@@ -196,17 +196,57 @@ The operator also reads `POD_NAMESPACE`, which the chart sets from the pod's nam
 
 ### DefectDojo requirements
 
-- DefectDojo 3.5.200 is the tested and recommended version; earlier versions may work but are not tested.
+- DefectDojo 3.5.200 or later (ADR 0007). Earlier versions may work but are not tested.
 - The system setting `enable_deduplication` is off (the default), and `HASHCODE_FIELDS_PER_SCANNER` for `Trivy Operator Scan` is the default `title`, `severity`, `vulnerability_ids`, `description`, with `HASH_CODE_FIELDS_ALWAYS` = `service`. The operator drops repeated entries by these hash fields; another configuration needs the key changed with it.
-- The API token user is a superuser, a staff user, or an authorized user of the Product Type or of the product. DefectDojo 3.5.200 checks the superuser and staff flags and the authorized users only, and does not read role assignments.
+- An API token, see [DefectDojo API token](#defectdojo-api-token).
 
-| Used for | Token user |
+### DefectDojo API token
+
+The operator reads the DefectDojo address and token from a Secret:
+
+| Field | Value |
 |---|---|
-| lookups, the active findings of a test, reimport (also the empty reimport of a close), product tags, close (with the update of the `build_id` of the test and the close of a finding) | a superuser, a staff user, or an authorized user of the Product Type (or of the product) |
-| creation of products and engagements on first use | a superuser, a staff user, or an authorized user of a Product Type created in advance |
-| creation of the Product Type on first use | a superuser or a staff user; a non-staff user with the Django permission `dojo.add_product_type` can create it, but DefectDojo 3.5.200 does not make that user a member of it, so the token cannot use it afterwards |
+| Name | `defectdojo.secretName`, default `defectdojo-credentials` |
+| Namespace | the release namespace |
+| Key `url` | the base URL of DefectDojo, without `/api/v2`, for example `https://defectdojo.example.com` |
+| Key `token` | the API v2 key of the token user |
 
-Create the Product Type in advance and add the token user to its authorized users when the token is not a staff user.
+```bash
+kubectl create secret generic defectdojo-credentials -n <namespace> \
+  --from-literal=url=https://defectdojo.example.com \
+  --from-literal=token=<api-v2-key>
+```
+
+The Secret is read again at most once per minute: a new token is used without a restart.
+
+The token user needs:
+
+- read: Product Type, products, engagements, tests, findings;
+- import: reimport, also the empty reimport of a close;
+- edit: product tags, the `build_id` of a test, the close of a finding;
+- add: the namespace products and the engagement `trivy-operator` on first use.
+
+The operator deletes nothing in DefectDojo.
+
+DefectDojo 3.5.200 grants access in one of three ways: superuser, staff user, or authorized user of a Product Type. An authorized user of a Product Type has access to every product of it, and to nothing else. Role assignments are not read. With `DD_ENABLE_V3_ORGANIZATION_ASSET_RELABEL` on (the 3.5.200 default), the UI names a Product Type "Organization" and a product "Asset"; the API keeps `product_types` and `products`.
+
+| Option | Access of the token | Product Type | Use |
+|---|---|---|---|
+| Authorized user of the Product Type (recommended) | the products of one Product Type | created in advance by an administrator | production |
+| Staff user | every Product Type and product, and their deletion | created by the operator on first use | when the least access is not required |
+| Superuser | all of DefectDojo | created by the operator on first use | testbeds only; the try-kuberocketci testbed uses the admin token |
+
+Not supported: a user that is not staff and has only the Django permission `dojo.add_product_type`. It can create the Product Type, but DefectDojo does not make it an authorized user of it. Every later request gets 403, and the operator retries the namespace without end.
+
+Set up the recommended option as a DefectDojo administrator:
+
+1. Create the Product Type with the name of `defectdojo.productType` (default `KubeRocketCI`). UI: **Organizations** > **Add Organization**. API: `POST /api/v2/product_types/` with `{"name": "KubeRocketCI"}`.
+2. Create a user for the operator: active, not staff, not superuser. Use one user per cluster, so that the token of one cluster can be revoked alone. UI: **Users** > **New User**. API: `POST /api/v2/users/` with `is_staff` and `is_superuser` `false`.
+3. Add the user to the authorized users of the Product Type. UI: the Organization page > **Authorized Users** > **Add Users**. API: `PATCH /api/v2/product_types/<id>/` with `{"authorized_users": [<user id>, ...]}`; the list replaces the current list, so include the users that are already in it.
+4. Get the API v2 key of the user. UI: log in as the user > user menu > **API v2 Key**. API: `POST /api/v2/api-token-auth/` with the username and password of the user.
+5. Create the Secret with the key.
+
+The operators of all clusters that write to one DefectDojo use the same Product Type (see `defectdojo.productType`), so each operator user is an authorized user of that one Product Type.
 
 ### Access
 

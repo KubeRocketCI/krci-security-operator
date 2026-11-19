@@ -39,11 +39,11 @@ The unit tests use the fake client and a fake DefectDojo (`defectdojo_fake_test.
 
 ## Upstream sources
 
-The operator depends on DefectDojo and Trivy Operator behavior that no API document states. Check it in the upstream source at the supported versions, not from memory. DefectDojo 3.5.200 is the tested and recommended version; earlier versions may work but are not tested.
+The operator depends on DefectDojo and Trivy Operator behavior that no API document states. Check it in the upstream source at the supported versions, not from memory. DefectDojo 3.5.200 or later is supported (ADR 0007); earlier versions may work but are not tested.
 
 | Project | Supported | Contract unchanged across |
 |---|---|---|
-| DefectDojo | 3.5.200 (see [trivy.md](trivy.md#defectdojo-requirements)) | 3.5.200 |
+| DefectDojo | 3.5.200 or later, verified with 3.5.200 (see [trivy.md](trivy.md#defectdojo-requirements)) | 3.5.200 |
 | Trivy Operator | 0.34.0 or later, verified with 0.36.1 | 0.34.0 to 0.36.1 |
 
 Trivy Operator: supported means the releases of the last three months. On a new Trivy Operator release, compare the files below between the old and the new tag, update the fake and this table, and move the lower bound.

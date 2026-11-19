@@ -18,7 +18,8 @@ One instance runs per cluster with cluster-wide read-only access and writes only
 
 - [Trivy Operator](https://aquasecurity.github.io/trivy-operator/) is installed in the cluster and produces the reports.
 - DefectDojo is reachable from the operator pod.
-- A Secret in the release namespace holds the DefectDojo address and API token under the keys `url` and `token`. Its name is set in `defectdojo.secretName`:
+- DefectDojo 3.5.200 or later. Earlier versions may work but are not tested.
+- A Secret in the release namespace holds the DefectDojo address and API token under the keys `url` and `token`. Its name is set in `defectdojo.secretName`. Token options and the recommended least-privilege setup: [DefectDojo API token](https://github.com/KubeRocketCI/krci-security-operator/blob/main/docs/trivy.md#defectdojo-api-token).
 
   ```bash
   kubectl create secret generic defectdojo-credentials -n <namespace> \
