@@ -53,11 +53,9 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 # The race detector needs cgo, which the golang task of the KubeRocketCI pipelines turns off by default.
-# -coverpkg=./... credits a package with the code that tests of other packages run; the controller tests run the
-# scenarios of internal/ddcontract.
 .PHONY: test
 test: fmt vet ## Run the unit tests and, when helm is installed, the chart render tests.
-	CGO_ENABLED=1 go test -race ./... -coverpkg=./... -coverprofile cover.out
+	CGO_ENABLED=1 go test -race ./... -coverprofile cover.out
 
 # DEFECTDOJO_URL and DEFECTDOJO_TOKEN name a live DefectDojo; the token creates and deletes product types.
 # SCENARIOS limits the run to comma-separated scenario names.
