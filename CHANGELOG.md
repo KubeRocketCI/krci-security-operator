@@ -1,6 +1,9 @@
 <a name="unreleased"></a>
 ## [Unreleased]
 
+
+<a name="v0.2.0"></a>
+## v0.2.0 - 2026-11-19
 ### Features
 
 - Close a test with one empty reimport
@@ -11,6 +14,7 @@
 - Write namespace products without KubeRocketCI input
 - Skip a broken Trivy Operator report
 - Send the service of a reimport request when set
+- Import Trivy Operator reports of all namespaces into DefectDojo
 
 ### Bug Fixes
 
@@ -18,6 +22,8 @@
 - Drop repeated report entries before the upload
 - Version of a digest-only image is its digest
 - Retry rejected reports and align names with the glossary
+- Update golang.org/x/net to v0.62.0 and Go to 1.27.4
+- Handle a partial report listing and a too short resync period
 
 ### Testing
 
@@ -27,6 +33,9 @@
 ### Routine
 
 - Update current development version
+- Pass the KubeRocketCI review: Sonar complexity and race tests
+- Deploy only through the chart and test its rendering
+- Add license and README
 
 ### Documentation
 
@@ -38,28 +47,7 @@
 - Clarify product tag repair and scale to zero
 - Align ADRs with DefectDojo import behavior
 - Add glossary, ADRs and agent skills config
-
-
-<a name="v0.1.0"></a>
-## v0.1.0 - 2026-11-17
-### Features
-
-- Import Trivy Operator reports of all namespaces into DefectDojo
-
-### Bug Fixes
-
-- Update golang.org/x/net to v0.62.0 and Go to 1.27.4
-- Handle a partial report listing and a too short resync period
-
-### Routine
-
-- Pass the KubeRocketCI review: Sonar complexity and race tests
-- Deploy only through the chart and test its rendering
-- Add license and README
-
-### Documentation
-
 - Shorten the README and add a security model
 
 
-[Unreleased]: https://github.com/KubeRocketCI/krci-security-operator/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/KubeRocketCI/krci-security-operator/compare/v0.2.0...HEAD
