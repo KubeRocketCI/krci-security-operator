@@ -30,6 +30,7 @@ linters:
       rules:
         - name: comment-spacings
         - name: import-shadowing
+        - name: redefines-builtin-id
   exclusions:
     generated: lax
     rules:
