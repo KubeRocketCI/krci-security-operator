@@ -17,7 +17,10 @@ flowchart LR
 
 ## Prerequisites
 
-Trivy Operator 0.34 or later and a DefectDojo API token with the permissions in [docs/trivy.md](docs/trivy.md#defectdojo-requirements); see [supported versions](docs/development.md#upstream-sources). DefectDojo 3.5.200 is the tested and recommended version; earlier versions may work but are not tested. The cluster name is required and unique per DefectDojo.
+- Trivy Operator 0.34 or later.
+- DefectDojo 3.5.200 or later. Earlier versions may work but are not tested. See [supported versions](docs/development.md#upstream-sources).
+- A DefectDojo API token in a Secret. The token options and the recommended least-privilege setup: [DefectDojo API token](docs/trivy.md#defectdojo-api-token).
+- A cluster name, unique per DefectDojo.
 
 ## Install
 
