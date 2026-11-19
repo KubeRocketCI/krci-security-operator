@@ -1,6 +1,13 @@
 <a name="unreleased"></a>
 ## [Unreleased]
 
+### Routine
+
+- Update current development version
+
+
+<a name="v0.2.0"></a>
+## [v0.2.0] - 2026-11-19
 ### Features
 
 - Close a test with one empty reimport
@@ -62,4 +69,5 @@
 - Shorten the README and add a security model
 
 
-[Unreleased]: https://github.com/KubeRocketCI/krci-security-operator/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/KubeRocketCI/krci-security-operator/compare/v0.2.0...HEAD
+[v0.2.0]: https://github.com/KubeRocketCI/krci-security-operator/compare/v0.1.0...v0.2.0
