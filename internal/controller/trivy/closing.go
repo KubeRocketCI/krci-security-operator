@@ -367,7 +367,7 @@ func (r *Reconciler) runSweeper(ctx context.Context) error {
 	defer ticker.Stop()
 
 	for {
-		if err := r.sweep(ctx); err != nil {
+		if err := r.sweep(ctx); err != nil && ctx.Err() == nil {
 			ctrl.LoggerFrom(ctx).Error(err, "Failed to sweep the namespace products of the cluster")
 		}
 
@@ -383,7 +383,7 @@ func (r *Reconciler) runSweeper(ctx context.Context) error {
 // namespace and the repair of its product tags are serialized with its imports by the workqueue.
 // A namespace needs it when it has a product although it no longer exists or is excluded and was not released yet,
 // or when its product has wrong or missing product tags.
-// A failure for one namespace does not stop the others; the errors are joined.
+// An ended context stops the sweep before it prunes the released namespaces.
 func (r *Reconciler) sweep(ctx context.Context) error {
 	dd, available, err := r.defectDojo(ctx)
 	if err != nil {
@@ -405,12 +405,28 @@ func (r *Reconciler) sweep(ctx context.Context) error {
 
 	candidates, withProduct := r.sweepCandidates(products)
 
+	if err = r.wakeCandidates(ctx, candidates); err != nil && ctx.Err() != nil {
+		return err
+	}
+
+	r.pruneReleased(withProduct)
+
+	return err
+}
+
+// wakeCandidates wakes each candidate namespace that needs the controller. A failure to read one namespace does not
+// stop the others; the errors are joined. An ended context stops it at the next failed read or wake.
+func (r *Reconciler) wakeCandidates(ctx context.Context, candidates []sweepCandidate) error {
 	var errs []error
 
 	for _, candidate := range candidates {
-		importable, nsErr := r.isImportable(ctx, candidate.namespace)
-		if nsErr != nil {
-			errs = append(errs, nsErr)
+		importable, err := r.isImportable(ctx, candidate.namespace)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+
+			errs = append(errs, err)
 
 			continue
 		}
@@ -423,12 +439,10 @@ func (r *Reconciler) sweep(ctx context.Context) error {
 			continue
 		}
 
-		if wakeErr := r.wakeNamespace(ctx, candidate.namespace); wakeErr != nil {
-			return errors.Join(append(errs, wakeErr)...)
+		if err = r.wakeNamespace(ctx, candidate.namespace); err != nil {
+			return errors.Join(append(errs, err)...)
 		}
 	}
-
-	r.pruneReleased(withProduct)
 
 	return errors.Join(errs...)
 }

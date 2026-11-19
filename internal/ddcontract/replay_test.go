@@ -32,6 +32,8 @@ func TestReplayRequests_ReportsAChangedFormFieldAndBody(t *testing.T) {
 	fixture, err := LoadFixture(DefaultFixtureDir(), "build-id")
 	require.NoError(t, err)
 
+	require.Equal(t, "first reimport of A with a build_id", fixture.Steps[0].Name)
+
 	first := &fixture.Steps[0].Exchanges[0]
 	require.Equal(t, "/api/v2/reimport-scan/", first.Path)
 
@@ -70,6 +72,8 @@ func TestReplayRequests_ReportsAMissingAnswerAndAChangedPathInTheirStepOnly(t *t
 	require.Equal(t, "list the tests", list.Name)
 	require.Len(t, list.Exchanges, 4)
 	list.Exchanges = list.Exchanges[:3]
+
+	require.Equal(t, "reimport A with another build_id in spaces", fixture.Steps[2].Name)
 
 	reimport := &fixture.Steps[2].Exchanges[0]
 	reimport.Path = "/api/v2/import-scan/"

@@ -179,8 +179,12 @@ func (r *WorkloadResolver) Resolve(ctx context.Context, kind, name string) (Work
 		w, state = Workload{Kind: strings.ToLower(kind), Name: name}, WorkloadCurrent
 	}
 
-	if err != nil || state == WorkloadGone {
-		return w, state, err
+	if err != nil {
+		return Workload{}, WorkloadGone, err
+	}
+
+	if state == WorkloadGone {
+		return w, state, nil
 	}
 
 	_, found, err := r.Containers(ctx, w)
@@ -189,7 +193,7 @@ func (r *WorkloadResolver) Resolve(ctx context.Context, kind, name string) (Work
 	case errors.Is(err, ErrUnsupportedKind):
 		return w, WorkloadUnsupported, nil
 	case err != nil:
-		return w, WorkloadGone, err
+		return Workload{}, WorkloadGone, err
 	case !found:
 		return w, WorkloadGone, nil
 	}
@@ -221,7 +225,8 @@ func (r *WorkloadResolver) Containers(
 
 // StableWorkloads returns every workload of the namespace that a report can be imported for: Deployments,
 // ReplicaSets without a Deployment, StatefulSets, DaemonSets, CronJobs, Jobs without a CronJob and Pods without a
-// controller. Its containers are then known to Containers. A workload scaled to zero is among them.
+// controller. Its containers are then known to Containers. A workload scaled to zero is among them. The order is not
+// fixed.
 func (r *WorkloadResolver) StableWorkloads(ctx context.Context) ([]Workload, error) {
 	out, err := r.loadedWorkloads(ctx)
 	if err != nil {

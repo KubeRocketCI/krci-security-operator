@@ -834,6 +834,32 @@ func TestClient_CloseTest_ClosesOneByOneWhatStaysActiveAfterTheBoundOfReimports(
 	assert.Empty(t, f.active)
 }
 
+func TestClient_CloseTest_ReturnsNoResultWithAFailure(t *testing.T) {
+	names := make([]string, 0, maxCloseReimports+1)
+
+	for i := range maxCloseReimports + 1 {
+		names = append(names, fmt.Sprintf("ns/Deployment/app%d/app", i))
+	}
+
+	f := newFindingsServer(t, names...)
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/close/") {
+			w.WriteHeader(http.StatusBadRequest)
+
+			return
+		}
+
+		f.handle(w, r)
+	})
+
+	res, err := c.CloseTest(context.Background(), closableTest)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), fmt.Sprintf("failed to close DefectDojo finding %d", maxCloseReimports+1))
+	assert.Len(t, f.reimports, maxCloseReimports, "the reimports ran before the close of one finding failed")
+	assert.Zero(t, res)
+}
+
 func TestClient_CloseTest_ClosesOneByOneWhenTheReimportOfAServiceClosesNothing(t *testing.T) {
 	f := newFindingsServer(t, closeService, "other")
 	f.reimportKeeps = true

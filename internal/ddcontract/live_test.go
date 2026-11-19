@@ -2,6 +2,7 @@ package ddcontract
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -167,4 +168,25 @@ func TestLive_AnswerOver299IsAnAPIError(t *testing.T) {
 
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+}
+
+// failingBody fails every read and records its close.
+type failingBody struct{ closed bool }
+
+func (b *failingBody) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+
+func (b *failingBody) Close() error {
+	b.closed = true
+
+	return nil
+}
+
+func TestRecordingTransport_ClosesARequestBodyItCannotRead(t *testing.T) {
+	body := &failingBody{}
+	req := httptest.NewRequest(http.MethodPost, "http://defectdojo/api/v2/reimport-scan/", body)
+
+	_, err := (&recordingTransport{base: http.DefaultTransport}).RoundTrip(req)
+
+	require.ErrorContains(t, err, "read the request body")
+	assert.True(t, body.closed)
 }

@@ -137,9 +137,10 @@ func TestWorkloadResolver_Resolve_ListError(t *testing.T) {
 			},
 		}).Build()
 
-	_, _, err := NewWorkloadResolver(c, testNamespace).Resolve(context.Background(), "ReplicaSet", "app-1")
+	got, _, err := NewWorkloadResolver(c, testNamespace).Resolve(context.Background(), "ReplicaSet", "app-1")
 
 	require.ErrorIs(t, err, assert.AnError)
+	assert.Zero(t, got)
 }
 
 func testScheme(t *testing.T) *runtime.Scheme {
