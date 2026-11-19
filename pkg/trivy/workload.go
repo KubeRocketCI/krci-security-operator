@@ -31,8 +31,6 @@ const (
 	workloadJob         = "job"
 	workloadPod         = "pod"
 
-	groupApps  = "apps"
-	groupBatch = "batch"
 	// workloadPageSize is the number of workload objects or Pod metadata objects read per list call.
 	workloadPageSize = 500
 	// revisionAnnotation is set by the Deployment controller on a Deployment and on its current ReplicaSet.
@@ -74,11 +72,13 @@ func (w Workload) Tag() string { return w.Kind + "." + w.Name }
 
 // WorkloadResolver maps the resource a report was produced for to a Workload.
 // It lists each kind of workload of the namespace at most once, in pages, and reads each Pod at most once. It keeps
-// of every object only what it decides with: owner, revision, creation time and the image reference of each
-// container. Its lists are a snapshot: it is meant to live for one decision, not across a long pass.
+// of every object only what it decides with: owner, revision, creation time, the image reference of each
+// container and the component of a stable workload; no labels or annotations. Its lists are a snapshot: it is meant
+// to live for one decision, not across a long pass.
 type WorkloadResolver struct {
-	reader    client.Reader
-	namespace string
+	reader            client.Reader
+	namespace         string
+	componentPrefixes []string
 
 	loaded      bool
 	replicaSets map[string]replicaSetInfo
@@ -100,25 +100,28 @@ type WorkloadResolver struct {
 type podSpec struct {
 	found      bool
 	containers map[string]string
+	// component is the app tag value; "" when no source names one.
+	component string
 }
 
-// replicaSetInfo is what the resolver keeps of a ReplicaSet. containers is set only without a Deployment.
+// replicaSetInfo is what the resolver keeps of a ReplicaSet. spec is set only without a Deployment, and has no
+// component.
 type replicaSetInfo struct {
 	deployment string
 	revision   string
-	containers map[string]string
+	spec       podSpec
 }
 
 // deploymentInfo is what the resolver keeps of a Deployment.
 type deploymentInfo struct {
-	revision   string
-	containers map[string]string
+	revision string
+	spec     podSpec
 }
 
-// jobInfo is what the resolver keeps of a Job. containers is set only without a CronJob.
+// jobInfo is what the resolver keeps of a Job. spec is set only without a CronJob.
 type jobInfo struct {
-	cronJob    string
-	containers map[string]string
+	cronJob string
+	spec    podSpec
 }
 
 // newestJob identifies the newest Job of a CronJob.
@@ -136,16 +139,18 @@ func (j newestJob) newerThan(other newestJob) bool {
 	return j.name > other.name
 }
 
-// templateKinds are the workload kinds that are listed in pages and kept as container images only.
+// templateKinds are the workload kinds that are listed in pages and kept as container images and the component only.
 var templateKinds = []string{workloadStatefulSet, workloadDaemonSet, workloadCronJob}
 
-// NewWorkloadResolver returns a resolver that reads the workloads of namespace.
-func NewWorkloadResolver(reader client.Reader, namespace string) *WorkloadResolver {
+// NewWorkloadResolver returns a resolver that reads the workloads of namespace. componentPrefixes are stripped from
+// the Argo CD application name of a component, see Component.
+func NewWorkloadResolver(reader client.Reader, namespace string, componentPrefixes []string) *WorkloadResolver {
 	return &WorkloadResolver{
-		reader:        reader,
-		namespace:     namespace,
-		templateNames: map[string][]string{},
-		podSpecs:      map[Workload]podSpec{},
+		reader:            reader,
+		namespace:         namespace,
+		componentPrefixes: componentPrefixes,
+		templateNames:     map[string][]string{},
+		podSpecs:          map[Workload]podSpec{},
 	}
 }
 
@@ -209,18 +214,53 @@ func (r *WorkloadResolver) Containers(
 	ctx context.Context,
 	w Workload,
 ) (containers map[string]string, found bool, err error) {
-	if spec, ok := r.podSpecs[w]; ok {
-		return spec.containers, spec.found, nil
-	}
-
-	containers, found, err = r.readContainers(ctx, w)
+	spec, err := r.spec(ctx, w)
 	if err != nil {
 		return nil, false, err
 	}
 
-	r.podSpecs[w] = podSpec{found: found, containers: containers}
+	return spec.containers, spec.found, nil
+}
 
-	return containers, found, nil
+// Component returns the app tag value of a workload, derived by the package function Component from the labels and
+// annotations of a Deployment, StatefulSet, DaemonSet, CronJob or Job in its list, of a Pod from its Get. It is ""
+// for a ReplicaSet, a workload that does not exist and a kind the operator does not read.
+func (r *WorkloadResolver) Component(ctx context.Context, w Workload) (string, error) {
+	spec, err := r.spec(ctx, w)
+
+	switch {
+	case errors.Is(err, ErrUnsupportedKind):
+		return "", nil
+	case err != nil:
+		return "", err
+	}
+
+	return spec.component, nil
+}
+
+// spec returns the pod specification of a workload, read at most once per resolver.
+func (r *WorkloadResolver) spec(ctx context.Context, w Workload) (podSpec, error) {
+	if spec, ok := r.podSpecs[w]; ok {
+		return spec, nil
+	}
+
+	spec, err := r.readSpec(ctx, w)
+	if err != nil {
+		return podSpec{}, err
+	}
+
+	r.podSpecs[w] = spec
+
+	return spec, nil
+}
+
+// specOf returns the pod specification of a workload object that exists, with its component.
+func (r *WorkloadResolver) specOf(obj metav1.Object, template *corev1.PodSpec) podSpec {
+	return podSpec{
+		found:      true,
+		containers: containerImages(template),
+		component:  Component(obj.GetLabels(), obj.GetAnnotations(), r.componentPrefixes),
+	}
 }
 
 // StableWorkloads returns every workload of the namespace that a report can be imported for: Deployments,
@@ -251,10 +291,10 @@ func (r *WorkloadResolver) StableWorkloads(ctx context.Context) ([]Workload, err
 	return append(out, pods...), nil
 }
 
-// remember records the containers and their images of a workload that exists and returns the workload.
-func (r *WorkloadResolver) remember(kind, name string, containers map[string]string) Workload {
+// remember records the pod specification of a workload and returns the workload.
+func (r *WorkloadResolver) remember(kind, name string, spec podSpec) Workload {
 	w := Workload{Kind: kind, Name: name}
-	r.podSpecs[w] = podSpec{found: true, containers: containers}
+	r.podSpecs[w] = spec
 
 	return w
 }
@@ -272,25 +312,26 @@ func (r *WorkloadResolver) loadedWorkloads(ctx context.Context) ([]Workload, err
 	var out []Workload
 
 	for name, d := range r.deployments {
-		out = append(out, r.remember(workloadDeployment, name, d.containers))
+		out = append(out, r.remember(workloadDeployment, name, d.spec))
 	}
 
 	for name, rs := range r.replicaSets {
 		if rs.deployment == "" {
-			out = append(out, r.remember(workloadReplicaSet, name, rs.containers))
+			out = append(out, r.remember(workloadReplicaSet, name, rs.spec))
 		}
 	}
 
 	for name, job := range r.jobs {
 		if job.cronJob == "" {
-			out = append(out, r.remember(workloadJob, name, job.containers))
+			out = append(out, r.remember(workloadJob, name, job.spec))
 		}
 	}
 
 	return out, nil
 }
 
-// loadTemplates lists the workloads of a kind in pages, once per resolver, and keeps their names and containers.
+// loadTemplates lists the workloads of a kind in pages, once per resolver, and keeps their names, containers and
+// components.
 func (r *WorkloadResolver) loadTemplates(ctx context.Context, kind string) error {
 	if _, ok := r.templateNames[kind]; ok {
 		return nil
@@ -309,7 +350,7 @@ func (r *WorkloadResolver) loadTemplates(ctx context.Context, kind string) error
 			func() *appsv1.StatefulSetList { return &appsv1.StatefulSetList{} },
 			func(list *appsv1.StatefulSetList) error {
 				for i := range list.Items {
-					found = append(found, templateWorkload{list.Items[i].Name, containerImages(&list.Items[i].Spec.Template.Spec)})
+					found = append(found, r.listed(&list.Items[i], &list.Items[i].Spec.Template.Spec))
 				}
 
 				return nil
@@ -319,7 +360,7 @@ func (r *WorkloadResolver) loadTemplates(ctx context.Context, kind string) error
 			func() *appsv1.DaemonSetList { return &appsv1.DaemonSetList{} },
 			func(list *appsv1.DaemonSetList) error {
 				for i := range list.Items {
-					found = append(found, templateWorkload{list.Items[i].Name, containerImages(&list.Items[i].Spec.Template.Spec)})
+					found = append(found, r.listed(&list.Items[i], &list.Items[i].Spec.Template.Spec))
 				}
 
 				return nil
@@ -329,8 +370,7 @@ func (r *WorkloadResolver) loadTemplates(ctx context.Context, kind string) error
 			func() *batchv1.CronJobList { return &batchv1.CronJobList{} },
 			func(list *batchv1.CronJobList) error {
 				for i := range list.Items {
-					spec := &list.Items[i].Spec.JobTemplate.Spec.Template.Spec
-					found = append(found, templateWorkload{list.Items[i].Name, containerImages(spec)})
+					found = append(found, r.listed(&list.Items[i], &list.Items[i].Spec.JobTemplate.Spec.Template.Spec))
 				}
 
 				return nil
@@ -345,7 +385,7 @@ func (r *WorkloadResolver) loadTemplates(ctx context.Context, kind string) error
 
 	names := make([]string, 0, len(found))
 	for _, w := range found {
-		names = append(names, r.remember(kind, w.name, w.containers).Name)
+		names = append(names, r.remember(kind, w.name, w.spec).Name)
 	}
 
 	r.templateNames[kind] = names
@@ -355,8 +395,12 @@ func (r *WorkloadResolver) loadTemplates(ctx context.Context, kind string) error
 
 // templateWorkload is a workload of a template kind as the listing delivers it.
 type templateWorkload struct {
-	name       string
-	containers map[string]string
+	name string
+	spec podSpec
+}
+
+func (r *WorkloadResolver) listed(obj metav1.Object, template *corev1.PodSpec) templateWorkload {
+	return templateWorkload{name: obj.GetName(), spec: r.specOf(obj, template)}
 }
 
 // workloadListing returns the paged listing of the workload objects of the namespace of the resolver.
@@ -416,76 +460,68 @@ func (r *WorkloadResolver) barePods(ctx context.Context) ([]Workload, error) {
 	return out, nil
 }
 
-// readContainers reads the containers of a workload that Containers has not seen yet. Deployments, ReplicaSets,
+// readSpec reads the pod specification of a workload that the resolver has not seen yet. Deployments, ReplicaSets,
 // Jobs, StatefulSets, DaemonSets and CronJobs come from the lists the resolver holds; a Pod is read with a Get.
-func (r *WorkloadResolver) readContainers(ctx context.Context, w Workload) (map[string]string, bool, error) {
+func (r *WorkloadResolver) readSpec(ctx context.Context, w Workload) (podSpec, error) {
 	switch w.Kind {
 	case workloadDeployment:
-		return r.deploymentContainers(ctx, w.Name)
+		return r.deploymentSpec(ctx, w.Name)
 	case workloadReplicaSet:
-		return r.replicaSetContainers(ctx, w.Name)
+		return r.replicaSetSpec(ctx, w.Name)
 	case workloadJob:
-		return r.jobContainers(ctx, w.Name)
+		return r.jobSpec(ctx, w.Name)
 	case workloadStatefulSet, workloadDaemonSet, workloadCronJob:
 		if err := r.loadTemplates(ctx, w.Kind); err != nil {
-			return nil, false, err
+			return podSpec{}, err
 		}
 
-		spec, ok := r.podSpecs[w]
-
-		return spec.containers, ok, nil
+		return r.podSpecs[w], nil
 	case workloadPod:
-		return r.podContainers(ctx, w.Name)
+		return r.readPod(ctx, w.Name)
 	default:
-		return nil, false, fmt.Errorf("%w: %q", ErrUnsupportedKind, w.Kind)
+		return podSpec{}, fmt.Errorf("%w: %q", ErrUnsupportedKind, w.Kind)
 	}
 }
 
-func (r *WorkloadResolver) deploymentContainers(ctx context.Context, name string) (map[string]string, bool, error) {
+func (r *WorkloadResolver) deploymentSpec(ctx context.Context, name string) (podSpec, error) {
 	if err := r.load(ctx); err != nil {
-		return nil, false, err
+		return podSpec{}, err
 	}
 
-	d, ok := r.deployments[name]
-
-	return d.containers, ok, nil
+	return r.deployments[name].spec, nil
 }
 
-// replicaSetContainers finds only a ReplicaSet without a Deployment: the other is not a workload of its own.
-func (r *WorkloadResolver) replicaSetContainers(ctx context.Context, name string) (map[string]string, bool, error) {
+// replicaSetSpec finds only a ReplicaSet without a Deployment: the other is not a workload of its own.
+func (r *WorkloadResolver) replicaSetSpec(ctx context.Context, name string) (podSpec, error) {
 	if err := r.load(ctx); err != nil {
-		return nil, false, err
+		return podSpec{}, err
 	}
 
-	rs, ok := r.replicaSets[name]
-
-	return rs.containers, ok && rs.deployment == "", nil
+	return r.replicaSets[name].spec, nil
 }
 
-// jobContainers finds only a Job without a CronJob: the other is not a workload of its own.
-func (r *WorkloadResolver) jobContainers(ctx context.Context, name string) (map[string]string, bool, error) {
+// jobSpec finds only a Job without a CronJob: the other is not a workload of its own.
+func (r *WorkloadResolver) jobSpec(ctx context.Context, name string) (podSpec, error) {
 	if err := r.loadJobs(ctx); err != nil {
-		return nil, false, err
+		return podSpec{}, err
 	}
 
-	job, ok := r.jobs[name]
-
-	return job.containers, ok && job.cronJob == "", nil
+	return r.jobs[name].spec, nil
 }
 
-// podContainers reads a Pod with a Get; found is false when it does not exist.
-func (r *WorkloadResolver) podContainers(ctx context.Context, name string) (map[string]string, bool, error) {
+// readPod reads a Pod with a Get; found is false when it does not exist.
+func (r *WorkloadResolver) readPod(ctx context.Context, name string) (podSpec, error) {
 	pod := &corev1.Pod{}
 
 	if err := r.reader.Get(ctx, client.ObjectKey{Namespace: r.namespace, Name: name}, pod); err != nil {
 		if k8sErrors.IsNotFound(err) {
-			return nil, false, nil
+			return podSpec{}, nil
 		}
 
-		return nil, false, fmt.Errorf("failed to get Pod %s: %w", name, err)
+		return podSpec{}, fmt.Errorf("failed to get Pod %s: %w", name, err)
 	}
 
-	return containerImages(&pod.Spec), true, nil
+	return r.specOf(pod, &pod.Spec), nil
 }
 
 // containerImages returns the image reference of every container of the pod specification by container name:
@@ -582,7 +618,7 @@ func (r *WorkloadResolver) loadJobs(ctx context.Context) error {
 				info := jobInfo{cronJob: cronJobOwner(job)}
 
 				if info.cronJob == "" {
-					info.containers = containerImages(&job.Spec.Template.Spec)
+					info.spec = r.specOf(job, &job.Spec.Template.Spec)
 				} else {
 					newest := newestJob{name: job.Name, created: job.CreationTimestamp}
 					if current, ok := latest[info.cronJob]; !ok || newest.newerThan(current) {
@@ -630,7 +666,7 @@ func (r *WorkloadResolver) load(ctx context.Context) error {
 				info := replicaSetInfo{deployment: deploymentOwner(rs), revision: rs.Annotations[revisionAnnotation]}
 
 				if info.deployment == "" {
-					info.containers = containerImages(&rs.Spec.Template.Spec)
+					info.spec = podSpec{found: true, containers: containerImages(&rs.Spec.Template.Spec)}
 				}
 
 				replicaSets[rs.Name] = info
@@ -650,8 +686,8 @@ func (r *WorkloadResolver) load(ctx context.Context) error {
 			for i := range list.Items {
 				d := &list.Items[i]
 				deployments[d.Name] = deploymentInfo{
-					revision:   d.Annotations[revisionAnnotation],
-					containers: containerImages(&d.Spec.Template.Spec),
+					revision: d.Annotations[revisionAnnotation],
+					spec:     r.specOf(d, &d.Spec.Template.Spec),
 				}
 			}
 

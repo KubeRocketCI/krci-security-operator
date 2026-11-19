@@ -22,7 +22,7 @@
 - A module returns a transient error from `Reconcile` with a zero `Result` (controller-runtime ignores the `Result` of an error); with a nil error it requeues only through `Result.RequeueAfter` (the resync, an absent optional dependency), never through `Result.Requeue`.
 - Background work that must change state wakes the controller through a channel source instead of acting itself, so the workqueue serializes it per key.
 - A module watches the metadata of large objects only and reads everything else through the API reader, so big objects never sit in the cache.
-- A module lists large objects in pages and finishes each page before it reads the next. Across pages it keeps the report metadata index of one kind and the container names and image references of the workloads for one pass, bounded by pages of 500 objects, and the test IDs and titles of the namespace. Every list goes through `trivy.ListPages`: a continue token that expired (HTTP 410) restarts the listing, at most 3 times, then the pass fails.
+- A module lists large objects in pages and finishes each page before it reads the next. Across pages it keeps the report metadata index of one kind and the container names, image references and components of the workloads for one pass, bounded by pages of 500 objects, and the test IDs and titles of the namespace. Every list goes through `trivy.ListPages`: a continue token that expired (HTTP 410) restarts the listing, at most 3 times, then the pass fails.
 - The ClusterRole stays read-only and lists exactly what the code calls. A new module that needs more access adds its rules to `deploy-templates/templates/role.yaml` and to the access table of [trivy.md](trivy.md#access); `test/deploy` fails on a write verb in the ClusterRole.
 
 ## Code rules

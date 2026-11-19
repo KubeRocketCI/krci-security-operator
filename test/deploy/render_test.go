@@ -402,8 +402,9 @@ func TestRBACIsReadOnly(t *testing.T) {
 }
 
 // TestClusterRoleGrantsWhatTheCodeCalls pins the access table of docs/trivy.md: the verbs per resource of the
-// ClusterRole. The workloads need `list` for the close rules; `get` stays for the component tag and the Pods.
-// The reports need `get` for the body of a report on the stable workload that was never imported.
+// ClusterRole. The workloads need `list` for their resolution, the close rules and the component tag; only Pods
+// need `get`, for the full object of a Pod without a controller. The reports need `get` for the body of a report
+// on the stable workload that was never imported.
 func TestClusterRoleGrantsWhatTheCodeCalls(t *testing.T) {
 	got := map[string][]string{}
 
@@ -421,20 +422,20 @@ func TestClusterRoleGrantsWhatTheCodeCalls(t *testing.T) {
 		got[key] = slices.Compact(verbs)
 	}
 
-	read := []string{"get", "list"}
+	list := []string{"list"}
 	watch := []string{"list", "watch"}
 	report := []string{"get", "list", "watch"}
 
 	require.Equal(t, map[string][]string{
 		"aquasecurity.github.io/vulnerabilityreports": report,
 		"aquasecurity.github.io/exposedsecretreports": report,
-		"apps/replicasets":  {"list"},
-		"apps/deployments":  read,
-		"apps/statefulsets": read,
-		"apps/daemonsets":   read,
-		"batch/jobs":        read,
-		"batch/cronjobs":    read,
-		"/pods":             read,
+		"apps/replicasets":  list,
+		"apps/deployments":  list,
+		"apps/statefulsets": list,
+		"apps/daemonsets":   list,
+		"batch/jobs":        list,
+		"batch/cronjobs":    list,
+		"/pods":             {"get", "list"},
 		"/namespaces":       watch,
 	}, got)
 }
