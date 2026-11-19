@@ -294,8 +294,6 @@ func (r *Reconciler) logSecret(ctx context.Context, msg, secret string) {
 type pass struct {
 	target   trivy.Target
 	resolver *trivy.WorkloadResolver
-	// components caches the component tag per workload.
-	components map[trivy.Workload]string
 	// current holds the tests the pass reimported or found up to date.
 	current map[testKey]reimportedReport
 	// chosen holds, per test, the chosen report.
@@ -383,8 +381,7 @@ func (p *pass) forget(kind string) {
 func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target trivy.Target) error {
 	p := &pass{
 		target:      target,
-		resolver:    trivy.NewWorkloadResolver(r.reader, target.Namespace),
-		components:  map[trivy.Workload]string{},
+		resolver:    trivy.NewWorkloadResolver(r.reader, target.Namespace, r.config.ComponentPrefixes),
 		current:     map[testKey]reimportedReport{},
 		chosen:      map[testKey]choice{},
 		rejected:    map[testKey]rejection{},
@@ -457,7 +454,7 @@ func (r *Reconciler) reimportOne(ctx context.Context, dd DefectDojo, p *pass, re
 		return err
 	}
 
-	component, err := r.component(ctx, p.components, p.target.Namespace, workload)
+	component, err := p.resolver.Component(ctx, workload)
 	if err != nil {
 		return err
 	}
@@ -756,39 +753,6 @@ func (r *Reconciler) uploadReport(
 	}
 
 	return reimportedReport{reportVersion: u.version, marker: u.marker, testID: res.TestID}, nil
-}
-
-// component returns the app tag value of a workload: it reads the labels and annotations of the top
-// workload object. It is "" when no source names a component or the workload object is gone.
-func (r *Reconciler) component(
-	ctx context.Context,
-	known map[trivy.Workload]string,
-	namespace string,
-	workload trivy.Workload,
-) (string, error) {
-	if c, ok := known[workload]; ok {
-		return c, nil
-	}
-
-	component := ""
-
-	if gvk, ok := workload.GVK(); ok {
-		obj := &metav1.PartialObjectMetadata{}
-		obj.SetGroupVersionKind(gvk)
-
-		err := r.reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: workload.Name}, obj)
-
-		switch {
-		case err == nil:
-			component = trivy.Component(obj.GetLabels(), obj.GetAnnotations(), r.config.ComponentPrefixes)
-		case !k8sErrors.IsNotFound(err):
-			return "", fmt.Errorf("failed to get %s %s: %w", gvk.Kind, workload.Name, err)
-		}
-	}
-
-	known[workload] = component
-
-	return component, nil
 }
 
 // reimportReports reimports every page of reports of the configured kinds in the namespace; only one page is held at

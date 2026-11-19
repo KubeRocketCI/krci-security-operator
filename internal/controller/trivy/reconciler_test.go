@@ -32,6 +32,7 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -1470,37 +1471,133 @@ func TestReconcile_ComponentOfTopWorkload(t *testing.T) {
 	}
 }
 
-func TestReconcile_ComponentLookupFailureIsReturned(t *testing.T) {
+func TestReconcile_ReadsTheComponentWithoutAWorkloadGet(t *testing.T) {
+	labels := map[string]string{"app.kubernetes.io/part-of": "suite"}
+
+	report := func(kind, name string) *unstructured.Unstructured {
+		r := goApp(t)
+		r.SetLabels(map[string]string{
+			trivy.LabelResourceKind:      kind,
+			trivy.LabelResourceName:      name,
+			trivy.LabelResourceNamespace: appNS,
+			trivy.LabelContainerName:     "app",
+		})
+
+		return r
+	}
+
+	// denyWorkloadGets fails every Get of an apps or batch object, typed or as metadata, and records it in denied.
+	denyWorkloadGets := func(denied *[]string) interceptor.Funcs {
+		return interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				gvk, err := apiutil.GVKForObject(obj, c.Scheme())
+				if err == nil && (gvk.Group == appsv1.GroupName || gvk.Group == batchv1.GroupName) {
+					*denied = append(*denied, gvk.Kind+"/"+key.Name)
+
+					return errors.New("apiserver unavailable")
+				}
+
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		objects []client.Object
+		report  *unstructured.Unstructured
+	}{
+		{
+			name: "Deployment",
+			objects: []client.Object{
+				&appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-go-app", Namespace: appNS, Labels: labels,
+						Annotations: map[string]string{revisionAnnotation: "1"},
+					},
+					Spec: appsv1.DeploymentSpec{Template: podTemplate("test-go-app")},
+				},
+				replicaSet("test-go-app-9dc66c9c6", "test-go-app", "1"),
+			},
+			report: goApp(t),
+		},
+		{
+			name: "StatefulSet",
+			objects: []client.Object{&appsv1.StatefulSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: appNS, Labels: labels},
+				Spec:       appsv1.StatefulSetSpec{Template: podTemplate("app")},
+			}},
+			report: report("StatefulSet", "db"),
+		},
+		{
+			name: "DaemonSet",
+			objects: []client.Object{&appsv1.DaemonSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: appNS, Labels: labels},
+				Spec:       appsv1.DaemonSetSpec{Template: podTemplate("app")},
+			}},
+			report: report("DaemonSet", "agent"),
+		},
+		{
+			name: "Job without a CronJob",
+			objects: []client.Object{&batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{Name: "once", Namespace: appNS, Labels: labels},
+				Spec:       batchv1.JobSpec{Template: podTemplate("app")},
+			}},
+			report: report("Job", "once"),
+		},
+		{
+			name: "CronJob of a Job",
+			objects: []client.Object{
+				cronJob("nightly-1", 0),
+				&batchv1.CronJob{
+					ObjectMeta: metav1.ObjectMeta{Name: "nightly", Namespace: appNS, Labels: labels},
+					Spec: batchv1.CronJobSpec{JobTemplate: batchv1.JobTemplateSpec{
+						Spec: batchv1.JobSpec{Template: podTemplate("app")},
+					}},
+				},
+			},
+			report: report("Job", "nightly-1"),
+		},
+		{
+			name: "Pod",
+			objects: []client.Object{&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "tool", Namespace: appNS, Labels: labels},
+				Spec:       podTemplate("app").Spec,
+			}},
+			report: report("Pod", "tool"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var denied []string
+
+			objects := append([]client.Object{integrationSecret(), namespaceObject(appNS, nil)}, tt.objects...)
+
+			h := newHarness(t, withReports(objects, tt.report), denyWorkloadGets(&denied))
+
+			h.reconcile()
+
+			require.Len(t, h.dd.reimports, 1)
+			assert.Equal(t, "suite", appTagOf(h.dd.reimports[0].Tags))
+			assert.Empty(t, denied, "no workload is read with a Get")
+		})
+	}
+}
+
+func TestReconcile_WorkloadListFailureIsReturned(t *testing.T) {
 	h := newHarness(t, withReports(goAppObjects(), goApp(t)), interceptor.Funcs{
-		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			if _, ok := obj.(*metav1.PartialObjectMetadata); ok {
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*appsv1.DeploymentList); ok {
 				return errors.New("apiserver unavailable")
 			}
 
-			return c.Get(ctx, key, obj, opts...)
+			return c.List(ctx, list, opts...)
 		},
 	})
 
 	require.Error(t, h.reconcileErr())
 	assert.Empty(t, h.dd.reimports)
-}
-
-func TestReconcile_ReadsTheTopWorkloadWithAMetadataGet(t *testing.T) {
-	var kinds []string
-
-	h := newHarness(t, withReports(goAppObjects(), goApp(t), goAppSecrets(t)), interceptor.Funcs{
-		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			if m, ok := obj.(*metav1.PartialObjectMetadata); ok {
-				kinds = append(kinds, m.GroupVersionKind().Kind+"/"+key.Name)
-			}
-
-			return c.Get(ctx, key, obj, opts...)
-		},
-	})
-
-	h.reconcile()
-
-	assert.Equal(t, []string{"Deployment/test-go-app"}, kinds, "one get per workload and pass")
 }
 
 // wakes returns the namespaces the sweeper handed to the controller.

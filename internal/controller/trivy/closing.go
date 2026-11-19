@@ -201,7 +201,7 @@ func (r *Reconciler) closeStaleTests(
 // kind, stable workload and container of its pod template. The workloads are listed at the time of the call, not
 // taken from the lists of the import: a workload created in between keeps its test.
 func (r *Reconciler) expectedTitles(ctx context.Context, namespace string) (map[string]struct{}, error) {
-	resolver := trivy.NewWorkloadResolver(r.reader, namespace)
+	resolver := trivy.NewWorkloadResolver(r.reader, namespace, r.config.ComponentPrefixes)
 
 	workloads, err := resolver.StableWorkloads(ctx)
 	if err != nil {

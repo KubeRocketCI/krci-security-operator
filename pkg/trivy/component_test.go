@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 func TestComponent(t *testing.T) {
@@ -101,30 +100,4 @@ func TestTagSafe(t *testing.T) {
 	assert.Equal(t, "a-b-c-d", TagSafe("A b,C\td"))
 	assert.Equal(t, "a-b-c", TagSafe(`a'b"c`), "quotes are rejected by DefectDojo tags")
 	assert.Empty(t, TagSafe("  "))
-}
-
-func TestWorkload_GVK(t *testing.T) {
-	tests := []struct {
-		kind string
-		want schema.GroupVersionKind
-		ok   bool
-	}{
-		{"deployment", schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}, true},
-		{"statefulset", schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "StatefulSet"}, true},
-		{"daemonset", schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "DaemonSet"}, true},
-		{"cronjob", schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "CronJob"}, true},
-		{"job", schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Job"}, true},
-		{"pod", schema.GroupVersionKind{Version: "v1", Kind: "Pod"}, true},
-		{"replicaset", schema.GroupVersionKind{}, false},
-		{"replicationcontroller", schema.GroupVersionKind{}, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.kind, func(t *testing.T) {
-			got, ok := Workload{Kind: tt.kind, Name: "x"}.GVK()
-
-			assert.Equal(t, tt.ok, ok)
-			assert.Equal(t, tt.want, got)
-		})
-	}
 }

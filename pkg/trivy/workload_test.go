@@ -98,7 +98,7 @@ func TestWorkloadResolver_Resolve(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).Build()
 
-			got, state, err := NewWorkloadResolver(c, testNamespace).Resolve(context.Background(), tt.kind, tt.resource)
+			got, state, err := NewWorkloadResolver(c, testNamespace, nil).Resolve(context.Background(), tt.kind, tt.resource)
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
@@ -119,7 +119,7 @@ func TestWorkloadResolver_Resolve_ListsOnce(t *testing.T) {
 			},
 		}).Build()
 
-	r := NewWorkloadResolver(c, testNamespace)
+	r := NewWorkloadResolver(c, testNamespace, nil)
 
 	for range 3 {
 		_, _, err := r.Resolve(context.Background(), "ReplicaSet", "app-1")
@@ -137,7 +137,7 @@ func TestWorkloadResolver_Resolve_ListError(t *testing.T) {
 			},
 		}).Build()
 
-	got, _, err := NewWorkloadResolver(c, testNamespace).Resolve(context.Background(), "ReplicaSet", "app-1")
+	got, _, err := NewWorkloadResolver(c, testNamespace, nil).Resolve(context.Background(), "ReplicaSet", "app-1")
 
 	require.ErrorIs(t, err, assert.AnError)
 	assert.Zero(t, got)
@@ -198,7 +198,7 @@ func TestWorkloadResolver_Resolve_Jobs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).Build()
 
-			got, state, err := NewWorkloadResolver(c, testNamespace).Resolve(context.Background(), "Job", tt.resource)
+			got, state, err := NewWorkloadResolver(c, testNamespace, nil).Resolve(context.Background(), "Job", tt.resource)
 
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
@@ -215,7 +215,7 @@ func TestWorkloadResolver_Resolve_JobListError(t *testing.T) {
 			},
 		}).Build()
 
-	_, _, err := NewWorkloadResolver(c, testNamespace).Resolve(context.Background(), "Job", "nightly-1")
+	_, _, err := NewWorkloadResolver(c, testNamespace, nil).Resolve(context.Background(), "Job", "nightly-1")
 
 	require.ErrorIs(t, err, assert.AnError)
 }
@@ -284,7 +284,7 @@ func TestWorkloadResolver_Containers(t *testing.T) {
 		t.Run(tt.workload.String(), func(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).Build()
 
-			names, found, err := NewWorkloadResolver(c, testNamespace).Containers(context.Background(), tt.workload)
+			names, found, err := NewWorkloadResolver(c, testNamespace, nil).Containers(context.Background(), tt.workload)
 
 			require.NoError(t, err)
 			assert.True(t, found)
@@ -297,11 +297,95 @@ func TestWorkloadResolver_Containers(t *testing.T) {
 	}
 }
 
+func TestWorkloadResolver_Component(t *testing.T) {
+	partOf := func(name, component string) metav1.ObjectMeta {
+		return metav1.ObjectMeta{
+			Name: name, Namespace: testNamespace, Labels: map[string]string{"app.kubernetes.io/part-of": component},
+		}
+	}
+
+	deployment := newDeployment("web", "1")
+	deployment.Labels = map[string]string{"app.kubernetes.io/part-of": "from-deployment"}
+	replicaSet := newReplicaSet("web-1", "web", "1", 1)
+	replicaSet.Labels = map[string]string{"app.kubernetes.io/part-of": "from-replicaset"}
+	cronJobRun := newJob("nightly-1", "nightly", 0)
+	cronJobRun.Labels = map[string]string{"app.kubernetes.io/part-of": "from-job"}
+	standaloneJob := newJob("migrate", "", 0)
+	standaloneJob.Labels = map[string]string{"app.kubernetes.io/part-of": "from-standalone-job"}
+	bare := newReplicaSet("bare", "", "", 1)
+	bare.Labels = map[string]string{"app.kubernetes.io/part-of": "from-bare-replicaset"}
+	tracked := partOf("db", "from-part-of")
+	tracked.Annotations = map[string]string{"argocd.argoproj.io/tracking-id": "in-cluster-db-app:apps/StatefulSet:x/db"}
+
+	objects := []client.Object{
+		deployment, replicaSet, cronJobRun, standaloneJob, bare,
+		&batchv1.CronJob{ObjectMeta: partOf("nightly", "from-cronjob")},
+		&appsv1.StatefulSet{ObjectMeta: tracked},
+		&appsv1.DaemonSet{ObjectMeta: partOf("agent", "from-daemonset")},
+		&corev1.Pod{ObjectMeta: partOf("debug", "from-pod")},
+	}
+
+	tests := []struct {
+		name     string
+		workload Workload
+		want     string
+	}{
+		{name: "Deployment from the Deployment, not the ReplicaSet", workload: Workload{"deployment", "web"}, want: "from-deployment"},
+		{name: "CronJob from the CronJob, not the Job", workload: Workload{"cronjob", "nightly"}, want: "from-cronjob"},
+		{name: "standalone Job", workload: Workload{"job", "migrate"}, want: "from-standalone-job"},
+		{name: "StatefulSet with the prefixes stripped", workload: Workload{"statefulset", "db"}, want: "db-app"},
+		{name: "DaemonSet", workload: Workload{"daemonset", "agent"}, want: "from-daemonset"},
+		{name: "bare Pod", workload: Workload{"pod", "debug"}, want: "from-pod"},
+		{name: "standalone ReplicaSet has none", workload: Workload{"replicaset", "bare"}},
+		{name: "gone workload has none", workload: Workload{"deployment", "missing"}},
+		{name: "kind the operator does not read has none", workload: Workload{"replicationcontroller", "legacy"}},
+	}
+
+	for _, tt := range tests {
+		for order, stableFirst := range map[string]bool{"lazy": false, "after StableWorkloads": true} {
+			t.Run(tt.name+"/"+order, func(t *testing.T) {
+				spy := newCalls()
+				c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).
+					WithInterceptorFuncs(spy.funcs(0)).Build()
+				r := NewWorkloadResolver(c, testNamespace, []string{"in-cluster-"})
+
+				if stableFirst {
+					_, err := r.StableWorkloads(context.Background())
+					require.NoError(t, err)
+				}
+
+				got, err := r.Component(context.Background(), tt.workload)
+
+				require.NoError(t, err)
+				assert.Equal(t, tt.want, got)
+
+				for typ := range spy.gets {
+					assert.Equal(t, "*v1.Pod", typ, "only a Pod is read with a Get")
+				}
+			})
+		}
+	}
+}
+
+func TestWorkloadResolver_Component_ListError(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				return assert.AnError
+			},
+		}).Build()
+
+	got, err := NewWorkloadResolver(c, testNamespace, nil).Component(context.Background(), Workload{"deployment", "web"})
+
+	require.ErrorIs(t, err, assert.AnError)
+	assert.Empty(t, got)
+}
+
 func TestWorkloadResolver_Containers_Absent(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 
 	for _, kind := range []string{"deployment", "replicaset", "statefulset", "daemonset", "job", "cronjob", "pod"} {
-		_, found, err := NewWorkloadResolver(c, testNamespace).Containers(context.Background(), Workload{kind, "missing"})
+		_, found, err := NewWorkloadResolver(c, testNamespace, nil).Containers(context.Background(), Workload{kind, "missing"})
 
 		require.NoError(t, err, kind)
 		assert.False(t, found, kind)
@@ -311,7 +395,7 @@ func TestWorkloadResolver_Containers_Absent(t *testing.T) {
 func TestWorkloadResolver_Containers_UnsupportedKind(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 
-	_, _, err := NewWorkloadResolver(c, testNamespace).Containers(context.Background(), Workload{"replicationcontroller", "x"})
+	_, _, err := NewWorkloadResolver(c, testNamespace, nil).Containers(context.Background(), Workload{"replicationcontroller", "x"})
 
 	require.ErrorIs(t, err, ErrUnsupportedKind)
 }
@@ -384,7 +468,7 @@ func TestWorkloadResolver_Containers_ReadsEachWorkloadOnce(t *testing.T) {
 		).
 		WithInterceptorFuncs(spy.funcs(0)).Build()
 
-	r := NewWorkloadResolver(c, testNamespace)
+	r := NewWorkloadResolver(c, testNamespace, nil)
 
 	for range 3 {
 		for _, w := range []Workload{{"statefulset", "db"}, {"statefulset", "other"}, {"pod", "debug"}} {
@@ -436,7 +520,7 @@ func TestWorkloadResolver_StableWorkloads_ListsEachKindOnceInPages(t *testing.T)
 				WithInterceptorFuncs(spy.funcs(tc.pageSize)).Build()
 			wantLists := tc.wantLists
 
-			r := NewWorkloadResolver(c, testNamespace)
+			r := NewWorkloadResolver(c, testNamespace, nil)
 
 			// A report of each kind is resolved before the pass asks for every workload.
 			for _, ref := range [][2]string{
@@ -517,7 +601,7 @@ func TestWorkloadResolver_StableWorkloads_ErrorOnALaterPage(t *testing.T) {
 					},
 				}).Build()
 
-			workloads, err := NewWorkloadResolver(c, testNamespace).StableWorkloads(context.Background())
+			workloads, err := NewWorkloadResolver(c, testNamespace, nil).StableWorkloads(context.Background())
 
 			require.Error(t, err)
 			assert.True(t, k8sErrors.IsResourceExpired(err))
@@ -560,7 +644,7 @@ func TestWorkloadResolver_StableWorkloads_ExpiredContinueTokenStartsTheListAgain
 					},
 				}).Build()
 
-			workloads, err := NewWorkloadResolver(c, testNamespace).StableWorkloads(context.Background())
+			workloads, err := NewWorkloadResolver(c, testNamespace, nil).StableWorkloads(context.Background())
 
 			require.NoError(t, err)
 			assert.Len(t, workloads, 14, "every workload once")
@@ -583,7 +667,7 @@ func TestWorkloadResolver_StableWorkloads_ListError(t *testing.T) {
 					},
 				}).Build()
 
-			_, err := NewWorkloadResolver(c, testNamespace).StableWorkloads(context.Background())
+			_, err := NewWorkloadResolver(c, testNamespace, nil).StableWorkloads(context.Background())
 
 			require.ErrorIs(t, err, assert.AnError)
 		})

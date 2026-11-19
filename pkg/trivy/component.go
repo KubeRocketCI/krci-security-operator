@@ -3,8 +3,6 @@ package trivy
 import (
 	"strings"
 	"unicode"
-
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 const (
@@ -14,27 +12,6 @@ const (
 	annotationHelmRelease    = "meta.helm.sh/release-name"
 	labelInstance            = "app.kubernetes.io/instance"
 )
-
-// GVK returns the GroupVersionKind of the workload object whose labels and annotations name its component.
-// ok is false for a workload kind that carries no component.
-func (w Workload) GVK() (gvk schema.GroupVersionKind, ok bool) {
-	switch w.Kind {
-	case workloadDeployment:
-		return schema.GroupVersionKind{Group: groupApps, Version: "v1", Kind: kindDeployment}, true
-	case workloadStatefulSet:
-		return schema.GroupVersionKind{Group: groupApps, Version: "v1", Kind: "StatefulSet"}, true
-	case workloadDaemonSet:
-		return schema.GroupVersionKind{Group: groupApps, Version: "v1", Kind: "DaemonSet"}, true
-	case workloadCronJob:
-		return schema.GroupVersionKind{Group: groupBatch, Version: "v1", Kind: kindCronJob}, true
-	case workloadJob:
-		return schema.GroupVersionKind{Group: groupBatch, Version: "v1", Kind: kindJob}, true
-	case workloadPod:
-		return schema.GroupVersionKind{Version: "v1", Kind: "Pod"}, true
-	default:
-		return schema.GroupVersionKind{}, false
-	}
-}
 
 // Component returns the component a workload belongs to, as a tag-safe value, or "" when no source names one.
 // The first source present wins:
