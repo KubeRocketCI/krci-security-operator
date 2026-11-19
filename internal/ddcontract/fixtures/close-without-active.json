@@ -1,0 +1,734 @@
+{
+  "defectdojo": {
+    "version": "3.5.200",
+    "enable_deduplication": false
+  },
+  "scenario": "close-without-active",
+  "steps": [
+    {
+      "name": "first reimport of A, B with a build_id",
+      "result": {
+        "reimport": {
+          "test": 1,
+          "engagement": 1,
+          "product": 1
+        }
+      },
+      "state": {
+        "products": [
+          {
+            "ref": 1,
+            "name": "ddcontract/ns",
+            "tags": [],
+            "engagements": [
+              {
+                "ref": 1,
+                "name": "trivy-operator",
+                "tests": [
+                  {
+                    "ref": 1,
+                    "title": "VulnerabilityReport deployment/app/app",
+                    "scan_type": "Trivy Operator Scan",
+                    "version": "1.0",
+                    "build_id": "uid:1:aaaa",
+                    "tags": [],
+                    "findings": [
+                      {
+                        "ref": 1,
+                        "title": "cve-2026-0001 libssl 3.0.0",
+                        "severity": "High",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "c7ec24af8b1bc7eaef484c997d6f1e9b7dd30fada59653f778ad1ed972fa3e26",
+                        "active": true,
+                        "verified": false,
+                        "is_mitigated": false,
+                        "false_p": false,
+                        "risk_accepted": false,
+                        "out_of_scope": false
+                      },
+                      {
+                        "ref": 2,
+                        "title": "cve-2026-0002 libssl 3.0.0",
+                        "severity": "Low",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "8de8fa4418b95aa070e678373639f30bfb92647ce5a058fa807c4df898e3a0a6",
+                        "active": true,
+                        "verified": false,
+                        "is_mitigated": false,
+                        "false_p": false,
+                        "risk_accepted": false,
+                        "out_of_scope": false
+                      }
+                    ],
+                    "imports": [
+                      {
+                        "ref": 1,
+                        "type": "import",
+                        "created": [
+                          1,
+                          2
+                        ],
+                        "closed": [],
+                        "reactivated": [],
+                        "untouched": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "exchanges": [
+        {
+          "method": "POST",
+          "path": "/api/v2/reimport-scan/",
+          "form": [
+            [
+              "scan_type",
+              "Trivy Operator Scan"
+            ],
+            [
+              "product_type_name",
+              "ddcontract"
+            ],
+            [
+              "product_name",
+              "ddcontract/ns"
+            ],
+            [
+              "engagement_name",
+              "trivy-operator"
+            ],
+            [
+              "test_title",
+              "VulnerabilityReport deployment/app/app"
+            ],
+            [
+              "service",
+              "ns/Deployment/app/app"
+            ],
+            [
+              "version",
+              "1.0"
+            ],
+            [
+              "auto_create_context",
+              "true"
+            ],
+            [
+              "close_old_findings",
+              "true"
+            ],
+            [
+              "deduplication_on_engagement",
+              "true"
+            ],
+            [
+              "active",
+              "true"
+            ],
+            [
+              "verified",
+              "false"
+            ],
+            [
+              "minimum_severity",
+              "Info"
+            ],
+            [
+              "environment",
+              "Development"
+            ],
+            [
+              "push_to_jira",
+              "false"
+            ],
+            [
+              "scan_date",
+              "2026-01-01"
+            ],
+            [
+              "build_id",
+              "uid:1:aaaa"
+            ]
+          ],
+          "file": {
+            "kind": "VulnerabilityReport",
+            "metadata": {
+              "labels": {
+                "trivy-operator.container.name": "app",
+                "trivy-operator.resource.kind": "Deployment",
+                "trivy-operator.resource.name": "app",
+                "trivy-operator.resource.namespace": "ns"
+              }
+            },
+            "report": {
+              "vulnerabilities": [
+                {
+                  "fixedVersion": "3.0.1",
+                  "installedVersion": "3.0.0",
+                  "resource": "libssl",
+                  "severity": "HIGH",
+                  "title": "CVE-2026-0001 in libssl",
+                  "vulnerabilityID": "CVE-2026-0001"
+                },
+                {
+                  "fixedVersion": "3.0.2",
+                  "installedVersion": "3.0.0",
+                  "resource": "libssl",
+                  "severity": "LOW",
+                  "title": "CVE-2026-0002 in libssl",
+                  "vulnerabilityID": "CVE-2026-0002"
+                }
+              ]
+            }
+          },
+          "status": 201,
+          "response": {
+            "scan_date": "2026-01-01",
+            "minimum_severity": "Info",
+            "active": true,
+            "verified": false,
+            "endpoint_to_add": null,
+            "product_type_name": "ddcontract",
+            "product_name": "ddcontract/ns",
+            "engagement_name": "trivy-operator",
+            "test_title": "VulnerabilityReport deployment/app/app",
+            "auto_create_context": true,
+            "deduplication_on_engagement": true,
+            "lead": null,
+            "push_to_jira": false,
+            "deduplication_execution_mode": null,
+            "environment": "Development",
+            "build_id": "uid:1:aaaa",
+            "api_scan_configuration": null,
+            "service": "ns/Deployment/app/app",
+            "create_finding_groups_for_all_findings": true,
+            "test_id": 379,
+            "engagement_id": 113,
+            "product_id": 108,
+            "product_type_id": 77,
+            "statistics": {
+              "after": {
+                "info": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "low": {
+                  "active": 1,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 1
+                },
+                "medium": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "high": {
+                  "active": 1,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 1
+                },
+                "critical": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "total": {
+                  "active": 2,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 2
+                }
+              }
+            },
+            "deduplication_complete": false,
+            "apply_tags_to_findings": false,
+            "apply_tags_to_endpoints": false,
+            "do_not_reactivate": false,
+            "scan_type": "Trivy Operator Scan",
+            "test": 379,
+            "close_old_findings": true,
+            "close_old_findings_product_scope": false,
+            "version": "1.0"
+          }
+        }
+      ]
+    },
+    {
+      "name": "mark A a false positive",
+      "result": {},
+      "state": {
+        "products": [
+          {
+            "ref": 1,
+            "name": "ddcontract/ns",
+            "tags": [],
+            "engagements": [
+              {
+                "ref": 1,
+                "name": "trivy-operator",
+                "tests": [
+                  {
+                    "ref": 1,
+                    "title": "VulnerabilityReport deployment/app/app",
+                    "scan_type": "Trivy Operator Scan",
+                    "version": "1.0",
+                    "build_id": "uid:1:aaaa",
+                    "tags": [],
+                    "findings": [
+                      {
+                        "ref": 1,
+                        "title": "cve-2026-0001 libssl 3.0.0",
+                        "severity": "High",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "c7ec24af8b1bc7eaef484c997d6f1e9b7dd30fada59653f778ad1ed972fa3e26",
+                        "active": false,
+                        "verified": false,
+                        "is_mitigated": true,
+                        "false_p": true,
+                        "risk_accepted": false,
+                        "out_of_scope": false
+                      },
+                      {
+                        "ref": 2,
+                        "title": "cve-2026-0002 libssl 3.0.0",
+                        "severity": "Low",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "8de8fa4418b95aa070e678373639f30bfb92647ce5a058fa807c4df898e3a0a6",
+                        "active": true,
+                        "verified": false,
+                        "is_mitigated": false,
+                        "false_p": false,
+                        "risk_accepted": false,
+                        "out_of_scope": false
+                      }
+                    ],
+                    "imports": [
+                      {
+                        "ref": 1,
+                        "type": "import",
+                        "created": [
+                          1,
+                          2
+                        ],
+                        "closed": [],
+                        "reactivated": [],
+                        "untouched": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "mark B out of scope",
+      "result": {},
+      "state": {
+        "products": [
+          {
+            "ref": 1,
+            "name": "ddcontract/ns",
+            "tags": [],
+            "engagements": [
+              {
+                "ref": 1,
+                "name": "trivy-operator",
+                "tests": [
+                  {
+                    "ref": 1,
+                    "title": "VulnerabilityReport deployment/app/app",
+                    "scan_type": "Trivy Operator Scan",
+                    "version": "1.0",
+                    "build_id": "uid:1:aaaa",
+                    "tags": [],
+                    "findings": [
+                      {
+                        "ref": 1,
+                        "title": "cve-2026-0001 libssl 3.0.0",
+                        "severity": "High",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "c7ec24af8b1bc7eaef484c997d6f1e9b7dd30fada59653f778ad1ed972fa3e26",
+                        "active": false,
+                        "verified": false,
+                        "is_mitigated": true,
+                        "false_p": true,
+                        "risk_accepted": false,
+                        "out_of_scope": false
+                      },
+                      {
+                        "ref": 2,
+                        "title": "cve-2026-0002 libssl 3.0.0",
+                        "severity": "Low",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "8de8fa4418b95aa070e678373639f30bfb92647ce5a058fa807c4df898e3a0a6",
+                        "active": false,
+                        "verified": false,
+                        "is_mitigated": true,
+                        "false_p": false,
+                        "risk_accepted": false,
+                        "out_of_scope": true
+                      }
+                    ],
+                    "imports": [
+                      {
+                        "ref": 1,
+                        "type": "import",
+                        "created": [
+                          1,
+                          2
+                        ],
+                        "closed": [],
+                        "reactivated": [],
+                        "untouched": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "close the test",
+      "result": {
+        "close": {
+          "reimports": 0,
+          "one_by_one": 0
+        }
+      },
+      "state": {
+        "products": [
+          {
+            "ref": 1,
+            "name": "ddcontract/ns",
+            "tags": [],
+            "engagements": [
+              {
+                "ref": 1,
+                "name": "trivy-operator",
+                "tests": [
+                  {
+                    "ref": 1,
+                    "title": "VulnerabilityReport deployment/app/app",
+                    "scan_type": "Trivy Operator Scan",
+                    "version": "1.0",
+                    "build_id": "",
+                    "tags": [],
+                    "findings": [
+                      {
+                        "ref": 1,
+                        "title": "cve-2026-0001 libssl 3.0.0",
+                        "severity": "High",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "c7ec24af8b1bc7eaef484c997d6f1e9b7dd30fada59653f778ad1ed972fa3e26",
+                        "active": false,
+                        "verified": false,
+                        "is_mitigated": true,
+                        "false_p": true,
+                        "risk_accepted": false,
+                        "out_of_scope": false
+                      },
+                      {
+                        "ref": 2,
+                        "title": "cve-2026-0002 libssl 3.0.0",
+                        "severity": "Low",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "8de8fa4418b95aa070e678373639f30bfb92647ce5a058fa807c4df898e3a0a6",
+                        "active": false,
+                        "verified": false,
+                        "is_mitigated": true,
+                        "false_p": false,
+                        "risk_accepted": false,
+                        "out_of_scope": true
+                      }
+                    ],
+                    "imports": [
+                      {
+                        "ref": 1,
+                        "type": "import",
+                        "created": [
+                          1,
+                          2
+                        ],
+                        "closed": [],
+                        "reactivated": [],
+                        "untouched": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "exchanges": [
+        {
+          "method": "GET",
+          "path": "/api/v2/product_types/?limit=100\u0026name=ddcontract\u0026offset=0",
+          "status": 200,
+          "response": {
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "results": [
+              {
+                "id": 77,
+                "created": "2026-11-19T12:20:13.538574Z",
+                "updated": "2026-11-19T12:20:13.538591Z",
+                "name": "ddcontract",
+                "description": null,
+                "critical_product": false,
+                "key_product": false,
+                "archived_at": null,
+                "archive_batch": null,
+                "authorized_users": []
+              }
+            ],
+            "prefetch": {}
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/v2/products/?limit=100\u0026name_exact=ddcontract%2Fns\u0026offset=0\u0026prod_type=77",
+          "status": 200,
+          "response": {
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "results": [
+              {
+                "id": 108,
+                "findings_count": 0,
+                "findings_list": [],
+                "business_criticality": null,
+                "platform": null,
+                "lifecycle": null,
+                "origin": null,
+                "product_meta": [],
+                "created": "2026-11-19T12:20:13.548405Z",
+                "name": "ddcontract/ns",
+                "description": "ddcontract/ns",
+                "prod_numeric_grade": null,
+                "user_records": null,
+                "revenue": null,
+                "external_audience": false,
+                "internet_accessible": false,
+                "enable_product_tag_inheritance": false,
+                "enable_simple_risk_acceptance": false,
+                "enable_full_risk_acceptance": true,
+                "disable_sla_breach_notifications": false,
+                "archived_at": null,
+                "archive_batch": null,
+                "product_manager": null,
+                "technical_contact": null,
+                "team_manager": null,
+                "prod_type": 77,
+                "sla_configuration": 1,
+                "authorized_users": [],
+                "regulations": [],
+                "tags": []
+              }
+            ],
+            "prefetch": {}
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/v2/engagements/?limit=100\u0026name=trivy-operator\u0026offset=0\u0026product=108",
+          "status": 200,
+          "response": {
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "results": [
+              {
+                "id": 113,
+                "created": "2026-11-19T12:20:13.641979Z",
+                "updated": "2026-11-19T12:20:13.641991Z",
+                "name": "trivy-operator",
+                "description": null,
+                "version": null,
+                "first_contacted": null,
+                "target_start": "2026-11-19",
+                "target_end": "2027-11-19",
+                "reason": null,
+                "active": true,
+                "tracker": null,
+                "test_strategy": null,
+                "threat_model": true,
+                "api_test": true,
+                "pen_test": true,
+                "check_list": true,
+                "status": "In Progress",
+                "progress": "threat_model",
+                "tmodel_path": "none",
+                "done_testing": false,
+                "engagement_type": "CI/CD",
+                "build_id": null,
+                "commit_hash": null,
+                "branch_tag": null,
+                "source_code_management_uri": null,
+                "deduplication_on_engagement": true,
+                "archived_at": null,
+                "archive_batch": null,
+                "lead": 1,
+                "requester": null,
+                "preset": null,
+                "report_type": null,
+                "product": 108,
+                "cicd_scm_server": null,
+                "cicd_build_server": null,
+                "cicd_orchestration_engine": null,
+                "notes": [],
+                "files": [],
+                "risk_acceptance": [],
+                "tags": []
+              }
+            ]
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/v2/tests/?engagement=113\u0026limit=100\u0026offset=0\u0026scan_type=Trivy+Operator+Scan",
+          "status": 200,
+          "response": {
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "results": [
+              {
+                "id": 379,
+                "test_type_name": "Trivy Operator Scan",
+                "deduplication_algorithm": "hash_code",
+                "hash_code_fields": [
+                  "title",
+                  "severity",
+                  "vulnerability_ids",
+                  "description"
+                ],
+                "scan_type": "Trivy Operator Scan",
+                "title": "VulnerabilityReport deployment/app/app",
+                "description": null,
+                "target_start": "2026-01-01T00:00:00Z",
+                "target_end": "2026-01-01T00:00:00Z",
+                "percent_complete": 100,
+                "updated": "2026-11-19T12:20:16.037958Z",
+                "created": "2026-11-19T12:20:13.711062Z",
+                "version": "1.0",
+                "build_id": "uid:1:aaaa",
+                "commit_hash": "",
+                "branch_tag": "",
+                "archived_at": null,
+                "archive_batch": null,
+                "engagement": 113,
+                "lead": null,
+                "test_type": 152,
+                "environment": 1,
+                "api_scan_configuration": null,
+                "notes": [],
+                "files": [],
+                "tags": [],
+                "finding_groups": []
+              }
+            ],
+            "prefetch": {}
+          }
+        },
+        {
+          "method": "PATCH",
+          "path": "/api/v2/tests/379/",
+          "body": {
+            "build_id": ""
+          },
+          "status": 200,
+          "response": {
+            "id": 379,
+            "test_type_name": "Trivy Operator Scan",
+            "deduplication_algorithm": "hash_code",
+            "hash_code_fields": [
+              "title",
+              "severity",
+              "vulnerability_ids",
+              "description"
+            ],
+            "scan_type": "Trivy Operator Scan",
+            "title": "VulnerabilityReport deployment/app/app",
+            "description": null,
+            "target_start": "2026-01-01T00:00:00Z",
+            "target_end": "2026-01-01T00:00:00Z",
+            "percent_complete": 100,
+            "updated": "2026-11-19T12:20:22.528832Z",
+            "created": "2026-11-19T12:20:13.711062Z",
+            "version": "1.0",
+            "build_id": "",
+            "commit_hash": "",
+            "branch_tag": "",
+            "archived_at": null,
+            "archive_batch": null,
+            "engagement": 113,
+            "lead": null,
+            "test_type": 152,
+            "environment": 1,
+            "api_scan_configuration": null,
+            "notes": [],
+            "files": [],
+            "tags": [],
+            "finding_groups": []
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/v2/findings/?active=true\u0026is_mitigated=false\u0026limit=1\u0026test=379",
+          "status": 200,
+          "response": {
+            "count": 0,
+            "next": null,
+            "previous": null,
+            "results": [],
+            "prefetch": {}
+          }
+        }
+      ]
+    }
+  ]
+}
