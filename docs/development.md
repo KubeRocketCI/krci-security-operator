@@ -5,7 +5,9 @@
 | Path | Contents |
 |---|---|
 | `cmd/main.go` | manager setup: metrics, health probes, leader election; loads the module configuration and registers the module |
+| `cmd/ddcontract/` | runs the DefectDojo contract scenarios against a live DefectDojo: records or verifies the fixtures |
 | `internal/controller/trivy/` | the Trivy module: `Config` (environment parsing and validation), `SetupWithManager` (controller and sweeper), `Reconciler` (pass over a namespace), namespace exclusion, closing, event mapping |
+| `internal/ddcontract/` | the DefectDojo contract scenarios, their runner and outcome, and the fixtures recorded on a live DefectDojo (`fixtures/`) |
 | `pkg/defectdojo/` | minimal DefectDojo API v2 client with one lock per test for the reimport and the close |
 | `pkg/trivy/` | Trivy report parsing, image and workload resolution, paged listing, the namespace product, engagement, test title, tags and ownership, component tag |
 | `deploy-templates/` | Helm chart, the only deployment artifact |
@@ -35,7 +37,26 @@
 | `closing.go` | the namespace product lookup and the tests list of a pass (read before the first upload that no reimport of the process covers, and again after a pass that uploaded; the close rules use it), closing of stale and released tests, product tags; the sweeper that wakes namespaces for the controller |
 | `watch.go` | mapping of report events to namespaces |
 
-The unit tests use the fake client and a fake DefectDojo (`defectdojo_fake_test.go`) that models the DefectDojo reimport contract; `defectdojo_fake_contract_test.go` has one test per rule. There is no envtest suite. The event wiring in `SetupWithManager` is not unit-tested; the kind testbed covers it.
+The unit tests use the fake client and a fake DefectDojo (`defectdojo_fake_test.go`) that models the DefectDojo reimport contract; `defectdojo_fake_contract_test.go` has one test per rule, and `defectdojo_fake_replay_test.go` checks the fake against the recorded DefectDojo answers ([DefectDojo contract](#defectdojo-contract)). There is no envtest suite. The event wiring in `SetupWithManager` is not unit-tested; the kind testbed covers it.
+
+## DefectDojo contract
+
+`internal/ddcontract` holds scenarios: steps over the client calls of the operator (reimport into a new and an existing test, repeated entries, `build_id`, a failing first reimport, the empty reimport of a close and the close of one finding, the products, engagements, tests and findings lists, the product and test `PATCH`) and the triage a DefectDojo user does. After each step the outcome is read: the result of the call, and the products of the run with their engagements, tests (title, version, `build_id`, tags), findings (hash code, service, active, mitigated, triage flags) and import history actions. IDs become ordinals in the order they appear; titles are case-folded, as DefectDojo hashes them.
+
+`internal/ddcontract/fixtures/<scenario>.json` holds the outcome of every step recorded on DefectDojo 3.5.200 with deduplication off (the default), and the HTTP requests of the client with the answers. The token, the host and the run name are not stored; email addresses are replaced. A failed call is compared by its HTTP status and the form fields its body names.
+
+- `make test` replays every scenario on the fake DefectDojo and fails on a difference from the fixture (`TestFakeDefectDojo_ReplaysTheRecordedScenarios`).
+- `make test` also replays every scenario through the operator client against the recorded answers and fails when a request differs from the recorded one (`TestReplayRequests_TheClientSendsTheRecordedRequests`): method, path and query with IDs as `{id}`, form fields in order, the report, and JSON bodies with timestamps as `{time}`. A change of a client request needs `make defectdojo-record`.
+- `make defectdojo-verify` runs the scenarios on a live DefectDojo and lists every difference from the fixtures. `make defectdojo-record` writes the fixtures again.
+- Both need `DEFECTDOJO_URL` and `DEFECTDOJO_TOKEN` of a user that may create and delete product types; `SCENARIOS` limits the run. Both stop on a DefectDojo with `enable_deduplication` on, which the fake does not model; any version is accepted, and the version is read from `info.version` of `/api/v2/oa3/schema/`. Verify prints a note when the fixture was recorded on another version. Each scenario runs under its own product type `ddcontract-<random>`, deleted afterwards; `go run ./cmd/ddcontract -keep` keeps it for inspection, `-dir` writes or reads another fixtures directory. The try-kuberocketci testbed: the URL and the token are in the Secret `krci-security/defectdojo-credentials`.
+
+Run `make defectdojo-verify`:
+
+- before a release;
+- when the supported DefectDojo version changes: on the new version, then `make defectdojo-record`, `make test`, and the fake, this page and ADR 0007 follow the differences;
+- when a scenario is added or changed: `make defectdojo-record`, then `make test`.
+
+A change of the client calls (`pkg/defectdojo`) or of the fake adds or changes the scenario of the call.
 
 ## Upstream sources
 
@@ -62,18 +83,19 @@ DefectDojo files that define the reimport contract:
 | `dojo/tools/trivy_operator/` | parser: title, severity, vulnerability ids, description and service of each finding; a report without labels or result list gives no findings |
 | `dojo/settings/settings.dist.py` | `HASHCODE_FIELDS_PER_SCANNER["Trivy Operator Scan"]`, `HASH_CODE_FIELDS_ALWAYS` (service) |
 | `dojo/finding/models.py` | `hash_fields`, `get_vulnerability_ids`: how the hash is built; `Finding.service` (200 characters) |
-| `dojo/test/models.py` | `Test.title` (255 characters), `Test.version` (100 characters), `Test.build_id` (150 characters; the operator keeps it within 100, [ADR 0006](adr/0006-upload-marker-in-build-id.md)) |
+| `dojo/test/models.py` | `Test.title` (255 characters), `Test.version` (100 characters), `Test.build_id` (150 characters; the operator keeps it within 100, [ADR 0006](adr/0006-upload-marker-in-build-id.md)); `Test_Import` and `Test_Import_Finding_Action`: the import history, one entry per completed import or reimport, actions created, closed, reactivated, untouched |
 | `dojo/test/api/serializer.py` | `TestSerializer`: the tests list returns every model field, `build_id` included; a `PATCH` of `build_id` sets the upload marker of a new test and clears it on a close |
 | `dojo/validators.py` | `TAG_PATTERN`: a tag has no space, comma or quote |
 | `dojo/db_migrations/0066_django_tagulous.py` | tag `name` column (255 characters) |
-| `dojo/importers/default_importer.py` | the import that creates a test: one finding per entry, no matching |
-| `dojo/importers/default_reimporter.py` | `get_original_findings` (close set by service, findings of the test that are or are not active), `process_matched_finding` (reactivation, kept triage states), `close_old_findings` (an empty report mitigates the close set: [How a test is closed](trivy.md#how-a-test-is-closed)); candidates of a hash in ascending ID, the first one matched for every entry of the hash |
+| `dojo/importers/default_importer.py` | the import that creates a test: one finding per entry in report order, no matching; `create_test` saves the title, version, `build_id` and tags before the report is parsed |
+| `dojo/importers/default_reimporter.py` | `get_original_findings` (close set by service, findings of the test that are or are not active), `process_matched_finding` (reactivation, kept triage states), `close_old_findings` (an empty report mitigates the close set: [How a test is closed](trivy.md#how-a-test-is-closed)); candidates of a hash in ascending ID, the first one matched for every entry of the hash; the entries are sorted by hash code first (`dojo/finding/deduplication.py` `deduplication_ordering_key`), so the findings one reimport creates get their IDs in hash code order |
 | `dojo/importers/base_importer.py` | `update_test_meta` (version and `build_id`: an omitted field is stored as empty), `update_test_tags` (only a non-empty list is written), `mitigate_finding` (risk acceptance removed, a note per finding) |
 | `dojo/models.py` | statistics of a test: `statistics.after.total.active` counts the active findings of the whole test, every service |
 | `dojo/authorization/api_permissions.py` `UserHasReimportPermission` | a reimport by `test` ID needs the import permission on the test; an unknown test gives 400 |
 | `dojo/finding/api/views.py`, `dojo/finding/helper.py` | `findings/<id>/close/`, the one-by-one close: sets the mitigation time to the request time and only active findings are read |
 | `dojo/importers/auto_create_context.py` | product type conflict, last engagement and test by name |
-| `dojo/api_v2/serializers.py` | `ReImportScanSerializer`: form validation (`build_id` has no `max_length` and may not be blank), context and test created before the parser runs, a new test with its `build_id` |
+| `dojo/api_v2/serializers.py` | `ReImportScanSerializer`: form validation (no string field has a `max_length`, a value over its column fails the save with 500; a value may not be blank), context and test created before the parser runs, a new test with its `build_id`, the import that creates a test runs with `close_old_findings` off; `TagListSerializerField`: a value is split at commas and unpaired double quotes |
+| `dojo/finding/helper.py` `update_finding_status` | setting `false_p` or `out_of_scope` also mitigates the finding |
 | `dojo/product/api/filters.py` `ApiProductFilter` | `name_exact`, an `iexact` match on the product name: the product lookup by exact name uses it |
 | `dojo/authorization/api_permissions.py` `check_auto_create_permission` | permissions of a reimport that creates the Product Type, product and engagement |
 | `dojo/authorization/authorization.py`, `roles_permissions.py` | staff, superuser and `authorized_users` only; role assignments are not read |

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 
 	"golang.org/x/text/cases"
 
+	"github.com/KubeRocketCI/krci-security-operator/internal/ddcontract"
 	"github.com/KubeRocketCI/krci-security-operator/pkg/defectdojo"
 	"github.com/KubeRocketCI/krci-security-operator/pkg/trivy"
 )
@@ -71,8 +73,8 @@ type ddTest struct {
 	tags       []string
 }
 
-// ddFinding is a stored finding. active and isMitigated are separate fields, as in DefectDojo: a false positive
-// is inactive and not mitigated.
+// ddFinding is a stored finding. active and isMitigated are separate fields, as in DefectDojo: a risk accepted
+// finding is inactive and not mitigated.
 type ddFinding struct {
 	id            int
 	test          int
@@ -135,26 +137,37 @@ func (p parsedFinding) hash() string {
 	return hex.EncodeToString(sum[:])
 }
 
-// fakeDefectDojo models the DefectDojo 3.5.200 contract of the client calls the controller makes:
+// fakeDefectDojo models the DefectDojo 3.5.200 contract of the client calls the controller makes. The scenarios of
+// internal/ddcontract, recorded on a live DefectDojo, check it (defectdojo_fake_replay_test.go):
 //   - reimport-scan as the client sends it: auto_create_context, close_old_findings, active=true, verified=false
 //     and minimum_severity=Info are applied on every reimport, not read from the request;
 //   - the test is the latest one of the engagement with the scan type and title, else a new one;
 //   - a product of another product type is rejected;
-//   - the reimport that creates the test creates one finding per report entry, without matching;
-//   - on an existing test, findings match by hash code, the lowest ID first, and an entry that repeats a hash code
-//     matches that same finding, so the other finding with the hash code is not matched; a hash code that is new
-//     in the report gives one finding, however often it repeats; the request service replaces the parser service;
+//   - a new test is saved with its title, version, build_id and tags before the report is read, so a failed first
+//     reimport keeps them;
+//   - the reimport that creates the test creates one finding per report entry, in report order, without matching
+//     and without closing anything;
+//   - on an existing test, the entries are taken in hash code order: findings match by hash code, the lowest ID
+//     first, and an entry that repeats a hash code matches that same finding, so the other finding with the hash code
+//     is not matched; a hash code that is new in the report gives one finding, however often it repeats; the request
+//     service replaces the parser service;
 //   - the close set is the findings of the test with the request service, or without a service when none is sent;
 //   - a matched closed finding is reactivated; false positive, risk accepted and out of scope are kept;
 //     a finding of the close set missing from the report is closed and loses its risk acceptance;
-//   - the version and the build_id are written, empty included, after the findings changed; a new test is saved with
-//     its build_id before the report is read; the test tags are replaced when tags are sent;
+//   - the version and the build_id are written, empty included, after the findings changed; the test tags are
+//     replaced when tags are sent;
+//   - every reimport that completes adds an entry to the import history of the test: "import" for the one that
+//     created the test, "reimport" after it, with the findings created, closed, reactivated and matched untouched;
 //   - the lists are filtered as DefectDojo does: products by product type ID and name (contains, case-insensitive),
-//     engagements by product and name, tests by engagement and scan type; PATCH of product tags replaces them;
-//   - a form value of only whitespace or over its limit (service 200, version 100, test title and product name 255
-//     characters) is rejected with 400; a build_id has no limit in the form and fails at the save of the test with 500
-//     over 150 characters (the model limit), after the findings changed; a tag with a space, comma or quote or over
-//     255 characters is rejected with 400 and stored in lower case; invalid JSON gives 400, an unknown severity 500;
+//     engagements by product and name, tests by engagement and scan type; tags are returned sorted; PATCH of product
+//     tags replaces them, in their case;
+//   - a form value of only whitespace and a product name over 255 characters are rejected with 400; a tag is split at
+//     commas and unpaired double quotes, a tag with a space or a quote is rejected with 400, and a test tag is stored
+//     in lower case; invalid JSON gives 400, an unknown severity 500;
+//   - the form has no other limit: a value over its column fails the save with 500. A test title over 255, a version
+//     over 100, a build_id over 150 or a tag over 255 characters fail the save of the test: a new test is not
+//     created, an existing one fails after the findings changed. A service over 200 characters fails the save of the
+//     first finding, after a new test was created;
 //   - the lists return the build_id and the version of each test and mark the tests of the last engagement with the
 //     name; SetBuildID writes the build_id; CloseTest does what the client does, see there.
 //
@@ -167,6 +180,7 @@ type fakeDefectDojo struct {
 	engagements  map[int]*ddEngagement
 	tests        map[int]*ddTest
 	findings     map[int]*ddFinding
+	imports      []*ddImport
 	// lastID holds the last ID per object kind.
 	lastID map[string]int
 
@@ -186,6 +200,28 @@ type fakeDefectDojo struct {
 	listErr              error
 	tagErr               error
 	buildIDErr           error
+
+	// drift makes the fake differ from DefectDojo; only the replay test sets it.
+	drift fakeDrift
+}
+
+// fakeDrift holds differences from DefectDojo 3.5.200 that the replay of the recorded scenarios must detect.
+type fakeDrift struct {
+	// firstUploadMatches matches the entries of the reimport that creates the test.
+	firstUploadMatches bool
+	// buildIDAfterFindings saves a new test without its build_id and writes it after the findings.
+	buildIDAfterFindings bool
+}
+
+// ddImport is an entry of the import history of a test.
+type ddImport struct {
+	id          int
+	test        int
+	kind        string
+	created     []int
+	closed      []int
+	reactivated []int
+	untouched   []int
 }
 
 type tagCall struct {
@@ -244,56 +280,88 @@ func (f *fakeDefectDojo) reimport(r defectdojo.ReimportRequest) (defectdojo.Reim
 		return defectdojo.ReimportResult{}, err
 	}
 
-	if created {
-		f.createFindings(test.id, r.Service, parsed)
-	} else {
-		f.applyFindings(test.id, r.Service, parsed)
+	if len(parsed) > 0 && utf8.RuneCountInString(r.Service) > maxServiceLen {
+		return defectdojo.ReimportResult{}, internalServerError()
 	}
 
-	if utf8.RuneCountInString(r.BuildID) > maxBuildIDLen {
-		return defectdojo.ReimportResult{}, &defectdojo.APIError{
-			StatusCode: http.StatusInternalServerError, Body: "Internal Server Error",
-		}
+	history := &ddImport{test: test.id, kind: ddcontract.ImportTypeReimport}
+
+	if created && !f.drift.firstUploadMatches {
+		history.kind = ddcontract.ImportTypeImport
+		f.createFindings(test.id, r.Service, parsed, history)
+	} else {
+		f.applyFindings(test.id, r.Service, parsed, history)
+	}
+
+	if testColumnsOverflow(r) {
+		return defectdojo.ReimportResult{}, internalServerError()
 	}
 
 	test.version = r.Version
 	test.buildID = r.BuildID
 
 	if len(r.Tags) > 0 {
-		test.tags = slices.Clone(r.Tags)
+		test.tags = r.Tags
 	}
+
+	history.id = f.nextID("import")
+	f.imports = append(f.imports, history)
 
 	engagement := f.engagements[test.engagement]
 
 	return defectdojo.ReimportResult{TestID: test.id, EngagementID: engagement.id, ProductID: engagement.product}, nil
 }
 
+// Column limits of the models; the form does not check them, the save of the row fails with 500.
+const (
+	maxTitleLen       = 255
+	maxProductNameLen = 255
+	maxVersionLen     = 100
+	maxServiceLen     = 200
+	maxTagLen         = 255
+)
+
+// testColumnsOverflow reports whether the save of the test fails: a column of the test or a tag is too long.
+func testColumnsOverflow(r defectdojo.ReimportRequest) bool {
+	if utf8.RuneCountInString(r.Version) > maxVersionLen || utf8.RuneCountInString(r.BuildID) > maxBuildIDLen {
+		return true
+	}
+
+	return slices.ContainsFunc(r.Tags, func(tag string) bool { return utf8.RuneCountInString(tag) > maxTagLen })
+}
+
+func internalServerError() error {
+	return &defectdojo.APIError{StatusCode: http.StatusInternalServerError, Body: "Internal Server Error"}
+}
+
 // validateForm applies the DRF CharField rules to the string fields: an empty value is not sent, a value is
-// stripped, a value of only whitespace is rejected, and a value over max_length characters is rejected.
+// stripped and a value of only whitespace is rejected. The product name is checked against its model limit when the
+// product is created.
 func validateForm(r defectdojo.ReimportRequest) (defectdojo.ReimportRequest, error) {
-	for name, field := range map[string]struct {
+	for _, field := range []struct {
+		name  string
 		value *string
-		limit int
 	}{
-		"product_type_name": {&r.ProductType, 0},
-		"product_name":      {&r.Product, 255},
-		"engagement_name":   {&r.Engagement, 0},
-		"test_title":        {&r.TestTitle, 255},
-		"service":           {&r.Service, 200},
-		"version":           {&r.Version, 100},
-		"build_id":          {&r.BuildID, 0},
+		{"product_type_name", &r.ProductType},
+		{"product_name", &r.Product},
+		{"engagement_name", &r.Engagement},
+		{"test_title", &r.TestTitle},
+		{"service", &r.Service},
+		{"version", &r.Version},
+		{"build_id", &r.BuildID},
 	} {
 		if *field.value == "" {
 			continue
 		}
 
 		if *field.value = strings.TrimSpace(*field.value); *field.value == "" {
-			return r, badRequest(fmt.Sprintf(`{%q:["This field may not be blank."]}`, name))
+			return r, badRequest(fmt.Sprintf(`{%q:["This field may not be blank."]}`, field.name))
 		}
+	}
 
-		if field.limit > 0 && utf8.RuneCountInString(*field.value) > field.limit {
-			return r, badRequest(fmt.Sprintf(`{%q:["Ensure this field has no more than %d characters."]}`, name, field.limit))
-		}
+	if n := utf8.RuneCountInString(r.Product); n > maxProductNameLen {
+		return r, badRequest(fmt.Sprintf(`{"message":"name: Ensure this value has at most %d characters (it has %d)."}`,
+			maxProductNameLen, n))
 	}
 
 	tags, err := validateTags(r.Tags)
@@ -306,28 +374,32 @@ func validateForm(r defectdojo.ReimportRequest) (defectdojo.ReimportRequest, err
 	return r, nil
 }
 
-// validateTags applies the TagListSerializerField rules: a tag has no space, comma, single quote or double quote
-// (TAG_PATTERN), at most 255 characters (the tag name column), and is stored in lower case.
+// tagPart is a tag of a tags field value: a quoted run or a run without commas and double quotes.
+var tagPart = regexp.MustCompile(`"[^"]*"|[^",]+`)
+
+// validateTags applies the TagListSerializerField rules: each value is split into its tag parts, a part with a
+// space, comma, single quote or double quote (TAG_PATTERN) is rejected. A test tag is stored in lower case and
+// returned sorted.
 func validateTags(tags []string) ([]string, error) {
 	stored := make([]string, 0, len(tags))
 
-	for _, tag := range tags {
-		if strings.ContainsAny(tag, ` ,'"`) {
-			return nil, badRequest(fmt.Sprintf(`{"tags":["Invalid tag %q: it must not contain a space, a comma or a quote."]}`, tag))
-		}
+	for _, value := range tags {
+		for _, tag := range tagPart.FindAllString(value, -1) {
+			if strings.ContainsAny(tag, ` ,'"`) {
+				return nil, badRequest(fmt.Sprintf(`{"tags":["Invalid tag: '%s'. Tags should not contain spaces, commas, or quotes."]}`, tag))
+			}
 
-		if utf8.RuneCountInString(tag) > 255 {
-			return nil, badRequest(`{"tags":["Ensure this tag has no more than 255 characters."]}`)
+			stored = append(stored, strings.ToLower(tag))
 		}
-
-		stored = append(stored, strings.ToLower(tag))
 	}
+
+	slices.Sort(stored)
 
 	return stored, nil
 }
 
 // targetTest finds the test of the request, or creates it with its missing product type, product and engagement;
-// created reports the latter. A new test is saved with the build_id of the request.
+// created reports the latter. A new test is saved with the title, version, build_id and tags of the request.
 func (f *fakeDefectDojo) targetTest(r defectdojo.ReimportRequest) (test *ddTest, created bool, err error) {
 	product := f.productNamed(r.Product)
 
@@ -348,34 +420,41 @@ func (f *fakeDefectDojo) targetTest(r defectdojo.ReimportRequest) (test *ddTest,
 		return nil, false, badRequest("product_type_name parameter missing")
 	}
 
-	if utf8.RuneCountInString(r.BuildID) > maxBuildIDLen {
-		return nil, false, &defectdojo.APIError{StatusCode: http.StatusInternalServerError, Body: "Internal Server Error"}
-	}
-
 	engagement := f.ensureContext(ddContext{productType: r.ProductType, product: r.Product, engagement: r.Engagement})
 
-	test = f.addTest(engagement.id, f.nextID("test"), defectdojo.ScanTypeTrivyOperator, r.TestTitle, nil)
-	test.buildID = r.BuildID
+	if utf8.RuneCountInString(r.TestTitle) > maxTitleLen || testColumnsOverflow(r) {
+		return nil, false, internalServerError()
+	}
+
+	test = f.addTest(engagement.id, f.nextID("test"), defectdojo.ScanTypeTrivyOperator, r.TestTitle, r.Tags)
+	test.version = r.Version
+
+	if !f.drift.buildIDAfterFindings {
+		test.buildID = r.BuildID
+	}
 
 	return test, true, nil
 }
 
-// createFindings stores one finding per parsed entry, as the import into a new test does: no matching, so entries
-// with an equal hash code give equal findings.
-func (f *fakeDefectDojo) createFindings(testID int, service string, parsed []parsedFinding) {
+// createFindings stores one finding per parsed entry, in report order, as the import into a new test does: no
+// matching, so entries with an equal hash code give equal findings.
+func (f *fakeDefectDojo) createFindings(testID int, service string, parsed []parsedFinding, history *ddImport) {
 	for _, p := range parsed {
 		if service != "" {
 			p.service = service
 		}
 
-		f.addFinding(testID, p)
+		history.created = append(history.created, f.addFinding(testID, p).id)
 	}
 }
 
-// applyFindings matches the parsed findings to the findings of the test and closes the rest of the close set.
-func (f *fakeDefectDojo) applyFindings(testID int, service string, parsed []parsedFinding) {
+// applyFindings matches the parsed findings, in hash code order, to the findings of the test and closes the rest
+// of the close set.
+func (f *fakeDefectDojo) applyFindings(testID int, service string, parsed []parsedFinding, history *ddImport) {
 	closeSet := map[int]struct{}{}
 	byHash := map[string]*ddFinding{}
+	created := map[int]struct{}{}
+	matched := map[int]struct{}{}
 
 	for _, existing := range f.findingsOf(testID) {
 		if existing.service == service {
@@ -387,38 +466,77 @@ func (f *fakeDefectDojo) applyFindings(testID int, service string, parsed []pars
 		}
 	}
 
-	for _, p := range parsed {
-		if service != "" {
-			p.service = service
-		}
+	for _, entry := range sortedByHash(parsed, service) {
+		if existing, ok := byHash[entry.code]; ok {
+			if matchFinding(existing) {
+				history.reactivated = append(history.reactivated, existing.id)
+			} else if _, isNew := created[existing.id]; !isNew {
+				matched[existing.id] = struct{}{}
+			}
 
-		if existing, ok := byHash[p.hash()]; ok {
-			matchFinding(existing)
 			delete(closeSet, existing.id)
 
 			continue
 		}
 
-		byHash[p.hash()] = f.addFinding(testID, p)
+		found := f.addFinding(testID, entry.parsedFinding)
+		byHash[entry.code] = found
+		created[found.id] = struct{}{}
+		history.created = append(history.created, found.id)
 	}
 
-	for id := range closeSet {
+	for _, id := range slices.Sorted(maps.Keys(closeSet)) {
 		if found := f.findings[id]; !found.isMitigated {
 			found.mitigate()
 			found.riskAccepted = false
+
+			history.closed = append(history.closed, id)
+		}
+	}
+
+	for _, id := range slices.Sorted(maps.Keys(matched)) {
+		if !slices.Contains(history.reactivated, id) {
+			history.untouched = append(history.untouched, id)
 		}
 	}
 }
 
-// matchFinding updates a finding the report holds again: only a closed finding without a triage state changes.
-func matchFinding(existing *ddFinding) {
+// hashedFinding is a parsed finding with its hash code.
+type hashedFinding struct {
+	parsedFinding
+	code string
+}
+
+// sortedByHash returns the entries with the request service, ordered by hash code; entries with an equal hash code
+// keep their order.
+func sortedByHash(parsed []parsedFinding, service string) []hashedFinding {
+	out := make([]hashedFinding, 0, len(parsed))
+
+	for _, p := range parsed {
+		if service != "" {
+			p.service = service
+		}
+
+		out = append(out, hashedFinding{parsedFinding: p, code: p.hash()})
+	}
+
+	slices.SortStableFunc(out, func(a, b hashedFinding) int { return strings.Compare(a.code, b.code) })
+
+	return out
+}
+
+// matchFinding updates a finding the report holds again: only a closed finding without a triage state changes. It
+// reports whether the finding was reactivated.
+func matchFinding(existing *ddFinding) bool {
 	if existing.falsePositive || existing.outOfScope || existing.riskAccepted || !existing.isMitigated {
-		return
+		return false
 	}
 
 	existing.isMitigated = false
 	existing.active = true
 	existing.verified = false
+
+	return true
 }
 
 // ListProducts returns, ordered by ID, the products of the product type whose name contains name.
@@ -538,10 +656,13 @@ func (f *fakeDefectDojo) CloseTest(_ context.Context, test defectdojo.Test) (def
 			break
 		}
 
-		f.applyFindings(test.ID, f.findingsOf(test.ID)[first].service, nil)
+		history := &ddImport{test: test.ID, kind: ddcontract.ImportTypeReimport}
+		f.applyFindings(test.ID, f.findingsOf(test.ID)[first].service, nil, history)
 
 		stored.buildID = ""
 		stored.version = test.Version
+		history.id = f.nextID("import")
+		f.imports = append(f.imports, history)
 		res.Reimports++
 	}
 
@@ -590,7 +711,7 @@ func (f *fakeDefectDojo) SetProductTags(_ context.Context, productID int, tags [
 		return &defectdojo.APIError{StatusCode: http.StatusNotFound, Body: `{"detail":"Not found."}`}
 	}
 
-	product.tags = slices.Clone(tags)
+	product.tags = slices.Sorted(slices.Values(tags))
 
 	return nil
 }
@@ -691,7 +812,8 @@ func (f *fakeDefectDojo) seedFinding(testID int, title, service string) {
 	f.addFinding(testID, parsedFinding{title: title, severity: "Info", service: service})
 }
 
-// triage sets a triage state as a user does in DefectDojo: the finding becomes inactive.
+// triage sets a triage state as a user does in DefectDojo: the finding becomes inactive. A false positive or out of
+// scope finding is also mitigated (dojo/finding/helper.py update_finding_status); a risk acceptance is not.
 func (f *fakeDefectDojo) triage(findingID int, status string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -701,10 +823,12 @@ func (f *fakeDefectDojo) triage(findingID int, status string) {
 	switch status {
 	case statusFalsePositive:
 		found.falsePositive = true
+		found.isMitigated = true
 	case statusRiskAccepted:
 		found.riskAccepted = true
 	case statusOutOfScope:
 		found.outOfScope = true
+		found.isMitigated = true
 	default:
 		panic("not a triage state: " + status)
 	}

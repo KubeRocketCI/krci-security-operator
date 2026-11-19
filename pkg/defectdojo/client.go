@@ -271,8 +271,9 @@ func (c *Client) Reimport(ctx context.Context, r ReimportRequest) (ReimportResul
 // A reimport that fails is replaced by closing the active findings one by one, unless the failure is not about this
 // request (see reimportFallsBack): then it is returned.
 //
-// The reimport also mitigates the findings of its service that are not active (false positive, out of scope,
-// duplicate, inactive) and removes their risk acceptances. Closing one by one touches only active findings.
+// The reimport also mitigates the findings of its service that are not active and not mitigated, such as a risk
+// accepted one, and removes their risk acceptances; DefectDojo mitigates a finding when false_p or out_of_scope is set
+// on it. Closing one by one touches only active findings.
 func (c *Client) CloseTest(ctx context.Context, test Test) (CloseResult, error) {
 	// The lock key is the product, engagement and title that Reimport uses.
 	if test.Product == "" || test.Engagement == "" || test.Title == "" {

@@ -130,7 +130,7 @@ func TestReconcile_TestCarriesExactlyTheTagsOfItsWorkloadAndImage(t *testing.T) 
 		h := newHarness(t, withReports(goAppObjects(), goApp(t)))
 		testID := h.onlyTest()
 
-		assert.Equal(t, []string{
+		assert.ElementsMatch(t, []string{
 			"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
 			"k8s-workload:deployment.test-go-app", "k8s-container:test-go-app", image,
 		}, h.dd.test(testID).tags)
@@ -146,7 +146,7 @@ func TestReconcile_TestCarriesExactlyTheTagsOfItsWorkloadAndImage(t *testing.T) 
 		h := newHarness(t, withReports(objects, goApp(t)))
 		testID := h.onlyTest()
 
-		assert.Equal(t, []string{
+		assert.ElementsMatch(t, []string{
 			"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
 			"k8s-workload:deployment.test-go-app", "k8s-container:test-go-app", image, "app:shop",
 		}, h.dd.test(testID).tags)
@@ -160,7 +160,7 @@ func TestReconcile_TestCarriesExactlyTheTagsOfItsWorkloadAndImage(t *testing.T) 
 
 		h.reconcile()
 
-		assert.Equal(t, []string{
+		assert.ElementsMatch(t, []string{
 			"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
 			"k8s-workload:deployment.test-go-app", "k8s-container:test-go-app",
 			"oci-image:gitlab.127.0.0.1.nip.io:5050/krci/other-app",
@@ -171,7 +171,7 @@ func TestReconcile_TestCarriesExactlyTheTagsOfItsWorkloadAndImage(t *testing.T) 
 		h := newHarness(t, withReports(goAppObjects(), goAppSecrets(t)))
 		testID := h.onlyTest()
 
-		assert.Equal(t, []string{
+		assert.ElementsMatch(t, []string{
 			"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
 			"k8s-workload:deployment.test-go-app", "k8s-container:test-go-app", image,
 		}, h.dd.test(testID).tags)

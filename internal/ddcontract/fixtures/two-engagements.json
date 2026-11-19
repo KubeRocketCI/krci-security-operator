@@ -1,0 +1,1920 @@
+{
+  "defectdojo": {
+    "version": "3.5.200",
+    "enable_deduplication": false
+  },
+  "scenario": "two-engagements",
+  "steps": [
+    {
+      "name": "first reimport of A",
+      "result": {
+        "reimport": {
+          "test": 1,
+          "engagement": 1,
+          "product": 1
+        }
+      },
+      "state": {
+        "products": [
+          {
+            "ref": 1,
+            "name": "ddcontract/ns",
+            "tags": [],
+            "engagements": [
+              {
+                "ref": 1,
+                "name": "trivy-operator",
+                "tests": [
+                  {
+                    "ref": 1,
+                    "title": "VulnerabilityReport deployment/app/app",
+                    "scan_type": "Trivy Operator Scan",
+                    "version": "1.0",
+                    "build_id": "",
+                    "tags": [],
+                    "findings": [
+                      {
+                        "ref": 1,
+                        "title": "cve-2026-0001 libssl 3.0.0",
+                        "severity": "High",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "c7ec24af8b1bc7eaef484c997d6f1e9b7dd30fada59653f778ad1ed972fa3e26",
+                        "active": true,
+                        "verified": false,
+                        "is_mitigated": false,
+                        "false_p": false,
+                        "risk_accepted": false,
+                        "out_of_scope": false
+                      }
+                    ],
+                    "imports": [
+                      {
+                        "ref": 1,
+                        "type": "import",
+                        "created": [
+                          1
+                        ],
+                        "closed": [],
+                        "reactivated": [],
+                        "untouched": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "exchanges": [
+        {
+          "method": "POST",
+          "path": "/api/v2/reimport-scan/",
+          "form": [
+            [
+              "scan_type",
+              "Trivy Operator Scan"
+            ],
+            [
+              "product_type_name",
+              "ddcontract"
+            ],
+            [
+              "product_name",
+              "ddcontract/ns"
+            ],
+            [
+              "engagement_name",
+              "trivy-operator"
+            ],
+            [
+              "test_title",
+              "VulnerabilityReport deployment/app/app"
+            ],
+            [
+              "service",
+              "ns/Deployment/app/app"
+            ],
+            [
+              "version",
+              "1.0"
+            ],
+            [
+              "auto_create_context",
+              "true"
+            ],
+            [
+              "close_old_findings",
+              "true"
+            ],
+            [
+              "deduplication_on_engagement",
+              "true"
+            ],
+            [
+              "active",
+              "true"
+            ],
+            [
+              "verified",
+              "false"
+            ],
+            [
+              "minimum_severity",
+              "Info"
+            ],
+            [
+              "environment",
+              "Development"
+            ],
+            [
+              "push_to_jira",
+              "false"
+            ],
+            [
+              "scan_date",
+              "2026-01-01"
+            ]
+          ],
+          "file": {
+            "kind": "VulnerabilityReport",
+            "metadata": {
+              "labels": {
+                "trivy-operator.container.name": "app",
+                "trivy-operator.resource.kind": "Deployment",
+                "trivy-operator.resource.name": "app",
+                "trivy-operator.resource.namespace": "ns"
+              }
+            },
+            "report": {
+              "vulnerabilities": [
+                {
+                  "fixedVersion": "3.0.1",
+                  "installedVersion": "3.0.0",
+                  "resource": "libssl",
+                  "severity": "HIGH",
+                  "title": "CVE-2026-0001 in libssl",
+                  "vulnerabilityID": "CVE-2026-0001"
+                }
+              ]
+            }
+          },
+          "status": 201,
+          "response": {
+            "scan_date": "2026-01-01",
+            "minimum_severity": "Info",
+            "active": true,
+            "verified": false,
+            "endpoint_to_add": null,
+            "product_type_name": "ddcontract",
+            "product_name": "ddcontract/ns",
+            "engagement_name": "trivy-operator",
+            "test_title": "VulnerabilityReport deployment/app/app",
+            "auto_create_context": true,
+            "deduplication_on_engagement": true,
+            "lead": null,
+            "push_to_jira": false,
+            "deduplication_execution_mode": null,
+            "environment": "Development",
+            "api_scan_configuration": null,
+            "service": "ns/Deployment/app/app",
+            "create_finding_groups_for_all_findings": true,
+            "test_id": 385,
+            "engagement_id": 117,
+            "product_id": 112,
+            "product_type_id": 81,
+            "statistics": {
+              "after": {
+                "info": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "low": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "medium": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "high": {
+                  "active": 1,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 1
+                },
+                "critical": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "total": {
+                  "active": 1,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 1
+                }
+              }
+            },
+            "deduplication_complete": false,
+            "apply_tags_to_findings": false,
+            "apply_tags_to_endpoints": false,
+            "do_not_reactivate": false,
+            "scan_type": "Trivy Operator Scan",
+            "test": 385,
+            "close_old_findings": true,
+            "close_old_findings_product_scope": false,
+            "version": "1.0"
+          }
+        }
+      ]
+    },
+    {
+      "name": "add another engagement with the name",
+      "result": {},
+      "state": {
+        "products": [
+          {
+            "ref": 1,
+            "name": "ddcontract/ns",
+            "tags": [],
+            "engagements": [
+              {
+                "ref": 1,
+                "name": "trivy-operator",
+                "tests": [
+                  {
+                    "ref": 1,
+                    "title": "VulnerabilityReport deployment/app/app",
+                    "scan_type": "Trivy Operator Scan",
+                    "version": "1.0",
+                    "build_id": "",
+                    "tags": [],
+                    "findings": [
+                      {
+                        "ref": 1,
+                        "title": "cve-2026-0001 libssl 3.0.0",
+                        "severity": "High",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "c7ec24af8b1bc7eaef484c997d6f1e9b7dd30fada59653f778ad1ed972fa3e26",
+                        "active": true,
+                        "verified": false,
+                        "is_mitigated": false,
+                        "false_p": false,
+                        "risk_accepted": false,
+                        "out_of_scope": false
+                      }
+                    ],
+                    "imports": [
+                      {
+                        "ref": 1,
+                        "type": "import",
+                        "created": [
+                          1
+                        ],
+                        "closed": [],
+                        "reactivated": [],
+                        "untouched": []
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "ref": 2,
+                "name": "trivy-operator",
+                "tests": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "reimport A",
+      "result": {
+        "reimport": {
+          "test": 2,
+          "engagement": 2,
+          "product": 1
+        }
+      },
+      "state": {
+        "products": [
+          {
+            "ref": 1,
+            "name": "ddcontract/ns",
+            "tags": [],
+            "engagements": [
+              {
+                "ref": 1,
+                "name": "trivy-operator",
+                "tests": [
+                  {
+                    "ref": 1,
+                    "title": "VulnerabilityReport deployment/app/app",
+                    "scan_type": "Trivy Operator Scan",
+                    "version": "1.0",
+                    "build_id": "",
+                    "tags": [],
+                    "findings": [
+                      {
+                        "ref": 1,
+                        "title": "cve-2026-0001 libssl 3.0.0",
+                        "severity": "High",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "c7ec24af8b1bc7eaef484c997d6f1e9b7dd30fada59653f778ad1ed972fa3e26",
+                        "active": true,
+                        "verified": false,
+                        "is_mitigated": false,
+                        "false_p": false,
+                        "risk_accepted": false,
+                        "out_of_scope": false
+                      }
+                    ],
+                    "imports": [
+                      {
+                        "ref": 1,
+                        "type": "import",
+                        "created": [
+                          1
+                        ],
+                        "closed": [],
+                        "reactivated": [],
+                        "untouched": []
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "ref": 2,
+                "name": "trivy-operator",
+                "tests": [
+                  {
+                    "ref": 2,
+                    "title": "VulnerabilityReport deployment/app/app",
+                    "scan_type": "Trivy Operator Scan",
+                    "version": "1.0",
+                    "build_id": "",
+                    "tags": [],
+                    "findings": [
+                      {
+                        "ref": 2,
+                        "title": "cve-2026-0001 libssl 3.0.0",
+                        "severity": "High",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "c7ec24af8b1bc7eaef484c997d6f1e9b7dd30fada59653f778ad1ed972fa3e26",
+                        "active": true,
+                        "verified": false,
+                        "is_mitigated": false,
+                        "false_p": false,
+                        "risk_accepted": false,
+                        "out_of_scope": false
+                      }
+                    ],
+                    "imports": [
+                      {
+                        "ref": 2,
+                        "type": "import",
+                        "created": [
+                          2
+                        ],
+                        "closed": [],
+                        "reactivated": [],
+                        "untouched": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "exchanges": [
+        {
+          "method": "POST",
+          "path": "/api/v2/reimport-scan/",
+          "form": [
+            [
+              "scan_type",
+              "Trivy Operator Scan"
+            ],
+            [
+              "product_type_name",
+              "ddcontract"
+            ],
+            [
+              "product_name",
+              "ddcontract/ns"
+            ],
+            [
+              "engagement_name",
+              "trivy-operator"
+            ],
+            [
+              "test_title",
+              "VulnerabilityReport deployment/app/app"
+            ],
+            [
+              "service",
+              "ns/Deployment/app/app"
+            ],
+            [
+              "version",
+              "1.0"
+            ],
+            [
+              "auto_create_context",
+              "true"
+            ],
+            [
+              "close_old_findings",
+              "true"
+            ],
+            [
+              "deduplication_on_engagement",
+              "true"
+            ],
+            [
+              "active",
+              "true"
+            ],
+            [
+              "verified",
+              "false"
+            ],
+            [
+              "minimum_severity",
+              "Info"
+            ],
+            [
+              "environment",
+              "Development"
+            ],
+            [
+              "push_to_jira",
+              "false"
+            ],
+            [
+              "scan_date",
+              "2026-01-01"
+            ]
+          ],
+          "file": {
+            "kind": "VulnerabilityReport",
+            "metadata": {
+              "labels": {
+                "trivy-operator.container.name": "app",
+                "trivy-operator.resource.kind": "Deployment",
+                "trivy-operator.resource.name": "app",
+                "trivy-operator.resource.namespace": "ns"
+              }
+            },
+            "report": {
+              "vulnerabilities": [
+                {
+                  "fixedVersion": "3.0.1",
+                  "installedVersion": "3.0.0",
+                  "resource": "libssl",
+                  "severity": "HIGH",
+                  "title": "CVE-2026-0001 in libssl",
+                  "vulnerabilityID": "CVE-2026-0001"
+                }
+              ]
+            }
+          },
+          "status": 201,
+          "response": {
+            "scan_date": "2026-01-01",
+            "minimum_severity": "Info",
+            "active": true,
+            "verified": false,
+            "endpoint_to_add": null,
+            "product_type_name": "ddcontract",
+            "product_name": "ddcontract/ns",
+            "engagement_name": "trivy-operator",
+            "test_title": "VulnerabilityReport deployment/app/app",
+            "auto_create_context": true,
+            "deduplication_on_engagement": true,
+            "lead": null,
+            "push_to_jira": false,
+            "deduplication_execution_mode": null,
+            "environment": "Development",
+            "api_scan_configuration": null,
+            "service": "ns/Deployment/app/app",
+            "create_finding_groups_for_all_findings": true,
+            "test_id": 386,
+            "engagement_id": 118,
+            "product_id": 112,
+            "product_type_id": 81,
+            "statistics": {
+              "after": {
+                "info": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "low": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "medium": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "high": {
+                  "active": 1,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 1
+                },
+                "critical": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "total": {
+                  "active": 1,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 1
+                }
+              }
+            },
+            "deduplication_complete": false,
+            "apply_tags_to_findings": false,
+            "apply_tags_to_endpoints": false,
+            "do_not_reactivate": false,
+            "scan_type": "Trivy Operator Scan",
+            "test": 386,
+            "close_old_findings": true,
+            "close_old_findings_product_scope": false,
+            "version": "1.0"
+          }
+        }
+      ]
+    },
+    {
+      "name": "list the tests",
+      "result": {
+        "tests": [
+          {
+            "ref": 1,
+            "title": "VulnerabilityReport deployment/app/app",
+            "scan_type": "Trivy Operator Scan",
+            "tags": [],
+            "build_id": "",
+            "version": "1.0",
+            "last_engagement": false,
+            "product": "ddcontract/ns",
+            "engagement": "trivy-operator"
+          },
+          {
+            "ref": 2,
+            "title": "VulnerabilityReport deployment/app/app",
+            "scan_type": "Trivy Operator Scan",
+            "tags": [],
+            "build_id": "",
+            "version": "1.0",
+            "last_engagement": true,
+            "product": "ddcontract/ns",
+            "engagement": "trivy-operator"
+          }
+        ]
+      },
+      "state": {
+        "products": [
+          {
+            "ref": 1,
+            "name": "ddcontract/ns",
+            "tags": [],
+            "engagements": [
+              {
+                "ref": 1,
+                "name": "trivy-operator",
+                "tests": [
+                  {
+                    "ref": 1,
+                    "title": "VulnerabilityReport deployment/app/app",
+                    "scan_type": "Trivy Operator Scan",
+                    "version": "1.0",
+                    "build_id": "",
+                    "tags": [],
+                    "findings": [
+                      {
+                        "ref": 1,
+                        "title": "cve-2026-0001 libssl 3.0.0",
+                        "severity": "High",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "c7ec24af8b1bc7eaef484c997d6f1e9b7dd30fada59653f778ad1ed972fa3e26",
+                        "active": true,
+                        "verified": false,
+                        "is_mitigated": false,
+                        "false_p": false,
+                        "risk_accepted": false,
+                        "out_of_scope": false
+                      }
+                    ],
+                    "imports": [
+                      {
+                        "ref": 1,
+                        "type": "import",
+                        "created": [
+                          1
+                        ],
+                        "closed": [],
+                        "reactivated": [],
+                        "untouched": []
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "ref": 2,
+                "name": "trivy-operator",
+                "tests": [
+                  {
+                    "ref": 2,
+                    "title": "VulnerabilityReport deployment/app/app",
+                    "scan_type": "Trivy Operator Scan",
+                    "version": "1.0",
+                    "build_id": "",
+                    "tags": [],
+                    "findings": [
+                      {
+                        "ref": 2,
+                        "title": "cve-2026-0001 libssl 3.0.0",
+                        "severity": "High",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "c7ec24af8b1bc7eaef484c997d6f1e9b7dd30fada59653f778ad1ed972fa3e26",
+                        "active": true,
+                        "verified": false,
+                        "is_mitigated": false,
+                        "false_p": false,
+                        "risk_accepted": false,
+                        "out_of_scope": false
+                      }
+                    ],
+                    "imports": [
+                      {
+                        "ref": 2,
+                        "type": "import",
+                        "created": [
+                          2
+                        ],
+                        "closed": [],
+                        "reactivated": [],
+                        "untouched": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "exchanges": [
+        {
+          "method": "GET",
+          "path": "/api/v2/product_types/?limit=100\u0026name=ddcontract\u0026offset=0",
+          "status": 200,
+          "response": {
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "results": [
+              {
+                "id": 81,
+                "created": "2026-11-19T12:21:14.617251Z",
+                "updated": "2026-11-19T12:21:14.617281Z",
+                "name": "ddcontract",
+                "description": null,
+                "critical_product": false,
+                "key_product": false,
+                "archived_at": null,
+                "archive_batch": null,
+                "authorized_users": []
+              }
+            ],
+            "prefetch": {}
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/v2/products/?limit=100\u0026name_exact=ddcontract%2Fns\u0026offset=0\u0026prod_type=81",
+          "status": 200,
+          "response": {
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "results": [
+              {
+                "id": 112,
+                "findings_count": 2,
+                "findings_list": [
+                  15207,
+                  15208
+                ],
+                "business_criticality": null,
+                "platform": null,
+                "lifecycle": null,
+                "origin": null,
+                "product_meta": [],
+                "created": "2026-11-19T12:21:14.655460Z",
+                "name": "ddcontract/ns",
+                "description": "ddcontract/ns",
+                "prod_numeric_grade": null,
+                "user_records": null,
+                "revenue": null,
+                "external_audience": false,
+                "internet_accessible": false,
+                "enable_product_tag_inheritance": false,
+                "enable_simple_risk_acceptance": false,
+                "enable_full_risk_acceptance": true,
+                "disable_sla_breach_notifications": false,
+                "archived_at": null,
+                "archive_batch": null,
+                "product_manager": null,
+                "technical_contact": null,
+                "team_manager": null,
+                "prod_type": 81,
+                "sla_configuration": 1,
+                "authorized_users": [],
+                "regulations": [],
+                "tags": []
+              }
+            ],
+            "prefetch": {}
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/v2/engagements/?limit=100\u0026name=trivy-operator\u0026offset=0\u0026product=112",
+          "status": 200,
+          "response": {
+            "count": 2,
+            "next": null,
+            "previous": null,
+            "results": [
+              {
+                "id": 117,
+                "created": "2026-11-19T12:21:14.718304Z",
+                "updated": "2026-11-19T12:21:14.718321Z",
+                "name": "trivy-operator",
+                "description": null,
+                "version": null,
+                "first_contacted": null,
+                "target_start": "2026-11-19",
+                "target_end": "2027-11-19",
+                "reason": null,
+                "active": true,
+                "tracker": null,
+                "test_strategy": null,
+                "threat_model": true,
+                "api_test": true,
+                "pen_test": true,
+                "check_list": true,
+                "status": "In Progress",
+                "progress": "threat_model",
+                "tmodel_path": "none",
+                "done_testing": false,
+                "engagement_type": "CI/CD",
+                "build_id": null,
+                "commit_hash": null,
+                "branch_tag": null,
+                "source_code_management_uri": null,
+                "deduplication_on_engagement": true,
+                "archived_at": null,
+                "archive_batch": null,
+                "lead": 1,
+                "requester": null,
+                "preset": null,
+                "report_type": null,
+                "product": 112,
+                "cicd_scm_server": null,
+                "cicd_build_server": null,
+                "cicd_orchestration_engine": null,
+                "notes": [],
+                "files": [],
+                "risk_acceptance": [],
+                "tags": []
+              },
+              {
+                "id": 118,
+                "created": "2026-11-19T12:21:19.211685Z",
+                "updated": "2026-11-19T12:21:19.211707Z",
+                "name": "trivy-operator",
+                "description": null,
+                "version": null,
+                "first_contacted": null,
+                "target_start": "2026-01-01",
+                "target_end": "2026-01-01",
+                "reason": null,
+                "active": true,
+                "tracker": null,
+                "test_strategy": null,
+                "threat_model": true,
+                "api_test": true,
+                "pen_test": true,
+                "check_list": true,
+                "status": "Not Started",
+                "progress": "threat_model",
+                "tmodel_path": "none",
+                "done_testing": false,
+                "engagement_type": "Interactive",
+                "build_id": null,
+                "commit_hash": null,
+                "branch_tag": null,
+                "source_code_management_uri": null,
+                "deduplication_on_engagement": false,
+                "archived_at": null,
+                "archive_batch": null,
+                "lead": null,
+                "requester": null,
+                "preset": null,
+                "report_type": null,
+                "product": 112,
+                "cicd_scm_server": null,
+                "cicd_build_server": null,
+                "cicd_orchestration_engine": null,
+                "notes": [],
+                "files": [],
+                "risk_acceptance": [],
+                "tags": []
+              }
+            ]
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/v2/tests/?engagement=117\u0026limit=100\u0026offset=0\u0026scan_type=Trivy+Operator+Scan",
+          "status": 200,
+          "response": {
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "results": [
+              {
+                "id": 385,
+                "test_type_name": "Trivy Operator Scan",
+                "deduplication_algorithm": "hash_code",
+                "hash_code_fields": [
+                  "title",
+                  "severity",
+                  "vulnerability_ids",
+                  "description"
+                ],
+                "scan_type": "Trivy Operator Scan",
+                "title": "VulnerabilityReport deployment/app/app",
+                "description": null,
+                "target_start": "2026-01-01T00:00:00Z",
+                "target_end": "2026-01-01T00:00:00Z",
+                "percent_complete": 100,
+                "updated": "2026-11-19T12:21:15.516278Z",
+                "created": "2026-11-19T12:21:14.730330Z",
+                "version": "1.0",
+                "build_id": "",
+                "commit_hash": "",
+                "branch_tag": "",
+                "archived_at": null,
+                "archive_batch": null,
+                "engagement": 117,
+                "lead": null,
+                "test_type": 152,
+                "environment": 1,
+                "api_scan_configuration": null,
+                "notes": [],
+                "files": [],
+                "tags": [],
+                "finding_groups": []
+              }
+            ],
+            "prefetch": {}
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/v2/tests/?engagement=118\u0026limit=100\u0026offset=0\u0026scan_type=Trivy+Operator+Scan",
+          "status": 200,
+          "response": {
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "results": [
+              {
+                "id": 386,
+                "test_type_name": "Trivy Operator Scan",
+                "deduplication_algorithm": "hash_code",
+                "hash_code_fields": [
+                  "title",
+                  "severity",
+                  "vulnerability_ids",
+                  "description"
+                ],
+                "scan_type": "Trivy Operator Scan",
+                "title": "VulnerabilityReport deployment/app/app",
+                "description": null,
+                "target_start": "2026-01-01T00:00:00Z",
+                "target_end": "2026-01-01T00:00:00Z",
+                "percent_complete": 100,
+                "updated": "2026-11-19T12:21:21.656692Z",
+                "created": "2026-11-19T12:21:21.533592Z",
+                "version": "1.0",
+                "build_id": "",
+                "commit_hash": "",
+                "branch_tag": "",
+                "archived_at": null,
+                "archive_batch": null,
+                "engagement": 118,
+                "lead": null,
+                "test_type": 152,
+                "environment": 1,
+                "api_scan_configuration": null,
+                "notes": [],
+                "files": [],
+                "tags": [],
+                "finding_groups": []
+              }
+            ],
+            "prefetch": {}
+          }
+        }
+      ]
+    },
+    {
+      "name": "close the test of the last engagement",
+      "result": {
+        "close": {
+          "reimports": 1,
+          "one_by_one": 0
+        }
+      },
+      "state": {
+        "products": [
+          {
+            "ref": 1,
+            "name": "ddcontract/ns",
+            "tags": [],
+            "engagements": [
+              {
+                "ref": 1,
+                "name": "trivy-operator",
+                "tests": [
+                  {
+                    "ref": 1,
+                    "title": "VulnerabilityReport deployment/app/app",
+                    "scan_type": "Trivy Operator Scan",
+                    "version": "1.0",
+                    "build_id": "",
+                    "tags": [],
+                    "findings": [
+                      {
+                        "ref": 1,
+                        "title": "cve-2026-0001 libssl 3.0.0",
+                        "severity": "High",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "c7ec24af8b1bc7eaef484c997d6f1e9b7dd30fada59653f778ad1ed972fa3e26",
+                        "active": true,
+                        "verified": false,
+                        "is_mitigated": false,
+                        "false_p": false,
+                        "risk_accepted": false,
+                        "out_of_scope": false
+                      }
+                    ],
+                    "imports": [
+                      {
+                        "ref": 1,
+                        "type": "import",
+                        "created": [
+                          1
+                        ],
+                        "closed": [],
+                        "reactivated": [],
+                        "untouched": []
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "ref": 2,
+                "name": "trivy-operator",
+                "tests": [
+                  {
+                    "ref": 2,
+                    "title": "VulnerabilityReport deployment/app/app",
+                    "scan_type": "Trivy Operator Scan",
+                    "version": "1.0",
+                    "build_id": "",
+                    "tags": [],
+                    "findings": [
+                      {
+                        "ref": 2,
+                        "title": "cve-2026-0001 libssl 3.0.0",
+                        "severity": "High",
+                        "service": "ns/Deployment/app/app",
+                        "hash_code": "c7ec24af8b1bc7eaef484c997d6f1e9b7dd30fada59653f778ad1ed972fa3e26",
+                        "active": false,
+                        "verified": false,
+                        "is_mitigated": true,
+                        "false_p": false,
+                        "risk_accepted": false,
+                        "out_of_scope": false
+                      }
+                    ],
+                    "imports": [
+                      {
+                        "ref": 2,
+                        "type": "import",
+                        "created": [
+                          2
+                        ],
+                        "closed": [],
+                        "reactivated": [],
+                        "untouched": []
+                      },
+                      {
+                        "ref": 3,
+                        "type": "reimport",
+                        "created": [],
+                        "closed": [
+                          2
+                        ],
+                        "reactivated": [],
+                        "untouched": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "exchanges": [
+        {
+          "method": "GET",
+          "path": "/api/v2/products/?limit=100\u0026name_exact=ddcontract%2Fns\u0026offset=0\u0026prod_type=81",
+          "status": 200,
+          "response": {
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "results": [
+              {
+                "id": 112,
+                "findings_count": 2,
+                "findings_list": [
+                  15207,
+                  15208
+                ],
+                "business_criticality": null,
+                "platform": null,
+                "lifecycle": null,
+                "origin": null,
+                "product_meta": [],
+                "created": "2026-11-19T12:21:14.655460Z",
+                "name": "ddcontract/ns",
+                "description": "ddcontract/ns",
+                "prod_numeric_grade": null,
+                "user_records": null,
+                "revenue": null,
+                "external_audience": false,
+                "internet_accessible": false,
+                "enable_product_tag_inheritance": false,
+                "enable_simple_risk_acceptance": false,
+                "enable_full_risk_acceptance": true,
+                "disable_sla_breach_notifications": false,
+                "archived_at": null,
+                "archive_batch": null,
+                "product_manager": null,
+                "technical_contact": null,
+                "team_manager": null,
+                "prod_type": 81,
+                "sla_configuration": 1,
+                "authorized_users": [],
+                "regulations": [],
+                "tags": []
+              }
+            ],
+            "prefetch": {}
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/v2/engagements/?limit=100\u0026name=trivy-operator\u0026offset=0\u0026product=112",
+          "status": 200,
+          "response": {
+            "count": 2,
+            "next": null,
+            "previous": null,
+            "results": [
+              {
+                "id": 117,
+                "created": "2026-11-19T12:21:14.718304Z",
+                "updated": "2026-11-19T12:21:14.718321Z",
+                "name": "trivy-operator",
+                "description": null,
+                "version": null,
+                "first_contacted": null,
+                "target_start": "2026-11-19",
+                "target_end": "2027-11-19",
+                "reason": null,
+                "active": true,
+                "tracker": null,
+                "test_strategy": null,
+                "threat_model": true,
+                "api_test": true,
+                "pen_test": true,
+                "check_list": true,
+                "status": "In Progress",
+                "progress": "threat_model",
+                "tmodel_path": "none",
+                "done_testing": false,
+                "engagement_type": "CI/CD",
+                "build_id": null,
+                "commit_hash": null,
+                "branch_tag": null,
+                "source_code_management_uri": null,
+                "deduplication_on_engagement": true,
+                "archived_at": null,
+                "archive_batch": null,
+                "lead": 1,
+                "requester": null,
+                "preset": null,
+                "report_type": null,
+                "product": 112,
+                "cicd_scm_server": null,
+                "cicd_build_server": null,
+                "cicd_orchestration_engine": null,
+                "notes": [],
+                "files": [],
+                "risk_acceptance": [],
+                "tags": []
+              },
+              {
+                "id": 118,
+                "created": "2026-11-19T12:21:19.211685Z",
+                "updated": "2026-11-19T12:21:19.211707Z",
+                "name": "trivy-operator",
+                "description": null,
+                "version": null,
+                "first_contacted": null,
+                "target_start": "2026-01-01",
+                "target_end": "2026-01-01",
+                "reason": null,
+                "active": true,
+                "tracker": null,
+                "test_strategy": null,
+                "threat_model": true,
+                "api_test": true,
+                "pen_test": true,
+                "check_list": true,
+                "status": "Not Started",
+                "progress": "threat_model",
+                "tmodel_path": "none",
+                "done_testing": false,
+                "engagement_type": "Interactive",
+                "build_id": null,
+                "commit_hash": null,
+                "branch_tag": null,
+                "source_code_management_uri": null,
+                "deduplication_on_engagement": false,
+                "archived_at": null,
+                "archive_batch": null,
+                "lead": null,
+                "requester": null,
+                "preset": null,
+                "report_type": null,
+                "product": 112,
+                "cicd_scm_server": null,
+                "cicd_build_server": null,
+                "cicd_orchestration_engine": null,
+                "notes": [],
+                "files": [],
+                "risk_acceptance": [],
+                "tags": []
+              }
+            ]
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/v2/tests/?engagement=117\u0026limit=100\u0026offset=0\u0026scan_type=Trivy+Operator+Scan",
+          "status": 200,
+          "response": {
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "results": [
+              {
+                "id": 385,
+                "test_type_name": "Trivy Operator Scan",
+                "deduplication_algorithm": "hash_code",
+                "hash_code_fields": [
+                  "title",
+                  "severity",
+                  "vulnerability_ids",
+                  "description"
+                ],
+                "scan_type": "Trivy Operator Scan",
+                "title": "VulnerabilityReport deployment/app/app",
+                "description": null,
+                "target_start": "2026-01-01T00:00:00Z",
+                "target_end": "2026-01-01T00:00:00Z",
+                "percent_complete": 100,
+                "updated": "2026-11-19T12:21:15.516278Z",
+                "created": "2026-11-19T12:21:14.730330Z",
+                "version": "1.0",
+                "build_id": "",
+                "commit_hash": "",
+                "branch_tag": "",
+                "archived_at": null,
+                "archive_batch": null,
+                "engagement": 117,
+                "lead": null,
+                "test_type": 152,
+                "environment": 1,
+                "api_scan_configuration": null,
+                "notes": [],
+                "files": [],
+                "tags": [],
+                "finding_groups": []
+              }
+            ],
+            "prefetch": {}
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/v2/tests/?engagement=118\u0026limit=100\u0026offset=0\u0026scan_type=Trivy+Operator+Scan",
+          "status": 200,
+          "response": {
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "results": [
+              {
+                "id": 386,
+                "test_type_name": "Trivy Operator Scan",
+                "deduplication_algorithm": "hash_code",
+                "hash_code_fields": [
+                  "title",
+                  "severity",
+                  "vulnerability_ids",
+                  "description"
+                ],
+                "scan_type": "Trivy Operator Scan",
+                "title": "VulnerabilityReport deployment/app/app",
+                "description": null,
+                "target_start": "2026-01-01T00:00:00Z",
+                "target_end": "2026-01-01T00:00:00Z",
+                "percent_complete": 100,
+                "updated": "2026-11-19T12:21:21.656692Z",
+                "created": "2026-11-19T12:21:21.533592Z",
+                "version": "1.0",
+                "build_id": "",
+                "commit_hash": "",
+                "branch_tag": "",
+                "archived_at": null,
+                "archive_batch": null,
+                "engagement": 118,
+                "lead": null,
+                "test_type": 152,
+                "environment": 1,
+                "api_scan_configuration": null,
+                "notes": [],
+                "files": [],
+                "tags": [],
+                "finding_groups": []
+              }
+            ],
+            "prefetch": {}
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/v2/findings/?active=true\u0026is_mitigated=false\u0026limit=1\u0026test=386",
+          "status": 200,
+          "response": {
+            "count": 1,
+            "next": null,
+            "previous": null,
+            "results": [
+              {
+                "id": 15208,
+                "mitigated": null,
+                "mitigated_by": null,
+                "request_response": {
+                  "req_resp": []
+                },
+                "accepted_risks": [],
+                "push_to_jira": false,
+                "found_by": [
+                  152
+                ],
+                "age": 322,
+                "sla_days_remaining": -292,
+                "finding_meta": [],
+                "related_fields": null,
+                "test_type_name": "Trivy Operator Scan",
+                "jira_creation": null,
+                "jira_change": null,
+                "display_status": "Active",
+                "finding_groups": [],
+                "vulnerability_ids": [
+                  {
+                    "vulnerability_id": "CVE-2026-0001"
+                  }
+                ],
+                "cwes": [],
+                "reporter": 1,
+                "endpoints": [],
+                "created": "2026-11-19T12:21:21.541898Z",
+                "updated": "2026-11-19T12:21:21.541907Z",
+                "title": "CVE-2026-0001 Libssl 3.0.0",
+                "date": "2026-01-01",
+                "sla_start_date": null,
+                "sla_expiration_date": "2026-01-31",
+                "cwe": 0,
+                "epss_score": null,
+                "epss_percentile": null,
+                "known_exploited": false,
+                "ransomware_used": false,
+                "kev_date": null,
+                "cvssv3": null,
+                "cvssv3_score": null,
+                "cvssv4": null,
+                "cvssv4_score": null,
+                "url": null,
+                "severity": "High",
+                "description": "CVE-2026-0001 in libssl\n**Fixed version:** 3.0.1\n\n**container.name:** app\n**resource.kind:** Deployment\n**resource.name:** app\n**resource.namespace:** ns",
+                "mitigation": "3.0.1",
+                "fix_available": true,
+                "fix_version": null,
+                "impact": null,
+                "steps_to_reproduce": null,
+                "severity_justification": null,
+                "references": null,
+                "active": true,
+                "verified": false,
+                "false_p": false,
+                "duplicate": false,
+                "out_of_scope": false,
+                "risk_accepted": false,
+                "under_review": false,
+                "last_status_update": "2026-11-19T12:21:21.541961Z",
+                "under_defect_review": false,
+                "is_mitigated": false,
+                "thread_id": 0,
+                "numerical_severity": "S1",
+                "last_reviewed": "2026-11-19T12:21:21.531336Z",
+                "param": null,
+                "payload": null,
+                "hash_code": "c7ec24af8b1bc7eaef484c997d6f1e9b7dd30fada59653f778ad1ed972fa3e26",
+                "line": null,
+                "file_path": null,
+                "component_name": "libssl",
+                "component_version": "3.0.0",
+                "static_finding": true,
+                "dynamic_finding": false,
+                "scanner_confidence": null,
+                "unique_id_from_tool": null,
+                "vuln_id_from_tool": null,
+                "sast_source_object": null,
+                "sast_sink_object": null,
+                "sast_source_line": null,
+                "sast_source_file_path": null,
+                "nb_occurences": null,
+                "publish_date": null,
+                "service": "ns/Deployment/app/app",
+                "planned_remediation_date": null,
+                "planned_remediation_version": null,
+                "effort_for_fixing": null,
+                "archived_at": null,
+                "archive_batch": null,
+                "test": 386,
+                "duplicate_finding": null,
+                "review_requested_by": null,
+                "defect_review_requested_by": null,
+                "last_reviewed_by": 1,
+                "sonarqube_issue": null,
+                "reviewers": [],
+                "notes": [],
+                "files": [],
+                "tags": [
+                  "ns"
+                ]
+              }
+            ],
+            "prefetch": {}
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v2/reimport-scan/",
+          "form": [
+            [
+              "test",
+              "386"
+            ],
+            [
+              "scan_type",
+              "Trivy Operator Scan"
+            ],
+            [
+              "close_old_findings",
+              "true"
+            ],
+            [
+              "service",
+              "ns/Deployment/app/app"
+            ],
+            [
+              "version",
+              "1.0"
+            ]
+          ],
+          "file": {
+            "metadata": {
+              "labels": {}
+            },
+            "report": {
+              "vulnerabilities": []
+            }
+          },
+          "status": 201,
+          "response": {
+            "minimum_severity": "Info",
+            "active": false,
+            "verified": false,
+            "endpoint_to_add": null,
+            "auto_create_context": false,
+            "deduplication_on_engagement": false,
+            "lead": null,
+            "push_to_jira": false,
+            "deduplication_execution_mode": null,
+            "api_scan_configuration": null,
+            "service": "ns/Deployment/app/app",
+            "create_finding_groups_for_all_findings": true,
+            "test_id": 386,
+            "engagement_id": 118,
+            "product_id": 112,
+            "product_type_id": 81,
+            "statistics": {
+              "before": {
+                "info": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "low": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "medium": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "high": {
+                  "active": 1,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 1
+                },
+                "critical": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "total": {
+                  "active": 1,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 1
+                }
+              },
+              "delta": {
+                "created": {
+                  "info": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "low": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "medium": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "high": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "critical": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "total": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  }
+                },
+                "closed": {
+                  "info": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "low": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "medium": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "high": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 1,
+                    "risk_accepted": 0,
+                    "total": 1
+                  },
+                  "critical": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "total": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 1,
+                    "risk_accepted": 0,
+                    "total": 1
+                  }
+                },
+                "reactivated": {
+                  "info": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "low": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "medium": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "high": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "critical": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "total": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  }
+                },
+                "untouched": {
+                  "info": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "low": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "medium": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "high": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "critical": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  },
+                  "total": {
+                    "active": 0,
+                    "verified": 0,
+                    "duplicate": 0,
+                    "false_p": 0,
+                    "out_of_scope": 0,
+                    "is_mitigated": 0,
+                    "risk_accepted": 0,
+                    "total": 0
+                  }
+                }
+              },
+              "after": {
+                "info": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "low": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "medium": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "high": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 1,
+                  "risk_accepted": 0,
+                  "total": 1
+                },
+                "critical": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 0,
+                  "risk_accepted": 0,
+                  "total": 0
+                },
+                "total": {
+                  "active": 0,
+                  "verified": 0,
+                  "duplicate": 0,
+                  "false_p": 0,
+                  "out_of_scope": 0,
+                  "is_mitigated": 1,
+                  "risk_accepted": 0,
+                  "total": 1
+                }
+              }
+            },
+            "deduplication_complete": false,
+            "apply_tags_to_findings": false,
+            "apply_tags_to_endpoints": false,
+            "do_not_reactivate": false,
+            "scan_type": "Trivy Operator Scan",
+            "test": 386,
+            "close_old_findings": true,
+            "close_old_findings_product_scope": false,
+            "version": "1.0"
+          }
+        }
+      ]
+    }
+  ]
+}

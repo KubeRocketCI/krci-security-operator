@@ -88,6 +88,20 @@ func contractRequest(report []byte) defectdojo.ReimportRequest {
 	}
 }
 
+// reimportFails sends the request, which DefectDojo answers with the status, and returns the body of the answer.
+func reimportFails(t *testing.T, f *fakeDefectDojo, r defectdojo.ReimportRequest, status int) string {
+	t.Helper()
+
+	var apiErr *defectdojo.APIError
+
+	_, err := f.Reimport(context.Background(), r)
+
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, status, apiErr.StatusCode)
+
+	return apiErr.Body
+}
+
 func reimport(t *testing.T, f *fakeDefectDojo, r defectdojo.ReimportRequest) defectdojo.ReimportResult {
 	t.Helper()
 
@@ -549,13 +563,7 @@ func TestFakeDefectDojo_RejectsABlankBuildID(t *testing.T) {
 
 	r.BuildID = "  "
 
-	var apiErr *defectdojo.APIError
-
-	_, err := f.Reimport(context.Background(), r)
-
-	require.ErrorAs(t, err, &apiErr)
-	assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
-	assert.Contains(t, apiErr.Body, "build_id")
+	assert.Contains(t, reimportFails(t, f, r, http.StatusBadRequest), "build_id")
 	assert.Equal(t, "uid:100:0123456789ab", f.test(id).buildID)
 }
 
@@ -570,12 +578,7 @@ func TestFakeDefectDojo_BuildIDOverTheColumnLimitFailsAfterTheFindingsChanged(t 
 
 	r.BuildID = strings.Repeat("é", 151)
 
-	var apiErr *defectdojo.APIError
-
-	_, err := f.Reimport(context.Background(), r)
-
-	require.ErrorAs(t, err, &apiErr)
-	assert.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
+	reimportFails(t, f, r, http.StatusInternalServerError)
 	assert.Equal(t, strings.Repeat("é", 150), f.test(id).buildID, "the test is not saved")
 }
 
@@ -623,12 +626,7 @@ func TestFakeDefectDojo_NewTestHasTheBuildIDWhenTheReportIsRejected(t *testing.T
 	r := contractRequest([]byte(`{`))
 	r.BuildID = "uid:100:0123456789ab"
 
-	var apiErr *defectdojo.APIError
-
-	_, err := f.Reimport(context.Background(), r)
-
-	require.ErrorAs(t, err, &apiErr)
-	assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+	reimportFails(t, f, r, http.StatusBadRequest)
 	require.Len(t, f.testIDs(), 1, "DefectDojo creates the test before it reads the report")
 	assert.Equal(t, "uid:100:0123456789ab", f.test(f.testIDs()[0]).buildID,
 		"the build_id of a new test is saved with the test, before the findings")
@@ -655,12 +653,7 @@ func TestFakeDefectDojo_NewTestWithABuildIDOverTheColumnLimitIsNotCreated(t *tes
 	r := contractRequest(vulnReport(t, appLabels(), vulnA))
 	r.BuildID = strings.Repeat("é", 151)
 
-	var apiErr *defectdojo.APIError
-
-	_, err := f.Reimport(context.Background(), r)
-
-	require.ErrorAs(t, err, &apiErr)
-	assert.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
+	reimportFails(t, f, r, http.StatusInternalServerError)
 	assert.Empty(t, f.testIDs())
 }
 
@@ -725,7 +718,7 @@ func TestFakeContract_CloseOfATestWithoutActiveFindingsChangesNoFinding(t *testi
 
 	assert.Equal(t, map[string]string{cveA: statusFalsePositive, cveB: statusRiskAccepted},
 		f.statuses(id, contractService), "no active finding: no reimport")
-	assert.False(t, findingTitled(t, f, id, cveA).isMitigated)
+	assert.False(t, findingTitled(t, f, id, cveB).isMitigated, "the risk accepted finding is not closed")
 	assert.True(t, findingTitled(t, f, id, cveB).riskAccepted)
 	assert.Empty(t, f.test(id).buildID, "the marker is cleared")
 }
@@ -752,7 +745,6 @@ func TestFakeContract_CloseReimportsEachServiceWithActiveFindings(t *testing.T) 
 	assert.Equal(t, defectdojo.CloseResult{Reimports: 2}, res)
 	assert.Equal(t, map[string]string{cveA: statusClosed}, f.statuses(id, "a"))
 	assert.Equal(t, map[string]string{cveA: statusClosed, cveB: statusFalsePositive}, f.statuses(id, "b"))
-	assert.True(t, findingTitled(t, f, id, cveB).isMitigated, "the reimport of service b mitigates its false positive")
 }
 
 func TestFakeContract_CloseClosesOneByOneTheServicesBeyondTheBound(t *testing.T) {
@@ -909,29 +901,49 @@ func TestFakeDefectDojo_PatchReplacesTheProductTags(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, apiErr.StatusCode)
 }
 
-func TestFakeDefectDojo_ValidatesTagsLikeTheTagListSerializerField(t *testing.T) {
+func TestFakeDefectDojo_TriageOfAFalsePositiveOrOutOfScopeMitigatesTheFinding(t *testing.T) {
+	f := newFakeDefectDojo()
+	id := reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA, vulnB))).TestID
+	findings := f.findingsIn(id)
+
+	f.triage(findings[0].id, statusFalsePositive)
+	f.triage(findings[1].id, statusOutOfScope)
+
+	for _, found := range f.findingsIn(id) {
+		assert.False(t, found.active, found.title)
+		assert.True(t, found.isMitigated, "false_p or out_of_scope implies mitigated: %s", found.title)
+	}
+}
+
+func TestFakeDefectDojo_SplitsAndValidatesTagsLikeTheTagListSerializerField(t *testing.T) {
 	for name, tag := range map[string]string{
-		"space":        "a b:1",
-		"comma":        "a,b:1",
-		"single quote": "a'b:1",
-		"double quote": `a"b:1`,
-		"over 255":     "a:" + strings.Repeat("é", 254),
+		"space":                  "a b:1",
+		"single quote":           "a'b:1",
+		"space in a quoted part": `x"a b"y`,
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(name+" is rejected", func(t *testing.T) {
 			f := newFakeDefectDojo()
 			id := reimport(t, f, contractRequest(vulnReport(t, appLabels(), vulnA))).TestID
 
 			r := contractRequest(vulnReport(t, appLabels(), vulnA))
 			r.Tags = []string{"k:1", tag}
 
-			var apiErr *defectdojo.APIError
-
-			_, err := f.Reimport(context.Background(), r)
-
-			require.ErrorAs(t, err, &apiErr)
-			assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
-			assert.Contains(t, apiErr.Body, "tags")
+			assert.Contains(t, reimportFails(t, f, r, http.StatusBadRequest), "tags")
 			assert.Equal(t, []string{"k8s-cluster:c"}, f.test(id).tags, "a rejected request changes nothing")
+		})
+	}
+
+	for tag, want := range map[string][]string{
+		"a,b:1":     {"a", "b:1"},
+		`c"d:1`:     {"c", "d:1"},
+		"x:1,,y:2,": {"x:1", "y:2"},
+	} {
+		t.Run(tag+" is split", func(t *testing.T) {
+			f := newFakeDefectDojo()
+			r := contractRequest(vulnReport(t, appLabels(), vulnA))
+			r.Tags = []string{tag}
+
+			assert.Equal(t, want, f.test(reimport(t, f, r).TestID).tags)
 		})
 	}
 
@@ -944,36 +956,84 @@ func TestFakeDefectDojo_ValidatesTagsLikeTheTagListSerializerField(t *testing.T)
 
 		assert.Equal(t, []string{"k8s-cluster:" + strings.Repeat("é", 255-len("k8s-cluster:"))}, f.test(id).tags)
 	})
+
+	t.Run("tags are returned sorted", func(t *testing.T) {
+		f := newFakeDefectDojo()
+		r := contractRequest(vulnReport(t, appLabels(), vulnA))
+		r.Tags = []string{"k8s-workload:a", "k8s-container:b"}
+
+		assert.Equal(t, []string{"k8s-container:b", "k8s-workload:a"}, f.test(reimport(t, f, r).TestID).tags)
+	})
 }
 
-func TestFakeDefectDojo_RejectsValuesOverTheFieldLimits(t *testing.T) {
+func TestFakeDefectDojo_RejectsAProductNameOverItsLimit(t *testing.T) {
+	f := newFakeDefectDojo()
+	r := contractRequest(vulnReport(t, appLabels(), vulnA))
+
+	r.Product = strings.Repeat("é", 255)
+	reimport(t, f, r)
+
+	r.Product = strings.Repeat("é", 256)
+
+	assert.Contains(t, reimportFails(t, f, r, http.StatusBadRequest), "name")
+}
+
+func TestFakeDefectDojo_ValueOverItsColumnFailsTheSave(t *testing.T) {
 	tests := map[string]struct {
 		set   func(*defectdojo.ReimportRequest, string)
 		limit int
 	}{
-		"service":      {set: func(r *defectdojo.ReimportRequest, v string) { r.Service = v }, limit: 200},
-		"version":      {set: func(r *defectdojo.ReimportRequest, v string) { r.Version = v }, limit: 100},
-		"test_title":   {set: func(r *defectdojo.ReimportRequest, v string) { r.TestTitle = v }, limit: 255},
-		"product_name": {set: func(r *defectdojo.ReimportRequest, v string) { r.Product = v }, limit: 255},
+		"version": {set: func(r *defectdojo.ReimportRequest, v string) { r.Version = v }, limit: 100},
+		"tag":     {set: func(r *defectdojo.ReimportRequest, v string) { r.Tags = []string{v} }, limit: 255},
 	}
 
 	for field, tt := range tests {
-		t.Run(field, func(t *testing.T) {
+		t.Run(field+" of a new test", func(t *testing.T) {
 			f := newFakeDefectDojo()
 			r := contractRequest(vulnReport(t, appLabels(), vulnA))
-
-			tt.set(&r, strings.Repeat("é", tt.limit))
-			reimport(t, f, r)
-
 			tt.set(&r, strings.Repeat("é", tt.limit+1))
 
-			var apiErr *defectdojo.APIError
+			reimportFails(t, f, r, http.StatusInternalServerError)
+			assert.Empty(t, f.testIDs(), "the test is not created")
+		})
 
-			_, err := f.Reimport(context.Background(), r)
+		t.Run(field+" of an existing test", func(t *testing.T) {
+			f := newFakeDefectDojo()
+			r := contractRequest(vulnReport(t, appLabels(), vulnA))
+			tt.set(&r, strings.Repeat("é", tt.limit))
+			id := reimport(t, f, r).TestID
+			before := f.test(id)
 
-			require.ErrorAs(t, err, &apiErr)
-			assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
-			assert.Contains(t, apiErr.Body, field)
+			r.Report = vulnReport(t, appLabels(), vulnB)
+			tt.set(&r, strings.Repeat("é", tt.limit+1))
+
+			reimportFails(t, f, r, http.StatusInternalServerError)
+			assert.Equal(t, before, f.test(id), "the test is not saved")
+			assert.Equal(t, map[string]string{cveA: statusClosed, cveB: statusActive}, f.statuses(id, contractService),
+				"the findings changed before the save")
 		})
 	}
+
+	t.Run("test title", func(t *testing.T) {
+		f := newFakeDefectDojo()
+		r := contractRequest(vulnReport(t, appLabels(), vulnA))
+		r.TestTitle = strings.Repeat("é", 256)
+
+		reimportFails(t, f, r, http.StatusInternalServerError)
+		assert.Empty(t, f.testIDs())
+	})
+
+	t.Run("service", func(t *testing.T) {
+		f := newFakeDefectDojo()
+		r := contractRequest(vulnReport(t, appLabels(), vulnA))
+		r.Service = strings.Repeat("é", 201)
+
+		reimportFails(t, f, r, http.StatusInternalServerError)
+		require.Len(t, f.testIDs(), 1, "the new test is saved before its first finding")
+		assert.Empty(t, f.findingsIn(f.testIDs()[0]))
+
+		r.Report = vulnReport(t, appLabels())
+		_, err := f.Reimport(context.Background(), r)
+		assert.NoError(t, err, "a report without entries saves no finding with the service")
+	})
 }

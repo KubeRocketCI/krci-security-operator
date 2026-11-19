@@ -170,7 +170,7 @@ The whole close holds the lock of the test, so it never runs at the same time as
 
 Differences from closing one by one, which only reads active findings:
 
-- The reimport also mitigates the findings of its service that are not active: false positive, out of scope, duplicate and inactive findings become mitigated and keep their flags. A finding the user accepted as a risk is mitigated and its risk acceptance is removed.
+- The reimport also mitigates the findings of its service that are not active and not mitigated: a finding the user accepted as a risk is mitigated and its risk acceptance is removed (recorded in the `risk-acceptance` scenario). False positive and out of scope findings are mitigated already: DefectDojo mitigates a finding when either flag is set (`dojo/finding/helper.py` `update_finding_status`), and the reimport leaves them.
 - Each mitigated finding gets a note, `Mitigated by Trivy Operator Scan re-upload.`, and the test gets one import history entry of the type reimport with the number of findings closed.
 - The mitigation time is the time of the request, as in a close of one finding.
 - A close of one finding resets the false positive and out of scope flags of an active finding; the reimport leaves them.
