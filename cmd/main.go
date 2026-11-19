@@ -28,6 +28,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -72,13 +73,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "krci-security-operator.edp.epam.com",
-	})
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), managerOptions(metricsAddr, probeAddr, enableLeaderElection))
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
 		os.Exit(1)
@@ -104,5 +99,17 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
+	}
+}
+
+// managerOptions returns the manager options. The cache drops the managedFields of every cached object.
+func managerOptions(metricsAddr, probeAddr string, leaderElection bool) ctrl.Options {
+	return ctrl.Options{
+		Scheme:                 scheme,
+		Cache:                  cache.Options{DefaultTransform: cache.TransformStripManagedFields()},
+		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
+		HealthProbeBindAddress: probeAddr,
+		LeaderElection:         leaderElection,
+		LeaderElectionID:       "krci-security-operator.edp.epam.com",
 	}
 }
