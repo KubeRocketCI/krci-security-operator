@@ -136,7 +136,7 @@ A report is imported only when it describes a workload as it is now:
 
 - A ReplicaSet owned by a Deployment: only the report of the ReplicaSet whose `deployment.kubernetes.io/revision` equals that of its Deployment. Reports of older ReplicaSets are not imported.
 - A report marked with the TTL `0s` (annotation `trivy-operator.aquasecurity.github.io/report-ttl`), which Trivy Operator deletes at once, is not imported.
-- A Job owned by a CronJob: only the report of its newest Job, imported as the CronJob. The report on the CronJob itself is current as well. A Job without a CronJob is its own workload, as is a ReplicaSet without a Deployment.
+- A Job owned by a CronJob: only the report of its newest Job, imported as the CronJob. The report on the CronJob itself is current as well. A Job without a CronJob is its own workload, as is a ReplicaSet without a Deployment. Trivy Operator writes no report for a CronJob or its Jobs when `trivy.command` is `filesystem` or `rootfs`; these rules apply only with `image`.
 - The workload must exist, and the container of the report must be in the pod template of the workload (containers and init containers; also ephemeral containers of a Pod). Otherwise the report is history and is not imported, also when Trivy Operator keeps it.
 - ReplicationController reports, and reports of any kind other than the workloads above, are not imported.
 
