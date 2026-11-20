@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/KubeRocketCI/krci-security-operator/pkg/defectdojo"
 )
@@ -41,7 +42,8 @@ const (
 
 	// The keys of the tags, written as "<key>:<value>". A namespace product has TagKeyCluster and TagKeyNamespace.
 	// A test has all of them; TagKeyApp only when the workload names a component, TagKeyImage only when the report
-	// names an image. Findings have none.
+	// names an image. Findings have none. The namespace label tags, see NamespaceLabelTags, are on products and tests
+	// as well.
 	TagKeyCluster   = "k8s-cluster"
 	TagKeyNamespace = "k8s-namespace"
 	// TagKeyWorkload is the stable workload of a test: "k8s-workload:<kind>.<name>", the kind in lower case, so the
@@ -51,6 +53,11 @@ const (
 	TagKeyContainer = "k8s-container"
 	TagKeyImage     = "oci-image"
 	TagKeyApp       = "app"
+	// TagPrefixNamespaceLabel starts the key of a namespace label tag. The operator owns the prefix on a namespace
+	// product: it adds, corrects and removes these tags and keeps every other tag.
+	TagPrefixNamespaceLabel = "k8s-ns-label."
+	// MaxNamespaceLabelKeyLen is the longest label key whose namespace label tag fits MaxTagLen with any label value.
+	MaxNamespaceLabelKeyLen = MaxTagLen - len(TagPrefixNamespaceLabel) - len(":") - validation.LabelValueMaxLength
 
 	// requestFormat is part of the upload marker. Bump it with every change to what a reimport sends that the marker
 	// does not hold otherwise: Payload, the scan_date rule, a constant form field of defectdojo.Client.Reimport.
@@ -149,18 +156,59 @@ func tag(key, value string) string {
 	return key + ":" + Shorten(value, MaxTagLen-len(key)-1)
 }
 
-// WithProductTags returns the tags a product keeps: its other tags, then the two product tags with the correct
-// values, exactly once each. changed is false when the product has them already.
-func WithProductTags(have []string, cluster, namespace string) (tags []string, changed bool) {
-	want := ProductTags(cluster, namespace)
+// NamespaceLabelTagKey is the key of the tag that the namespace label gives: "k8s-ns-label.<label key>", in lower
+// case, the case DefectDojo stores the tags of a test in.
+func NamespaceLabelTagKey(labelKey string) string {
+	return TagPrefixNamespaceLabel + TagSafe(labelKey)
+}
 
+// NamespaceLabelTags returns the tag "k8s-ns-label.<label key>:<value>" of each of the keys that the labels hold, in
+// the order of keys. The value is made tag-safe and shortened as in every tag. A key without a label, and a label
+// with an empty value, give no tag.
+func NamespaceLabelTags(keys []string, labels map[string]string) []string {
+	var tags []string
+
+	for _, key := range keys {
+		if t := tag(NamespaceLabelTagKey(key), labels[key]); t != "" {
+			tags = append(tags, t)
+		}
+	}
+
+	return tags
+}
+
+// NamespaceLabelTagsOfKeys returns the namespace label tags among tags whose tag key is that of one of the label keys,
+// in their order.
+func NamespaceLabelTagsOfKeys(tags, keys []string) []string {
+	wanted := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		wanted[NamespaceLabelTagKey(key)] = struct{}{}
+	}
+
+	return slices.DeleteFunc(slices.Clone(tags), func(t string) bool {
+		tagKey, _, _ := strings.Cut(t, ":")
+		_, ok := wanted[tagKey]
+
+		return !ok
+	})
+}
+
+func isNamespaceLabelTag(t string) bool { return strings.HasPrefix(t, TagPrefixNamespaceLabel) }
+
+// WithProductTags returns the tags a product keeps: its other tags, then the two product tags with the correct
+// values, exactly once each, then labelTags, the namespace label tags it should have. The operator owns the
+// namespace label tag prefix, so a tag of the product with it that is not in labelTags is dropped.
+// changed is false when the product has them already.
+func WithProductTags(have []string, cluster, namespace string, labelTags []string) (tags []string, changed bool) {
 	for _, tag := range have {
-		if !strings.HasPrefix(tag, TagKeyCluster+":") && !strings.HasPrefix(tag, TagKeyNamespace+":") {
+		if !strings.HasPrefix(tag, TagKeyCluster+":") && !strings.HasPrefix(tag, TagKeyNamespace+":") &&
+			!isNamespaceLabelTag(tag) {
 			tags = append(tags, tag)
 		}
 	}
 
-	tags = append(tags, want...)
+	tags = append(tags, ProductTags(cluster, namespace)...)
+	tags = append(tags, labelTags...)
 
 	return tags, !sameSet(have, tags)
 }
@@ -175,6 +223,8 @@ type Target struct {
 	Namespace string
 	// Cluster is the operator's cluster name.
 	Cluster string
+	// LabelTags are the namespace label tags of the namespace, see NamespaceLabelTags.
+	LabelTags []string
 }
 
 // Reimport is the DefectDojo destination and the descriptive fields of the reimport of one report.
@@ -187,9 +237,9 @@ type Reimport struct {
 	// Version is the image tag of the report, else "sha256:" and the first 12 characters of its digest. The tag of the
 	// report is ignored when the container reference in the pod template is its digest without a tag.
 	Version string
-	// Tags are the tags of the test: "k8s-cluster", "k8s-namespace", "k8s-workload", "k8s-container", "oci-image"
-	// and, when component is not empty, "app". A tag with an empty value is left out; a tag over MaxTagLen has
-	// its value shortened.
+	// Tags are the tags of the test: "k8s-cluster", "k8s-namespace", the namespace label tags, "k8s-workload",
+	// "k8s-container", "oci-image" and, when component is not empty, "app". A tag with an empty value is left out; a
+	// tag over MaxTagLen has its value shortened.
 	Tags []string
 }
 
@@ -212,14 +262,16 @@ func NewReimport(
 		TestTitle:  ReportTitle(kind, report, workload),
 		Service:    Service(report, workload),
 		Version:    Shorten(image.Version(), MaxVersionLen),
-		Tags: slices.DeleteFunc([]string{
-			tag(TagKeyCluster, target.Cluster),
-			tag(TagKeyNamespace, target.Namespace),
-			tag(TagKeyWorkload, workload.Tag()),
-			tag(TagKeyContainer, ContainerOf(report)),
-			tag(TagKeyImage, image.Name),
-			tag(TagKeyApp, component),
-		}, func(t string) bool { return t == "" }),
+		Tags: slices.DeleteFunc(slices.Concat(
+			ProductTags(target.Cluster, target.Namespace),
+			target.LabelTags,
+			[]string{
+				tag(TagKeyWorkload, workload.Tag()),
+				tag(TagKeyContainer, ContainerOf(report)),
+				tag(TagKeyImage, image.Name),
+				tag(TagKeyApp, component),
+			},
+		), func(t string) bool { return t == "" }),
 	}
 }
 

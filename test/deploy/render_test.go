@@ -42,6 +42,7 @@ var envNames = []string{
 	trivy.EnvClusterName,
 	trivy.EnvExcludeNamespaces,
 	trivy.EnvComponentPrefixes,
+	trivy.EnvNamespaceLabelTags,
 	trivy.EnvResyncPeriod,
 	trivy.EnvConcurrency,
 	trivy.EnvReportKinds,
@@ -297,21 +298,23 @@ func TestValuesReachTheManager(t *testing.T) {
 		"--set", "clusterName=sandbox",
 		"--set", "excludeNamespaces={kube-*,gitlab}",
 		"--set", "componentPrefixes={in-cluster-,prod-}",
+		"--set", "namespaceLabelTags={example.com/tenant,env}",
 		"--set", "reportKinds={VulnerabilityReport}",
 		"--set", "resyncPeriod=10m",
 		"--set", "concurrency=4",
 	)
 
 	require.Equal(t, trivy.Config{
-		OperatorNamespace: releaseNamespace,
-		SecretName:        "dd-creds",
-		ProductType:       "Platform",
-		ClusterName:       "sandbox",
-		ExcludeNamespaces: []string{"kube-*", "gitlab"},
-		ComponentPrefixes: []string{"in-cluster-", "prod-"},
-		ResyncPeriod:      10 * time.Minute,
-		Concurrency:       4,
-		ReportKinds:       []string{"VulnerabilityReport"},
+		OperatorNamespace:  releaseNamespace,
+		SecretName:         "dd-creds",
+		ProductType:        "Platform",
+		ClusterName:        "sandbox",
+		ExcludeNamespaces:  []string{"kube-*", "gitlab"},
+		ComponentPrefixes:  []string{"in-cluster-", "prod-"},
+		NamespaceLabelTags: []string{"example.com/tenant", "env"},
+		ResyncPeriod:       10 * time.Minute,
+		Concurrency:        4,
+		ReportKinds:        []string{"VulnerabilityReport"},
 	}, loadConfig(t, env(t, container(t, objs))))
 
 	var names []string
@@ -323,6 +326,24 @@ func TestValuesReachTheManager(t *testing.T) {
 	}
 
 	require.Equal(t, []string{"dd-creds"}, names, "the Role grants the Secret the manager reads, and only that one")
+}
+
+func TestNamespaceLabelTagsKeepTheirKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		values []string
+		want   []string
+	}{
+		{name: "keys in order", values: []string{"--set", "namespaceLabelTags={env,Team.Name,a.b/c}"}, want: []string{"env", "Team.Name", "a.b/c"}},
+		{name: "a JSON list", values: []string{"--set-json", `namespaceLabelTags=["env","example.com/team"]`}, want: []string{"env", "example.com/team"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vars := env(t, container(t, render(t, tc.values...)))
+
+			require.Equal(t, strings.Join(tc.want, ","), vars[trivy.EnvNamespaceLabelTags])
+			require.Equal(t, tc.want, loadConfig(t, vars).NamespaceLabelTags)
+		})
+	}
 }
 
 func TestClusterNameIsRequired(t *testing.T) {

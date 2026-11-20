@@ -8,13 +8,14 @@ The contract the operator writes and other systems read. Field and tag rules are
 
 ```
 Product Type   <product type>                              setting, default KubeRocketCI; the same for all operators of one DefectDojo
-└── Product    <cluster name>/<namespace>                  product tags: k8s-cluster:<cluster name>, k8s-namespace:<namespace>
+└── Product    <cluster name>/<namespace>                  product tags: k8s-cluster:<cluster name>, k8s-namespace:<namespace>, k8s-ns-label.<label key>:<value>   only for keys in namespaceLabelTags
     └── Engagement  trivy-operator                         type CI/CD; deduplication on the engagement
         └── Test    "<ReportKind> <kind>/<name>/<container>"
               scan_type  Trivy Operator Scan
               version    <image tag> | sha256:<12 hex>
               tags       k8s-cluster:<cluster name>
                          k8s-namespace:<namespace>
+                         k8s-ns-label.<label key>:<value>  only for keys in namespaceLabelTags
                          k8s-workload:<kind>.<name>
                          k8s-container:<container>
                          oci-image:<registry>/<repository>
@@ -27,6 +28,7 @@ Product Type   <product type>                              setting, default Kube
 - `<ReportKind>`: `VulnerabilityReport` or `ExposedSecretReport`.
 - `<kind>/<name>`: the stable workload, lower-case kind: `deployment`, `statefulset`, `daemonset`, `cronjob`, `job`, `replicaset` (a ReplicaSet without a Deployment), `pod`. ReplicationController reports are not imported.
 - On every pass over the namespace, also a gone or excluded one, and when a sweep finds the tags wrong, the operator makes sure both product tags exist with the correct values and keeps other tags, so a failed first attempt is repaired. The sweep only wakes the namespace.
+- The operator owns the prefix `k8s-ns-label.` of the product tags: it adds, corrects and removes these tags and keeps the others (ADR 0009).
 - `<Kind>` in the service: the same kind in Kubernetes spelling: `Deployment`, `CronJob`, …
 - The CI pipeline writes codebase products under the same Product Type (`<codebase>`, engagements `code-security-<branch>` and `image:<registry>/<repository>`). The operator never reads or writes them.
 

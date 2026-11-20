@@ -76,6 +76,10 @@ excludeNamespaces: []
 componentPrefixes:
   - in-cluster-
 
+# -- Keys of Namespace labels that are copied into DefectDojo tags `k8s-ns-label.<key>:<value>` on the namespace product and on every test of the namespace. Each key must be a valid Kubernetes label key, unique regardless of case, and short enough for its tag to fit a DefectDojo tag (see docs/trivy.md for the limit); an invalid list stops the operator at start. The operator owns the tag prefix `k8s-ns-label.`. Enabling or changing the list, and changing the value of a listed label, uploads every report of the affected namespaces once. Empty copies no label
+namespaceLabelTags: []
+# - example.com/team
+
 # -- Interval of the periodic re-check of every namespace (Go duration, at least 1m)
 resyncPeriod: 30m
 

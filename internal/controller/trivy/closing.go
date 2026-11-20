@@ -255,7 +255,7 @@ func (r *Reconciler) release(ctx context.Context, dd DefectDojo, namespace strin
 		r.markReleased(namespace)
 	}
 
-	return r.setProductTags(ctx, dd, namespace, product)
+	return r.setProductTags(ctx, dd, namespace, product, r.wantedLabelTags(nil, product.Tags))
 }
 
 // closeOwnedTests closes every owned test of the namespace product.
@@ -336,15 +336,17 @@ func (r *Reconciler) ownsTest(ctx context.Context, test defectdojo.Test) bool {
 	return false
 }
 
-// setProductTags makes sure the namespace product has its two product tags and keeps its other tags. The product
-// comes from a lookup of the same pass. PATCH replaces the tags of a product, so the full list is sent.
+// setProductTags makes sure the namespace product has its two product tags and exactly the namespace label tags
+// labelTags, and keeps its other tags. The product comes from a lookup of the same pass. PATCH replaces the tags of a
+// product, so the full list is sent.
 func (r *Reconciler) setProductTags(
 	ctx context.Context,
 	dd DefectDojo,
 	namespace string,
 	product defectdojo.Product,
+	labelTags []string,
 ) error {
-	tags, changed := trivy.WithProductTags(product.Tags, r.config.ClusterName, namespace)
+	tags, changed := trivy.WithProductTags(product.Tags, r.config.ClusterName, namespace, labelTags)
 	if !changed {
 		return nil
 	}
@@ -382,7 +384,7 @@ func (r *Reconciler) runSweeper(ctx context.Context) error {
 // sweep hands the namespaces that need the controller to it, and writes nothing to DefectDojo: the closing of a
 // namespace and the repair of its product tags are serialized with its imports by the workqueue.
 // A namespace needs it when it has a product although it no longer exists or is excluded and was not released yet,
-// or when its product has wrong or missing product tags.
+// or when its product has wrong or missing product tags, the namespace label tags included.
 // An ended context stops the sweep before it prunes the released namespaces.
 func (r *Reconciler) sweep(ctx context.Context) error {
 	dd, available, err := r.defectDojo(ctx)
@@ -420,7 +422,7 @@ func (r *Reconciler) wakeCandidates(ctx context.Context, candidates []sweepCandi
 	var errs []error
 
 	for _, candidate := range candidates {
-		importable, err := r.isImportable(ctx, candidate.namespace)
+		wake, err := r.needsController(ctx, candidate)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
@@ -431,11 +433,7 @@ func (r *Reconciler) wakeCandidates(ctx context.Context, candidates []sweepCandi
 			continue
 		}
 
-		if importable && !candidate.tagsWrong {
-			continue
-		}
-
-		if !importable && !candidate.tagsWrong && r.isReleased(candidate.namespace) {
+		if !wake {
 			continue
 		}
 
@@ -447,11 +445,23 @@ func (r *Reconciler) wakeCandidates(ctx context.Context, candidates []sweepCandi
 	return errors.Join(errs...)
 }
 
+// needsController reports whether the controller has to reconcile the namespace of the candidate: the tags of its
+// product differ from what setProductTags sets, or the namespace is not imported and its tests are not closed yet.
+func (r *Reconciler) needsController(ctx context.Context, c sweepCandidate) (bool, error) {
+	ns, err := r.importableNamespace(ctx, c.namespace)
+	if err != nil {
+		return false, err
+	}
+
+	_, tagsWrong := trivy.WithProductTags(c.tags, r.config.ClusterName, c.namespace, r.wantedLabelTags(ns, c.tags))
+
+	return tagsWrong || (ns == nil && !r.isReleased(c.namespace)), nil
+}
+
 // sweepCandidate is a namespace that has a namespace product of the cluster.
 type sweepCandidate struct {
 	namespace string
-	// tagsWrong is true when the product lacks a product tag or holds one with a wrong value.
-	tagsWrong bool
+	tags      []string
 }
 
 // sweepCandidates returns, in the order of the products and once each, the namespaces of the namespace products
@@ -474,8 +484,7 @@ func (r *Reconciler) sweepCandidates(products []defectdojo.Product) ([]sweepCand
 
 		withProduct[namespace] = struct{}{}
 
-		_, tagsWrong := trivy.WithProductTags(product.Tags, r.config.ClusterName, namespace)
-		candidates = append(candidates, sweepCandidate{namespace: namespace, tagsWrong: tagsWrong})
+		candidates = append(candidates, sweepCandidate{namespace: namespace, tags: product.Tags})
 	}
 
 	return candidates, withProduct

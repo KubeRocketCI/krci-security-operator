@@ -81,6 +81,7 @@ One instance runs per cluster with cluster-wide read-only access and writes only
 | metrics.enabled | bool | `false` | Serve the Prometheus metrics of the manager over plain HTTP on `metrics.port` of the pod. The chart creates no Service for them |
 | metrics.port | int | `8080` | Container port of the metrics endpoint |
 | name | string | `"krci-security-operator"` | component name |
+| namespaceLabelTags | list | `[]` | Keys of Namespace labels that are copied into DefectDojo tags `k8s-ns-label.<key>:<value>` on the namespace product and on every test of the namespace. Each key must be a valid Kubernetes label key, unique regardless of case, and short enough for its tag to fit a DefectDojo tag (see docs/trivy.md for the limit); an invalid list stops the operator at start. The operator owns the tag prefix `k8s-ns-label.`. Enabling or changing the list, and changing the value of a listed label, uploads every report of the affected namespaces once. Empty copies no label |
 | nodeSelector | object | `{}` | Node labels for pod assignment |
 | podSecurityContext | object | `{"runAsNonRoot":true,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod-level security context # Ref: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/ |
 | reportKinds | list | `["VulnerabilityReport","ExposedSecretReport"]` | Trivy Operator report kinds to import. Supported: `VulnerabilityReport`, `ExposedSecretReport`. The tests of a kind the cluster does not serve stay open; remove the kind to close them |

@@ -13,8 +13,23 @@ import (
 )
 
 // target is the namespace and the cluster its reports are imported for.
-func (r *Reconciler) target(namespace string) trivy.Target {
-	return trivy.Target{Namespace: namespace, Cluster: r.config.ClusterName}
+func (r *Reconciler) target(ns *corev1.Namespace) trivy.Target {
+	return trivy.Target{
+		Namespace: ns.Name,
+		Cluster:   r.config.ClusterName,
+		LabelTags: r.wantedLabelTags(ns, nil),
+	}
+}
+
+// wantedLabelTags returns the namespace label tags that the product of a namespace has. ns is the namespace the
+// operator imports, or nil for one it does not: the labels of such a namespace are not followed, so its product keeps
+// the tags it has (have) for the listed keys.
+func (r *Reconciler) wantedLabelTags(ns *corev1.Namespace, have []string) []string {
+	if ns == nil {
+		return trivy.NamespaceLabelTagsOfKeys(have, r.config.NamespaceLabelTags)
+	}
+
+	return trivy.NamespaceLabelTags(r.config.NamespaceLabelTags, ns.Labels)
 }
 
 // excluded reports whether the name of the namespace matches an exclude pattern.
@@ -47,13 +62,13 @@ func (r *Reconciler) liveNamespace(ctx context.Context, name string) (*corev1.Na
 	return ns, nil
 }
 
-// isImportable reports whether the operator imports the reports of the namespace:
-// it exists, is not terminating and is not excluded.
-func (r *Reconciler) isImportable(ctx context.Context, name string) (bool, error) {
+// importableNamespace returns the namespace when the operator imports its reports: it exists, is not terminating
+// and is not excluded. Otherwise it returns nil.
+func (r *Reconciler) importableNamespace(ctx context.Context, name string) (*corev1.Namespace, error) {
 	ns, err := r.liveNamespace(ctx, name)
-	if err != nil || ns == nil {
-		return false, err
+	if err != nil || ns == nil || r.excluded(ns.Name) {
+		return nil, err
 	}
 
-	return !r.excluded(ns.Name), nil
+	return ns, nil
 }

@@ -211,7 +211,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, request reconcile.Request) (
 
 	r.markImportable(namespace)
 
-	if err = r.syncNamespace(ctx, dd, r.target(namespace)); err != nil {
+	if err = r.syncNamespace(ctx, dd, r.target(ns)); err != nil {
 		return reconcile.Result{}, err
 	}
 
@@ -427,7 +427,9 @@ func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target tr
 		closeErr = r.closeStaleTests(ctx, dd, target, remote.tests)
 	}
 
-	return errors.Join(append(p.uploadErrors, closeErr, r.setProductTags(ctx, dd, target.Namespace, remote.product))...)
+	tagsErr := r.setProductTags(ctx, dd, target.Namespace, remote.product, target.LabelTags)
+
+	return errors.Join(append(p.uploadErrors, closeErr, tagsErr)...)
 }
 
 // candidate is a current report with its workload, its test and what is remembered about the test.

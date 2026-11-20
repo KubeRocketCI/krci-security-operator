@@ -86,6 +86,10 @@ _Avoid_: component, workload (for the field)
 A `<key>:<value>` label on a product or test, used for filters. The operator writes none on findings. On a test, `k8s-workload` and `k8s-container` also name its stable workload and container.
 _Avoid_: label (for DefectDojo tags)
 
+**Namespace label tag**:
+The tag `k8s-ns-label.<label key>:<value>` that the operator copies from a Namespace label whose key the installer lists in `namespaceLabelTags`. It is on the namespace product and on every runtime test of the namespace, and the operator owns its prefix on the product.
+_Avoid_: tenant tag, environment tag, workload label tag
+
 ## Sync
 
 **Producer**:

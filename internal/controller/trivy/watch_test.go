@@ -47,7 +47,7 @@ func TestControllerOptions(t *testing.T) {
 }
 
 func TestNamespacePredicate(t *testing.T) {
-	p := namespacePredicate()
+	p := namespacePredicate(nil)
 	ns := namespaceObject(appNS, map[string]string{"team": "a"})
 
 	relabeled := ns.DeepCopy()
@@ -59,6 +59,52 @@ func TestNamespacePredicate(t *testing.T) {
 	assert.True(t, p.Create(event.CreateEvent{Object: ns}))
 	assert.True(t, p.Delete(event.DeleteEvent{Object: ns}))
 	assert.True(t, p.Update(event.UpdateEvent{ObjectOld: ns, ObjectNew: terminating}), "the start of the termination")
-	assert.False(t, p.Update(event.UpdateEvent{ObjectOld: ns, ObjectNew: relabeled}), "a label change decides nothing")
+	assert.False(t, p.Update(event.UpdateEvent{ObjectOld: ns, ObjectNew: relabeled}), "no label key is listed")
 	assert.False(t, p.Update(event.UpdateEvent{ObjectOld: ns, ObjectNew: ns.DeepCopy()}), "no relevant change")
+}
+
+func TestNamespacePredicate_ListedLabels(t *testing.T) {
+	p := namespacePredicate([]string{"example.com/tenant", "env"})
+
+	base := map[string]string{"example.com/tenant": "krci", "env": "dev", "owner": "a"}
+
+	tests := []struct {
+		name        string
+		from, to    map[string]string
+		terminating bool
+		want        bool
+	}{
+		{name: "a listed label gets another value", from: base, want: true,
+			to: map[string]string{"example.com/tenant": "other", "env": "dev", "owner": "a"}},
+		{name: "a listed label is removed", from: base, want: true,
+			to: map[string]string{"example.com/tenant": "krci", "owner": "a"}},
+		{name: "a label that is not listed changes", from: base,
+			to: map[string]string{"example.com/tenant": "krci", "env": "dev", "owner": "b"}},
+		{name: "a label that is not listed is added", from: base,
+			to: map[string]string{"example.com/tenant": "krci", "env": "dev", "owner": "a", "extra": "1"}},
+		{name: "a label that is not listed is removed", from: base,
+			to: map[string]string{"example.com/tenant": "krci", "env": "dev"}},
+		{name: "no label changes", from: base, to: base},
+		{name: "all labels are removed", from: base, want: true},
+		{name: "a listed label is added to a namespace without labels", to: map[string]string{"env": "dev"}, want: true},
+		{name: "a listed label with an empty value is removed", from: map[string]string{"env": ""}},
+		{name: "a listed label with an empty value is added", to: map[string]string{"env": ""}},
+		{name: "the case of the value of a listed label changes", from: map[string]string{"env": "Dev"},
+			to: map[string]string{"env": "dev"}},
+		{name: "a listed label with an empty value gets a value", from: map[string]string{"env": ""},
+			to: map[string]string{"env": "dev"}, want: true},
+		{name: "a namespace without labels", from: nil, to: nil},
+		{name: "the start of the termination", from: base, to: base, terminating: true, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			updated := namespaceObject(appNS, tt.to)
+			if tt.terminating {
+				updated.DeletionTimestamp = &metav1.Time{Time: scanDate}
+			}
+
+			assert.Equal(t, tt.want, p.Update(event.UpdateEvent{ObjectOld: namespaceObject(appNS, tt.from), ObjectNew: updated}))
+		})
+	}
 }
