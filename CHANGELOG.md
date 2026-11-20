@@ -6,6 +6,36 @@
 - Update current development version
 
 
+<a name="v0.3.0"></a>
+## [v0.3.0] - 2026-11-20
+### Features
+
+- Read the body of a new report version only
+- Strip managedFields from the cached objects
+
+### Bug Fixes
+
+- Apply the code rules found by the codebase review
+
+### Code Refactoring
+
+- Read the workload component from the resolver lists
+
+### Testing
+
+- Ground the fake DefectDojo in recorded answers
+
+### Routine
+
+- Lint shadowed predeclared identifiers
+- Classify tests and contract tooling as Sonar tests
+- Update current development version
+
+### Documentation
+
+- Add the code rules a review checks
+
+
 <a name="v0.2.0"></a>
 ## [v0.2.0] - 2026-11-19
 ### Features
@@ -69,5 +99,6 @@
 - Shorten the README and add a security model
 
 
-[Unreleased]: https://github.com/KubeRocketCI/krci-security-operator/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/KubeRocketCI/krci-security-operator/compare/v0.3.0...HEAD
+[v0.3.0]: https://github.com/KubeRocketCI/krci-security-operator/compare/v0.2.0...v0.3.0
 [v0.2.0]: https://github.com/KubeRocketCI/krci-security-operator/compare/v0.1.0...v0.2.0
