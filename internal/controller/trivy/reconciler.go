@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -31,8 +30,6 @@ import (
 )
 
 const (
-	// reportsPageSize is the number of full reports held in memory at a time.
-	reportsPageSize = 10
 	// dependencyRetry is the longest wait before a namespace is retried while an optional dependency is absent.
 	dependencyRetry = 5 * time.Minute
 	// secretTTL is how long the credentials are used before the Secret is read again.
@@ -120,10 +117,13 @@ type credentials struct{ url, token string }
 // the sweeper only wakes namespaces up.
 // The reconciler adds no finalizer and writes nothing to the cluster.
 type Reconciler struct {
-	// cache serves the watched Namespaces.
+	// cache serves the watched Namespaces and the metadata of the watched report kinds.
 	cache client.Reader
-	// reader reads without a cache: reports, workloads and the credentials Secret.
-	reader  client.Reader
+	// reader reads without a cache: report bodies, the metadata of report kinds that are not watched, workloads and
+	// the credentials Secret.
+	reader client.Reader
+	// watched holds the report kinds watched at start; only their metadata is listed from the cache.
+	watched []string
 	config  Config
 	connect Connector
 	now     func() time.Time
@@ -143,6 +143,8 @@ type Reconciler struct {
 	rejectedVersions map[string]map[testKey]rejection
 	// released holds the namespaces whose owned tests were closed because the namespace is gone or excluded.
 	released map[string]struct{}
+	// facts holds, per namespace, the facts of the report versions whose body was read, see keepFacts.
+	facts map[string]map[reportVersion]versionFacts
 
 	// productTypeLogged guards the one Info log of a Product Type that DefectDojo does not list.
 	productTypeLogged sync.Once
@@ -154,11 +156,13 @@ type Reconciler struct {
 	secretLogged bool
 }
 
-// NewReconciler returns a Reconciler. cache serves Namespaces, reader serves everything else.
-func NewReconciler(cache, reader client.Reader, cfg Config, connect Connector) *Reconciler {
+// NewReconciler returns a Reconciler. cache serves Namespaces and the metadata of the watched report kinds, reader
+// serves everything else.
+func NewReconciler(cache, reader client.Reader, cfg Config, watched []string, connect Connector) *Reconciler {
 	return &Reconciler{
 		cache:      cache,
 		reader:     reader,
+		watched:    slices.Clone(watched),
 		config:     cfg,
 		connect:    connect,
 		now:        time.Now,
@@ -169,6 +173,7 @@ func NewReconciler(cache, reader client.Reader, cfg Config, connect Connector) *
 
 		rejectedVersions: map[string]map[testKey]rejection{},
 		released:         map[string]struct{}{},
+		facts:            map[string]map[reportVersion]versionFacts{},
 	}
 }
 
@@ -290,10 +295,14 @@ func (r *Reconciler) logSecret(ctx context.Context, msg, secret string) {
 	log.Info(msg, "secret", secret)
 }
 
-// pass holds what one pass over a namespace accumulates across pages of reports.
+// pass holds what one pass over a namespace accumulates across its reports.
 type pass struct {
 	target   trivy.Target
 	resolver *trivy.WorkloadResolver
+	// reports holds the listed report metadata of the pass.
+	reports reportListing
+	// bodies reads report bodies and holds the facts of the versions read in the pass.
+	bodies *reportBodies
 	// current holds the tests the pass reimported or found up to date.
 	current map[testKey]reimportedReport
 	// chosen holds, per test, the chosen report.
@@ -304,9 +313,6 @@ type pass struct {
 	unlisted []string
 	// uploadErrors holds the uploads that failed in this pass; the reports are tried again in the next pass.
 	uploadErrors []error
-	// reportIndex holds, per report kind, the metadata of its reports by resource and container. It is listed at the
-	// first report that needs it.
-	reportIndex map[string]map[containerKey][]indexedReport
 	// ignored holds the reports whose ignoring the pass logged.
 	ignored map[ignoredReport]struct{}
 	// remote holds what DefectDojo lists for the namespace product, once it was needed.
@@ -339,7 +345,9 @@ func (c choice) before(other choice) bool {
 
 // reportUpload is a report that is about to be uploaded, with what is known about its test.
 type reportUpload struct {
-	report  *unstructured.Unstructured
+	report reportMeta
+	// body is the body of the report version, read before the upload; nil until it is read.
+	body    *unstructured.Unstructured
 	key     testKey
 	version reportVersion
 	// marker is the upload marker of the report with the request of its test.
@@ -354,6 +362,10 @@ type reportUpload struct {
 func (p *pass) reject(u reportUpload, rec rejection) {
 	p.rejected[u.key] = rec
 
+	p.keepEarlier(u)
+}
+
+func (p *pass) keepEarlier(u reportUpload) {
 	if u.prev != nil {
 		p.current[u.key] = *u.prev
 	}
@@ -364,37 +376,33 @@ func (p *pass) listed(title string) bool {
 	return !slices.Contains(p.unlisted, trivy.TitleKind(title))
 }
 
-// forget drops what the pass found for the reports of a kind, before a restarted listing delivers them again.
-// A report deleted in between then no longer counts as current.
-func (p *pass) forget(kind string) {
-	ofKind := func(title string) bool { return trivy.TitleKind(title) == kind }
-
-	maps.DeleteFunc(p.current, func(key testKey, _ reimportedReport) bool { return ofKind(key.title) })
-	maps.DeleteFunc(p.chosen, func(key testKey, _ choice) bool { return ofKind(key.title) })
-	maps.DeleteFunc(p.rejected, func(key testKey, _ rejection) bool { return ofKind(key.title) })
-}
-
-// syncNamespace reimports the reports of a namespace page by page, closes the tests of workloads and
+// syncNamespace reimports the reports of a namespace kind by kind, closes the tests of workloads and
 // containers that are gone and makes sure the namespace product has its tags.
 // A report that is missing closes nothing. A failed upload keeps its report for the next pass and does not stop
 // the other uploads and the closing; its error is returned with the others.
+// The facts of the report versions are kept at the end of every pass, also one that fails or panics.
 func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target trivy.Target) error {
 	p := &pass{
-		target:      target,
-		resolver:    trivy.NewWorkloadResolver(r.reader, target.Namespace, r.config.ComponentPrefixes),
-		current:     map[testKey]reimportedReport{},
-		chosen:      map[testKey]choice{},
-		rejected:    map[testKey]rejection{},
-		reportIndex: map[string]map[containerKey][]indexedReport{},
-		ignored:     map[ignoredReport]struct{}{},
+		target:   target,
+		resolver: trivy.NewWorkloadResolver(r.reader, target.Namespace, r.config.ComponentPrefixes),
+		reports:  newReportListing(),
+		bodies:   newReportBodies(r.reader, target.Namespace, r.knownFacts(target.Namespace)),
+		current:  map[testKey]reimportedReport{},
+		chosen:   map[testKey]choice{},
+		rejected: map[testKey]rejection{},
+		ignored:  map[ignoredReport]struct{}{},
 	}
+
+	defer r.keepFacts(target.Namespace, p)
 
 	if err := r.reimportReports(ctx, dd, p); err != nil {
-		return err
+		return errors.Join(append(p.uploadErrors, err)...)
 	}
 
-	// The close builds its own lists, see expectedTitles.
-	p.resolver, p.reportIndex = nil, nil
+	r.keepFacts(target.Namespace, p)
+
+	// The close builds its own lists, see expectedTitles, and reads no report.
+	p.resolver, p.reports, p.bodies = nil, reportListing{}, nil
 
 	if len(p.unlisted) > 0 {
 		ctrl.LoggerFrom(ctx).Info("Skipped the report kinds that the cluster does not serve", "kinds", p.unlisted)
@@ -422,87 +430,172 @@ func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target tr
 	return errors.Join(append(p.uploadErrors, closeErr, r.setProductTags(ctx, dd, target.Namespace, remote.product))...)
 }
 
-// reimportPage reimports the reports of one page.
-// A report version DefectDojo rejects is remembered, see Reconciler.rejectedVersions, and does not fail the pass.
-func (r *Reconciler) reimportPage(ctx context.Context, dd DefectDojo, p *pass, page []unstructured.Unstructured) error {
-	for i := range page {
-		err := r.reimportOne(ctx, dd, p, &page[i])
-
-		// The report is not needed after its pass: free it before the rest of the page is reimported.
-		page[i].Object = nil
-
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
+// candidate is a current report with its workload, its test and what is remembered about the test.
+type candidate struct {
+	workload trivy.Workload
+	// ref is the image reference of the container of the report in the pod template of the workload.
+	ref       string
+	component string
+	mine      choice
+	// held is true when the version is a rejected version whose retry is not due.
+	held bool
+	u    reportUpload
 }
 
-// reimportOne reimports one report. A report is not reimported when it is broken, marked for deletion,
-// of a workload that is gone, superseded or of a kind the operator does not read, of a container that is not in the
-// pod template of its workload, or when another current report of the same test comes first.
-func (r *Reconciler) reimportOne(ctx context.Context, dd DefectDojo, p *pass, report *unstructured.Unstructured) error {
-	log := ctrl.LoggerFrom(ctx).WithValues("report", report.GetName(), "kind", report.GetKind())
+// reimportOne decides on one report and reimports it when it is chosen and changed. A report is not reimported when
+// it is marked for deletion, broken or expired, of a workload that is gone, superseded or of a kind the operator does
+// not read, of a container that is not in the pod template of its workload, gone at its read, or when another current
+// report of the same test comes first.
+// The facts of an unknown version are read before the choice, so a broken report takes no choice. carried is the body
+// of the record version when a read of the same pass returned it.
+// A report version DefectDojo rejects is remembered, see Reconciler.rejectedVersions, and does not fail the pass.
+func (r *Reconciler) reimportOne(
+	ctx context.Context,
+	dd DefectDojo,
+	p *pass,
+	rec reportMeta,
+	carried *unstructured.Unstructured,
+) error {
+	log := ctrl.LoggerFrom(ctx).WithValues("report", rec.obj.GetName(), "kind", rec.kind)
 
-	if skipReport(log, report) {
+	if skipReport(log, rec.obj) {
 		return nil
 	}
 
-	workload, image, ok, err := r.currentWorkload(ctx, p, report)
+	c, ok, err := r.candidateOf(ctx, p, rec)
 	if err != nil || !ok {
 		return err
 	}
 
-	component, err := p.resolver.Component(ctx, workload)
+	// A workload report of a held rejected version is not a current report: it takes no choice of the test.
+	if c.held && c.mine.onWorkload {
+		p.keepRejected(log, c.u)
+
+		return nil
+	}
+
+	f, read, body, err := p.bodies.facts(ctx, rec)
 	if err != nil {
 		return err
 	}
 
-	dest := trivy.NewReimport(p.target, report, workload, component, image)
-	key := testKey{product: dest.Product, engagement: dest.Engagement, title: dest.TestTitle}
-	mine := choice{report: report.GetName(), onWorkload: namesWorkload(report, workload)}
+	if read != sameVersion {
+		return r.redecide(ctx, dd, p, rec, read, body)
+	}
 
-	u := reportUpload{report: report, key: key, version: versionOf(report), marker: dest.UploadMarker(report)}
+	if f.broken != "" {
+		log.Info("Skipped a broken report", "reason", f.broken)
+
+		return nil
+	}
+
+	if body == nil {
+		body = carried
+	}
+
+	c.u.body = body
+
+	return r.chooseAndUpload(ctx, dd, p, log, c, f)
+}
+
+// redecide adopts a read that returned another version or found the report gone. Another version is decided again
+// from the first rule with the body of the read: the pass holds the facts of the read version, so that run sends no
+// GET and decides once. A report that is gone is not current.
+func (r *Reconciler) redecide(
+	ctx context.Context,
+	dd DefectDojo,
+	p *pass,
+	rec reportMeta,
+	read readResult,
+	body *unstructured.Unstructured,
+) error {
+	next, ok := p.reports.adopt(rec.kind, rec.obj.GetName(), read, body)
+	if !ok {
+		ctrl.LoggerFrom(ctx).V(1).Info("Skipped a report that is gone", "report", rec.obj.GetName(), "kind", rec.kind)
+
+		return nil
+	}
+
+	return r.reimportOne(ctx, dd, p, next, body)
+}
+
+// candidateOf returns the report as a candidate of its test; ok is false, without an error, when it does not describe
+// a workload as it is now.
+func (r *Reconciler) candidateOf(ctx context.Context, p *pass, rec reportMeta) (candidate, bool, error) {
+	workload, ref, ok, err := r.currentWorkload(ctx, p, rec)
+	if err != nil || !ok {
+		return candidate{}, false, err
+	}
+
+	component, err := p.resolver.Component(ctx, workload)
+	if err != nil {
+		return candidate{}, false, err
+	}
+
+	// The layout does not depend on the image.
+	key := keyOf(trivy.NewReimport(p.target, rec.kind, rec.obj, workload, component, trivy.Image{}))
+
+	u := reportUpload{report: rec, key: key, version: versionOf(rec.obj)}
 	u.prev = r.lastReimport(p.target.Namespace, key)
 	u.rejection = r.rejectionOf(p.target.Namespace, key, u.version)
-	held := u.rejection != nil && !r.retryDue(*u.rejection)
 
-	// A workload report of a held rejected version is not a current report: it takes no choice of the test.
-	if held && mine.onWorkload {
-		p.keepRejected(log, u)
+	return candidate{
+		workload:  workload,
+		ref:       ref,
+		component: component,
+		mine:      choice{report: rec.obj.GetName(), onWorkload: namesWorkload(rec.obj, workload)},
+		held:      u.rejection != nil && !r.retryDue(*u.rejection),
+		u:         u,
+	}, true, nil
+}
 
+func keyOf(dest trivy.Reimport) testKey {
+	return testKey{product: dest.Product, engagement: dest.Engagement, title: dest.TestTitle}
+}
+
+// chooseAndUpload makes the report the chosen report of its test and uploads it unless its test holds it, its version
+// is held as rejected, or a report on its stable workload comes first.
+func (r *Reconciler) chooseAndUpload(
+	ctx context.Context,
+	dd DefectDojo,
+	p *pass,
+	log logr.Logger,
+	c candidate,
+	f versionFacts,
+) error {
+	u := c.u
+
+	if !p.choose(ctx, u.key, c.mine) {
 		return nil
 	}
 
-	if !p.choose(ctx, key, mine) {
-		return nil
-	}
+	dest := trivy.NewReimport(p.target, u.report.kind, u.report.obj, c.workload, c.component, f.image.For(c.ref))
+	u.marker = dest.UploadMarker(u.report.obj)
 
 	if u.prev != nil && u.prev.reportVersion == u.version && u.prev.marker == u.marker {
-		p.current[key] = *u.prev
+		p.current[u.key] = *u.prev
 
 		return nil
 	}
 
-	if held {
+	if c.held {
 		p.keepRejected(log, u)
 
 		return nil
 	}
 
-	used, err := r.workloadReport(ctx, p, key, report, workload)
+	used, err := r.workloadReport(ctx, p, u.key, u.report, c.workload)
 	if err != nil {
 		return err
 	}
 
 	if used != "" {
-		p.logIgnored(ctx, key.title, used, report.GetName())
+		p.logIgnored(ctx, u.key.title, used, u.report.obj.GetName())
 
 		return nil
 	}
 
-	return r.upload(ctx, dd, p, dest, u, workload)
+	return r.upload(ctx, dd, p, dest, u, c.workload)
 }
 
 // upload reimports the report unless its test already holds it, and remembers the result. A reimport that creates the
@@ -515,7 +608,7 @@ func (r *Reconciler) upload(
 	u reportUpload,
 	workload trivy.Workload,
 ) error {
-	log := ctrl.LoggerFrom(ctx).WithValues("report", u.report.GetName(), "kind", u.report.GetKind())
+	log := ctrl.LoggerFrom(ctx).WithValues("report", u.report.obj.GetName(), "kind", u.report.kind)
 
 	test, exists, err := r.locateTest(ctx, dd, p, u)
 	if err != nil {
@@ -531,6 +624,10 @@ func (r *Reconciler) upload(
 		log.V(1).Info("Skipped a report that DefectDojo already holds", "test", test.ID)
 
 		return nil
+	}
+
+	if ok, err := r.readForUpload(ctx, p, log, &u); err != nil || !ok {
+		return err
 	}
 
 	entry, err := r.uploadReport(ctx, dd, p, dest, u, workload, exists)
@@ -553,14 +650,41 @@ func (r *Reconciler) upload(
 	return nil
 }
 
-// skipReport reports whether the fields of the report alone rule out its reimport: it is marked for deletion, broken
-// or expired.
-func skipReport(log logr.Logger, report *unstructured.Unstructured) bool {
+// readForUpload reads the body of the upload unless it is in hand. ok is false, without an error, when the read
+// returned another version or found the report gone: the marker names the listed version, so nothing is uploaded in
+// this pass and the test keeps what it reflects. The pass that the change wakes imports it.
+func (r *Reconciler) readForUpload(ctx context.Context, p *pass, log logr.Logger, u *reportUpload) (bool, error) {
+	if u.body != nil {
+		return true, nil
+	}
+
+	body, read, err := p.bodies.bodyFor(ctx, u.report)
+	if err != nil {
+		return false, err
+	}
+
+	if read != sameVersion {
+		p.reports.adopt(u.report.kind, u.report.obj.GetName(), read, body)
+		p.keepEarlier(*u)
+
+		log.V(1).Info("Skipped the upload of a report that changed after it was listed", "read", read.String())
+
+		return false, nil
+	}
+
+	u.body = body
+
+	return true, nil
+}
+
+// skipReport reports whether the metadata of the report alone rules out its reimport: it is marked for deletion,
+// names no test or expired.
+func skipReport(log logr.Logger, report metav1.Object) bool {
 	if report.GetDeletionTimestamp() != nil {
 		return true
 	}
 
-	if reason := trivy.BrokenReport(report); reason != "" {
+	if reason := trivy.BrokenLabels(report); reason != "" {
 		log.Info("Skipped a broken report", "reason", reason)
 
 		return true
@@ -576,16 +700,16 @@ func skipReport(log logr.Logger, report *unstructured.Unstructured) bool {
 }
 
 // currentWorkload returns the stable workload of a report that describes it as it is now and the image reference of
-// the container of the report in its pod template. ok is false, without an error, when the report is not reimported
-// for that reason.
+// the container of the report in its pod template, which is not a trivy.Image. ok is false, without an error, when
+// the report is not reimported for that reason.
 func (r *Reconciler) currentWorkload(
 	ctx context.Context,
 	p *pass,
-	report *unstructured.Unstructured,
-) (workload trivy.Workload, image string, ok bool, err error) {
-	log := ctrl.LoggerFrom(ctx).WithValues("report", report.GetName(), "kind", report.GetKind())
+	rec reportMeta,
+) (workload trivy.Workload, ref string, ok bool, err error) {
+	log := ctrl.LoggerFrom(ctx).WithValues("report", rec.obj.GetName(), "kind", rec.kind)
 
-	workload, state, err := p.resolver.ResolveReport(ctx, report)
+	workload, state, err := p.resolver.ResolveReport(ctx, rec.obj)
 	if err != nil {
 		return trivy.Workload{}, "", false, err
 	}
@@ -612,9 +736,9 @@ func (r *Reconciler) currentWorkload(
 		return trivy.Workload{}, "", false, fmt.Errorf("failed to read the containers of %s: %w", workload, err)
 	}
 
-	container := trivy.ContainerOf(report)
+	container := trivy.ContainerOf(rec.obj)
 
-	image, in := containers[container]
+	ref, in := containers[container]
 	if !in {
 		log.V(1).Info("Skipped a report of a container that is not in the pod template",
 			"workload", workload.String(), "container", container)
@@ -622,11 +746,11 @@ func (r *Reconciler) currentWorkload(
 		return workload, "", false, nil
 	}
 
-	return workload, image, true, nil
+	return workload, ref, true, nil
 }
 
 // namesWorkload reports whether the report is on the stable workload itself, not on a ReplicaSet or Job of it.
-func namesWorkload(report *unstructured.Unstructured, workload trivy.Workload) bool {
+func namesWorkload(report metav1.Object, workload trivy.Workload) bool {
 	return strings.EqualFold(report.GetLabels()[trivy.LabelResourceKind], workload.Kind)
 }
 
@@ -690,11 +814,11 @@ func (r *Reconciler) uploadFailed(ctx context.Context, p *pass, u reportUpload, 
 	log := ctrl.LoggerFrom(ctx)
 
 	if u.rejection == nil {
-		log.Error(err, "DefectDojo rejected a report version", "report", u.report.GetName(), "kind", u.report.GetKind())
-		rejectedReports.WithLabelValues(u.report.GetKind()).Inc()
+		log.Error(err, "DefectDojo rejected a report version", "report", u.report.obj.GetName(), "kind", u.report.kind)
+		rejectedReports.WithLabelValues(u.report.kind).Inc()
 	} else {
-		log.V(1).Info("DefectDojo rejected a report version again", "report", u.report.GetName(),
-			"kind", u.report.GetKind())
+		log.V(1).Info("DefectDojo rejected a report version again", "report", u.report.obj.GetName(),
+			"kind", u.report.kind)
 	}
 
 	rec := rejection{version: u.version, at: r.now()}
@@ -731,9 +855,9 @@ func (r *Reconciler) uploadReport(
 	workload trivy.Workload,
 	testExists bool,
 ) (reimportedReport, error) {
-	payload, err := json.Marshal(trivy.Payload(u.report, workload))
+	payload, err := json.Marshal(trivy.Payload(u.body, workload))
 	if err != nil {
-		return reimportedReport{}, fmt.Errorf("failed to marshal report %s: %w", u.report.GetName(), err)
+		return reimportedReport{}, fmt.Errorf("failed to marshal report %s: %w", u.report.obj.GetName(), err)
 	}
 
 	buildID := ""
@@ -745,20 +869,24 @@ func (r *Reconciler) uploadReport(
 
 	res, err := dd.Reimport(ctx, dest.Request(r.config.ProductType, r.now(), buildID, payload))
 	if err != nil {
-		return reimportedReport{}, fmt.Errorf("failed to import report %s: %w", u.report.GetName(), err)
+		return reimportedReport{}, fmt.Errorf("failed to import report %s: %w", u.report.obj.GetName(), err)
 	}
 
 	if res.TestID == 0 {
-		return reimportedReport{}, fmt.Errorf("defectdojo did not return a test for report %s", u.report.GetName())
+		return reimportedReport{}, fmt.Errorf("defectdojo did not return a test for report %s", u.report.obj.GetName())
 	}
 
 	return reimportedReport{reportVersion: u.version, marker: u.marker, testID: res.TestID}, nil
 }
 
-// reimportReports reimports every page of reports of the configured kinds in the namespace; only one page is held at
-// a time. The kinds it could not list completely are recorded in the pass.
+// reimportReports lists and reimports the reports of the configured kinds in the namespace, kind by kind. The kinds
+// the cluster does not serve are recorded in the pass.
 func (r *Reconciler) reimportReports(ctx context.Context, dd DefectDojo, p *pass) error {
 	for _, kind := range r.config.ReportKinds {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		listed, err := r.reimportKind(ctx, dd, p, kind)
 		if err != nil {
 			return err
@@ -772,45 +900,70 @@ func (r *Reconciler) reimportReports(ctx context.Context, dd DefectDojo, p *pass
 	return nil
 }
 
-// reimportKind reimports every page of the reports of one kind in the namespace. The result is false when the cluster
-// does not serve the kind, also when it stops serving it while its pages are listed. When the listing starts again
-// (see trivy.ListPages) the pass forgets what the earlier listing found, and the reports reimported or rejected
-// before are skipped as unchanged.
+// reimportKind lists the metadata of the reports of one kind in the namespace completely, then decides on them in
+// report name order. The result is false when the cluster does not serve the kind, also when it stops serving it
+// while its pages are listed. A report that a read of the pass found gone is skipped.
 func (r *Reconciler) reimportKind(ctx context.Context, dd DefectDojo, p *pass, kind string) (bool, error) {
-	gvk := trivy.ReportGVK(kind)
-
-	err := trivy.ListPages(ctx, trivy.Listing[*unstructured.UnstructuredList]{
-		Reader:    r.reader,
-		Namespace: p.target.Namespace,
-		What:      kind,
-		PageSize:  reportsPageSize,
-
-		KindMayBeUnserved: true,
-		NewList: func() *unstructured.UnstructuredList {
-			list := &unstructured.UnstructuredList{}
-			list.SetGroupVersionKind(gvk.GroupVersion().WithKind(kind + "List"))
-
-			return list
-		},
-		Each: func(list *unstructured.UnstructuredList) error {
-			for i := range list.Items {
-				// The item kind is not always set on a list read.
-				list.Items[i].SetGroupVersionKind(gvk)
-			}
-
-			return r.reimportPage(ctx, dd, p, list.Items)
-		},
-		Restart: func() { p.forget(kind) },
-	})
-
-	switch {
-	case errors.Is(err, trivy.ErrKindNotServed):
-		return false, nil
-	case err != nil:
+	listed, err := r.listReports(ctx, p, kind)
+	if err != nil || !listed {
 		return false, err
 	}
 
+	for _, name := range p.reports.worklist[kind] {
+		rec, ok := p.reports.record(kind, name)
+		if !ok {
+			continue
+		}
+
+		if err = r.reimportOne(ctx, dd, p, rec, nil); err != nil {
+			return false, err
+		}
+	}
+
 	return true, nil
+}
+
+func (r *Reconciler) knownFacts(namespace string) func(reportVersion) (versionFacts, bool) {
+	return func(version reportVersion) (versionFacts, bool) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+
+		f, ok := r.facts[namespace][version]
+
+		return f, ok
+	}
+}
+
+// keepFacts keeps the facts of the namespace for the next pass, once per pass: a pass whose facts are kept has no
+// bodies. A kind whose listing completed in the pass keeps the facts of the versions of its records only: the listed
+// version, or the one a read returned instead. Any other kind keeps the facts kept before and those read in the pass.
+func (r *Reconciler) keepFacts(namespace string, p *pass) {
+	if p.bodies == nil {
+		return
+	}
+
+	effective := p.reports.versions()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	kept := map[reportVersion]versionFacts{}
+
+	for _, facts := range []map[reportVersion]versionFacts{r.facts[namespace], p.bodies.read} {
+		for version, f := range facts {
+			if _, ok := effective[version]; ok || !p.reports.isCompleted(f.kind) {
+				kept[version] = f
+			}
+		}
+	}
+
+	if len(kept) == 0 {
+		delete(r.facts, namespace)
+
+		return
+	}
+
+	r.facts[namespace] = kept
 }
 
 // lastReimport returns the report the test reflects; nil when none is known.
@@ -943,6 +1096,7 @@ func (r *Reconciler) markReleased(namespace string) {
 	delete(r.reimported, namespace)
 	delete(r.rejectedVersions, namespace)
 	delete(r.closed, namespace)
+	delete(r.facts, namespace)
 }
 
 // markImportable clears the released mark of a namespace that the pass imports.

@@ -77,9 +77,9 @@ func TestTitle(reportKind string, workload Workload, container string) string {
 	return Shorten(reportKind+" "+workload.String()+"/"+container, MaxTitleLen)
 }
 
-// ReportTitle is the title of the DefectDojo test of a report of a workload.
-func ReportTitle(report *unstructured.Unstructured, workload Workload) string {
-	return TestTitle(report.GetKind(), workload, ContainerOf(report))
+// ReportTitle is the title of the DefectDojo test of a report of the kind of a workload.
+func ReportTitle(kind string, report metav1.Object, workload Workload) string {
+	return TestTitle(kind, workload, ContainerOf(report))
 }
 
 // ResourceRef returns the kind and the name of the resource a report was produced for.
@@ -98,7 +98,7 @@ func ResourceRef(report metav1.Object) (kind, name string) {
 func ContainerOf(report metav1.Object) string { return report.GetLabels()[LabelContainerName] }
 
 // NamesResource reports whether the report carries both the kind and the name of its resource.
-func NamesResource(report *unstructured.Unstructured) bool {
+func NamesResource(report metav1.Object) bool {
 	kind, name := ResourceRef(report)
 
 	return kind != "" && name != ""
@@ -193,22 +193,23 @@ type Reimport struct {
 	Tags []string
 }
 
-// NewReimport derives the DefectDojo destination of a report of a workload container in a namespace:
-// the namespace product, the engagement of the integration and the test of the container.
-// component is the value of the app tag; empty gives no app tag. imageRef is the image reference of the container
-// in the pod template of the workload, see ImageOf.
+// NewReimport derives the DefectDojo destination of a report of the kind of a workload container in a namespace:
+// the namespace product, the engagement of the integration and the test of the container. It reads the labels,
+// annotations and namespace of the report only.
+// component is the value of the app tag; empty gives no app tag. image is the image of the report as the container
+// reference names it, see Image.For.
 func NewReimport(
 	target Target,
-	report *unstructured.Unstructured,
+	kind string,
+	report metav1.Object,
 	workload Workload,
-	component, imageRef string,
+	component string,
+	image Image,
 ) Reimport {
-	image := ImageOf(report, imageRef)
-
 	return Reimport{
 		Product:    ProductName(target.Cluster, target.Namespace),
 		Engagement: EngagementTrivyOperator,
-		TestTitle:  ReportTitle(report, workload),
+		TestTitle:  ReportTitle(kind, report, workload),
 		Service:    Service(report, workload),
 		Version:    Shorten(image.Version(), MaxVersionLen),
 		Tags: slices.DeleteFunc([]string{
@@ -274,13 +275,11 @@ var resultFields = map[string]string{
 	KindExposedSecretReport: "secrets",
 }
 
-// BrokenReport returns why the report must not be uploaded, or "" when it can be.
-// DefectDojo reads a report without labels, without the report block or without its result list as a report
-// with no findings and closes the findings of its test. Trivy Operator always writes the list, also when it is
-// empty; an empty list is not broken.
+// BrokenLabels returns why the metadata of the report rules out its upload, or "" when it does not.
 // A report without the resource kind or the resource name (see ResourceRef) is broken: it names no test.
-// A report without the container name label is broken: it names no test.
-func BrokenReport(report *unstructured.Unstructured) string {
+// A report without the container name label is broken: it names no test. DefectDojo reads a report without labels as
+// a report with no findings and closes the findings of its test.
+func BrokenLabels(report metav1.Object) string {
 	if !NamesResource(report) {
 		return "no resource kind or name"
 	}
@@ -289,12 +288,20 @@ func BrokenReport(report *unstructured.Unstructured) string {
 		return "no container name"
 	}
 
+	return ""
+}
+
+// BrokenBody returns why the body of a report of the kind rules out its upload, or "" when it does not.
+// DefectDojo reads a report without the report block or without its result list as a report with no findings and
+// closes the findings of its test. Trivy Operator always writes the list, also when it is empty; an empty list is not
+// broken. The body does not change while the report version holds.
+func BrokenBody(kind string, report *unstructured.Unstructured) string {
 	block, ok := report.Object["report"].(map[string]any)
 	if !ok {
 		return "no report block"
 	}
 
-	field, ok := resultFields[report.GetKind()]
+	field, ok := resultFields[kind]
 	if !ok {
 		return ""
 	}
@@ -364,7 +371,7 @@ var stableKinds = map[string]string{workloadDeployment: kindDeployment, workload
 
 // serviceResource returns the resource kind and name the parser reads: the stable workload, else the report's own.
 // The name is always written as a label, so a name found only in the annotation reaches the parser.
-func serviceResource(report *unstructured.Unstructured, workload Workload) (kind, name string) {
+func serviceResource(report metav1.Object, workload Workload) (kind, name string) {
 	if stable := stableKinds[workload.Kind]; stable != "" {
 		return stable, workload.Name
 	}
@@ -374,14 +381,14 @@ func serviceResource(report *unstructured.Unstructured, workload Workload) (kind
 
 // Service returns the finding service DefectDojo derives from the report sent by Payload,
 // "<namespace>/<Kind>/<name>/<container>", shortened to MaxServiceLen.
-func Service(report *unstructured.Unstructured, workload Workload) string {
+func Service(report metav1.Object, workload Workload) string {
 	kind, name := serviceResource(report, workload)
 
 	return Shorten(serviceNamespace(report)+"/"+kind+"/"+name+"/"+ContainerOf(report), MaxServiceLen)
 }
 
 // serviceNamespace returns the resource namespace label, else the namespace of the report.
-func serviceNamespace(report *unstructured.Unstructured) string {
+func serviceNamespace(report metav1.Object) string {
 	if namespace := report.GetLabels()[LabelResourceNamespace]; namespace != "" {
 		return namespace
 	}

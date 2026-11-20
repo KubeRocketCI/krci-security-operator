@@ -24,6 +24,10 @@ _Avoid_: artifact, container (for the image)
 One Trivy Operator object about one container of one workload: a VulnerabilityReport or an ExposedSecretReport.
 _Avoid_: scan, result
 
+**Report version**:
+The UID and resourceVersion of a report. The content of a report does not change while its version holds.
+_Avoid_: revision (the Deployment's word), generation
+
 **Current report**:
 A report of a stable workload's live revision whose container is still in the pod template.
 _Avoid_: latest report, fresh report
@@ -105,7 +109,7 @@ The current report a runtime test is reimported from when several current report
 _Avoid_: claimed report, winning report
 
 **Rejected report version**:
-A version of a report (its UID and resourceVersion) that DefectDojo rejected with a client error. It is uploaded again once per `resyncPeriod`, and logged at Error and counted once.
+A report version that DefectDojo rejected with a client error. It is uploaded again once per `resyncPeriod`, and logged at Error and counted once.
 _Avoid_: failed report, bad report
 
 **Released namespace**:

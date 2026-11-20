@@ -21,7 +21,8 @@ import (
 func (h *harness) restart() {
 	h.t.Helper()
 
-	r := NewReconciler(h.client, h.client, h.reconciler.config, func(string, string) DefectDojo { return h.dd })
+	r := NewReconciler(h.reconciler.cache, h.reconciler.reader, h.reconciler.config, h.reconciler.watched,
+		func(string, string) DefectDojo { return h.dd })
 	r.now, r.random = h.reconciler.now, h.reconciler.random
 	h.reconciler = r
 }

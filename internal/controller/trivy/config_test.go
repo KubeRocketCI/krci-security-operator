@@ -63,6 +63,22 @@ func TestLoadConfig_Overrides(t *testing.T) {
 	assert.Equal(t, []string{"VulnerabilityReport"}, cfg.ReportKinds)
 }
 
+func TestLoadConfig_DuplicateReportKindsAreIgnored(t *testing.T) {
+	for value, want := range map[string][]string{
+		"VulnerabilityReport,VulnerabilityReport": {"VulnerabilityReport"},
+		"ExposedSecretReport, VulnerabilityReport,ExposedSecretReport,VulnerabilityReport": {
+			"ExposedSecretReport", "VulnerabilityReport",
+		},
+	} {
+		env := requiredEnv()
+		env[EnvReportKinds] = value
+
+		cfg, err := LoadConfig(lookupFrom(env))
+		require.NoError(t, err, value)
+		assert.Equal(t, want, cfg.ReportKinds, "the first occurrence is kept, in order")
+	}
+}
+
 func TestLoadConfig_EmptyListsStayEmpty(t *testing.T) {
 	env := requiredEnv()
 	env[EnvComponentPrefixes] = ""

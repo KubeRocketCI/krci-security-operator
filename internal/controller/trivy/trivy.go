@@ -43,17 +43,18 @@ func controllerOptions(cfg Config) controller.Options {
 
 // SetupWithManager registers the module with the manager: the namespace controller and the sweeper.
 //
-// The controller watches the metadata of the reports only. The full reports, the workloads and the credentials
-// Secret are read through the API reader and never cached.
+// The controller watches the metadata of the reports only, and lists the metadata of a watched kind from the cache.
+// The report bodies, the metadata of a kind not served at start, the workloads and the credentials Secret are read
+// through the API reader and never cached.
 func SetupWithManager(mgr ctrl.Manager, cfg Config) error {
-	r := NewReconciler(mgr.GetCache(), mgr.GetAPIReader(), cfg, NewConnector(defectdojo.New()))
-
 	b := ctrl.NewControllerManagedBy(mgr).
 		Named(controllerName).
 		For(&corev1.Namespace{}, builder.WithPredicates(namespacePredicate())).
 		WithOptions(controllerOptions(cfg))
 
 	log := mgr.GetLogger().WithName(controllerName)
+
+	var watched []string
 
 	for _, kind := range cfg.ReportKinds {
 		gvk := trivy.ReportGVK(kind)
@@ -74,7 +75,11 @@ func SetupWithManager(mgr ctrl.Manager, cfg Config) error {
 
 		b = b.Watches(report, handler.EnqueueRequestsFromMapFunc(enqueueNamespaceOf),
 			builder.OnlyMetadata, builder.WithPredicates(reportPredicate()))
+
+		watched = append(watched, kind)
 	}
+
+	r := NewReconciler(mgr.GetCache(), mgr.GetAPIReader(), cfg, watched, NewConnector(defectdojo.New()))
 
 	b = b.WatchesRawSource(source.Channel(r.wake, handler.EnqueueRequestsFromMapFunc(enqueueNamed)))
 

@@ -285,8 +285,8 @@ func descendingReports() interceptor.Funcs {
 				return err
 			}
 
-			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GroupVersionKind().Group == trivy.TrivyGroup {
-				slices.Reverse(u.Items)
+			if l, ok := list.(*metav1.PartialObjectMetadataList); ok && l.GroupVersionKind().Group == trivy.TrivyGroup {
+				slices.Reverse(l.Items)
 			}
 
 			return nil

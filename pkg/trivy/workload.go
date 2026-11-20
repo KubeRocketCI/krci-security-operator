@@ -11,7 +11,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -155,10 +154,7 @@ func NewWorkloadResolver(reader client.Reader, namespace string, componentPrefix
 }
 
 // ResolveReport returns the workload of a report, see ResourceRef and Resolve.
-func (r *WorkloadResolver) ResolveReport(
-	ctx context.Context,
-	report *unstructured.Unstructured,
-) (Workload, WorkloadState, error) {
+func (r *WorkloadResolver) ResolveReport(ctx context.Context, report metav1.Object) (Workload, WorkloadState, error) {
 	kind, name := ResourceRef(report)
 
 	return r.Resolve(ctx, kind, name)
