@@ -72,7 +72,7 @@ func TestReconcile_NeverClosesTheTestsOfAnotherClusterWithTheSameNamespaceName(t
 	cfg := baseConfig()
 	cfg.ClusterName = "prod-eu"
 
-	prod := NewReconciler(h.client, h.client, cfg, func(string, string) DefectDojo { return h.dd })
+	prod := NewReconciler(h.client, h.client, cfg, h.reconciler.watched, func(string, string) DefectDojo { return h.dd })
 	prod.now = h.reconciler.now
 	prod.random = h.reconciler.random
 

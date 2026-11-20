@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -30,6 +31,11 @@ func loadFixture(t *testing.T, name string) *unstructured.Unstructured {
 
 func testTarget() Target {
 	return Target{Namespace: testNamespace, Cluster: "in-cluster"}
+}
+
+// newReimport is NewReimport with the kind and the image of the report, for a container without a known reference.
+func newReimport(target Target, report *unstructured.Unstructured, workload Workload, component string) Reimport {
+	return NewReimport(target, report.GetKind(), report, workload, component, ReportImage(report))
 }
 
 func TestReportImport(t *testing.T) {
@@ -115,7 +121,7 @@ func TestReportImport(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := NewReimport(testTarget(), loadFixture(t, tt.fixture), tt.workload, tt.component, "")
+			got := newReimport(testTarget(), loadFixture(t, tt.fixture), tt.workload, tt.component)
 
 			assert.Equal(t, tt.want, got)
 		})
@@ -125,7 +131,7 @@ func TestReportImport(t *testing.T) {
 func TestReportImport_TagValuesAreTagSafe(t *testing.T) {
 	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
 
-	got := NewReimport(Target{Namespace: "Team A,B", Cluster: "Prod EU"}, report, Workload{"deployment", "app"}, "My,App x", "")
+	got := newReimport(Target{Namespace: "Team A,B", Cluster: "Prod EU"}, report, Workload{"deployment", "app"}, "My,App x")
 
 	assert.Contains(t, got.Tags, "k8s-cluster:prod-eu")
 	assert.Contains(t, got.Tags, "k8s-namespace:team-a-b")
@@ -133,7 +139,7 @@ func TestReportImport_TagValuesAreTagSafe(t *testing.T) {
 }
 
 func TestReportImport_OneTagPerKey(t *testing.T) {
-	got := NewReimport(testTarget(), loadFixture(t, "vulnerabilityreport_replicaset.json"), Workload{"deployment", "app"}, "x", "")
+	got := newReimport(testTarget(), loadFixture(t, "vulnerabilityreport_replicaset.json"), Workload{"deployment", "app"}, "x")
 
 	keys := map[string]int{}
 
@@ -151,8 +157,8 @@ func TestReportImport_ProductNamesTheClusterAndTheNamespace(t *testing.T) {
 	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
 	workload := Workload{"deployment", "test-go-app"}
 
-	a := NewReimport(Target{Namespace: "payments", Cluster: "prod-eu"}, report, workload, "x", "")
-	b := NewReimport(Target{Namespace: "payments", Cluster: "prod-us"}, report, workload, "x", "")
+	a := newReimport(Target{Namespace: "payments", Cluster: "prod-eu"}, report, workload, "x")
+	b := newReimport(Target{Namespace: "payments", Cluster: "prod-us"}, report, workload, "x")
 
 	assert.Equal(t, "prod-eu/payments", a.Product)
 	assert.Equal(t, "prod-us/payments", b.Product, "the same namespace name in two clusters gives two products")
@@ -179,7 +185,7 @@ func TestReportImport_Version(t *testing.T) {
 			require.NoError(t, unstructured.SetNestedField(report.Object, tt.tag, "report", "artifact", "tag"))
 			require.NoError(t, unstructured.SetNestedField(report.Object, tt.digest, "report", "artifact", "digest"))
 
-			got := NewReimport(testTarget(), report, Workload{"deployment", "app"}, "app", "")
+			got := newReimport(testTarget(), report, Workload{"deployment", "app"}, "app")
 
 			assert.Equal(t, tt.want, got.Version)
 			assert.LessOrEqual(t, len(got.Version), MaxVersionLen)
@@ -197,13 +203,13 @@ func TestReportImport_LongNamesKeepTheirLimits(t *testing.T) {
 	labels[LabelResourceName] = name
 	report.SetLabels(labels)
 
-	got := NewReimport(testTarget(), report, workload, "app", "")
+	got := newReimport(testTarget(), report, workload, "app")
 
 	assert.Len(t, got.Service, MaxServiceLen)
 	assert.Len(t, got.TestTitle, MaxTitleLen)
 	assert.True(t, strings.HasPrefix(got.TestTitle, "VulnerabilityReport deployment/nnn"))
-	assert.Equal(t, got, NewReimport(testTarget(), report, workload, "app", ""), "the same input gives the same values")
-	assert.Equal(t, ReportTitle(report, workload), got.TestTitle)
+	assert.Equal(t, got, newReimport(testTarget(), report, workload, "app"), "the same input gives the same values")
+	assert.Equal(t, ReportTitle(report.GetKind(), report, workload), got.TestTitle)
 	assert.Equal(t, KindVulnerabilityReport, TitleKind(got.TestTitle))
 }
 
@@ -212,7 +218,7 @@ func TestReportImport_TagOverTheLimitIsShortenedKeepingItsKey(t *testing.T) {
 	name := strings.Repeat("n", 240)
 	value := "deployment." + name
 
-	got := NewReimport(testTarget(), report, Workload{"deployment", name}, "app", "")
+	got := newReimport(testTarget(), report, Workload{"deployment", name}, "app")
 
 	want := TagKeyWorkload + ":" + Shorten(value, MaxTagLen-len(TagKeyWorkload)-1)
 	assert.Contains(t, got.Tags, want)
@@ -223,7 +229,7 @@ func TestReportImport_TagOverTheLimitIsShortenedKeepingItsKey(t *testing.T) {
 		assert.LessOrEqual(t, len(tag), MaxTagLen, tag)
 	}
 
-	assert.Equal(t, got.Tags, NewReimport(testTarget(), report, Workload{"deployment", name}, "app", "").Tags,
+	assert.Equal(t, got.Tags, newReimport(testTarget(), report, Workload{"deployment", name}, "app").Tags,
 		"the same input gives the same tags")
 }
 
@@ -231,7 +237,7 @@ func TestReportImport_TagAtTheLimitIsKept(t *testing.T) {
 	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
 	name := strings.Repeat("n", MaxTagLen-len(TagKeyWorkload)-1-len("deployment."))
 
-	got := NewReimport(testTarget(), report, Workload{"deployment", name}, "app", "")
+	got := newReimport(testTarget(), report, Workload{"deployment", name}, "app")
 
 	assert.Contains(t, got.Tags, "k8s-workload:deployment."+name)
 }
@@ -239,7 +245,7 @@ func TestReportImport_TagAtTheLimitIsKept(t *testing.T) {
 func TestReportImport_TagsHoldNoCharacterDefectDojoRejects(t *testing.T) {
 	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
 
-	got := NewReimport(Target{Namespace: "ns", Cluster: `c'1"x`}, report, Workload{"deployment", "app"}, `My'App "x"`, "")
+	got := newReimport(Target{Namespace: "ns", Cluster: `c'1"x`}, report, Workload{"deployment", "app"}, `My'App "x"`)
 
 	assert.Contains(t, got.Tags, "k8s-cluster:c-1-x")
 	assert.Contains(t, got.Tags, "app:my-app--x-")
@@ -441,13 +447,106 @@ func withoutKey(m map[string]string, key string) map[string]string {
 	return out
 }
 
-func TestBrokenReport_NeedsTheContainerName(t *testing.T) {
+func TestBrokenLabels(t *testing.T) {
+	for name, tc := range map[string]struct {
+		labels      map[string]string
+		annotations map[string]string
+		want        string
+	}{
+		"whole": {
+			labels: map[string]string{LabelResourceKind: "ReplicaSet", LabelResourceName: "web-1", LabelContainerName: "app"},
+		},
+		"resource name in the annotation": {
+			labels:      map[string]string{LabelResourceKind: "ReplicaSet", LabelContainerName: "app"},
+			annotations: map[string]string{LabelResourceName: "web-1"},
+		},
+		"no resource kind": {
+			labels: map[string]string{LabelResourceName: "web-1", LabelContainerName: "app"},
+			want:   "no resource kind or name",
+		},
+		"no resource name": {
+			labels: map[string]string{LabelResourceKind: "ReplicaSet", LabelContainerName: "app"},
+			want:   "no resource kind or name",
+		},
+		"no container name": {
+			labels: map[string]string{LabelResourceKind: "ReplicaSet", LabelResourceName: "web-1"},
+			want:   "no container name",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			report := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Labels: tc.labels, Annotations: tc.annotations}}
+
+			assert.Equal(t, tc.want, BrokenLabels(report))
+		})
+	}
+}
+
+func TestBrokenBody(t *testing.T) {
+	without := func(fixture string, fields ...string) *unstructured.Unstructured {
+		report := loadFixture(t, fixture)
+		unstructured.RemoveNestedField(report.Object, fields...)
+
+		return report
+	}
+
+	for name, tc := range map[string]struct {
+		kind   string
+		report *unstructured.Unstructured
+		want   string
+	}{
+		"vulnerability report": {
+			kind: KindVulnerabilityReport, report: loadFixture(t, "vulnerabilityreport_replicaset.json"),
+		},
+		"exposed secret report": {
+			kind: KindExposedSecretReport, report: loadFixture(t, "exposedsecretreport_replicaset.json"),
+		},
+		"no report block": {
+			kind: KindVulnerabilityReport, report: without("vulnerabilityreport_replicaset.json", "report"),
+			want: "no report block",
+		},
+		"no vulnerabilities": {
+			kind:   KindVulnerabilityReport,
+			report: without("vulnerabilityreport_replicaset.json", "report", "vulnerabilities"),
+			want:   "no report.vulnerabilities list",
+		},
+		"no secrets": {
+			kind: KindExposedSecretReport, report: without("exposedsecretreport_replicaset.json", "report", "secrets"),
+			want: "no report.secrets list",
+		},
+		"the kind names the list, not the object": {
+			kind: KindExposedSecretReport, report: loadFixture(t, "vulnerabilityreport_replicaset.json"),
+			want: "no report.secrets list",
+		},
+		"labels are not read": {
+			kind: KindVulnerabilityReport, report: without("vulnerabilityreport_replicaset.json", "metadata", "labels"),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, BrokenBody(tc.kind, tc.report))
+		})
+	}
+}
+
+func TestNewReimport_ReadsTheKindAndTheMetadataOnly(t *testing.T) {
 	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
-	assert.Empty(t, BrokenReport(report))
+	metadata := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{
+		Namespace: report.GetNamespace(), Labels: report.GetLabels(), Annotations: report.GetAnnotations(),
+	}}
+	image := Image{Name: "registry.example.com/app", Tag: "1.0"}
 
-	report.SetLabels(withoutKey(report.GetLabels(), LabelContainerName))
+	got := NewReimport(testTarget(), KindExposedSecretReport, metadata, Workload{"deployment", "test-go-app"}, "", image)
 
-	assert.Equal(t, "no container name", BrokenReport(report))
+	assert.Equal(t, Reimport{
+		Product:    "in-cluster/krci-demo-dev",
+		Engagement: "trivy-operator",
+		TestTitle:  "ExposedSecretReport deployment/test-go-app/test-go-app",
+		Service:    "krci-demo-dev/Deployment/test-go-app/test-go-app",
+		Version:    "1.0",
+		Tags: []string{
+			"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
+			"k8s-workload:deployment.test-go-app", "k8s-container:test-go-app", "oci-image:registry.example.com/app",
+		},
+	}, got)
 }
 
 func TestReportGVK(t *testing.T) {
@@ -471,7 +570,7 @@ func TestReportTitle_IsTheTitleOfTheImport(t *testing.T) {
 	for _, fixture := range []string{"vulnerabilityreport_replicaset.json", "exposedsecretreport_replicaset.json"} {
 		report := loadFixture(t, fixture)
 
-		assert.Equal(t, NewReimport(testTarget(), report, workload, "go-app", "").TestTitle, ReportTitle(report, workload))
+		assert.Equal(t, newReimport(testTarget(), report, workload, "go-app").TestTitle, ReportTitle(report.GetKind(), report, workload))
 	}
 }
 

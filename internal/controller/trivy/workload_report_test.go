@@ -10,10 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -210,21 +208,6 @@ func TestReconcile_MetadataListOfReportsFailureStopsThePass(t *testing.T) {
 	assert.Empty(t, h.dd.reimports, "the report that may lose is not uploaded")
 }
 
-func TestReconcile_ReportKindThatIsNotServedForMetadataHasNoOwnReport(t *testing.T) {
-	objects, _, onReplicaSet := ownAndReplicaSetReports(t)
-	noMatch := &meta.NoKindMatchError{
-		GroupKind:        schema.GroupKind{Group: trivy.TrivyGroup, Kind: trivy.KindVulnerabilityReport},
-		SearchedVersions: []string{trivy.TrivyVersion},
-	}
-
-	h := newHarness(t, withReports(objects, onReplicaSet), failMetadataOfReports(noMatch))
-
-	h.reconcile()
-
-	require.Len(t, h.dd.reimports, 1)
-	assert.Equal(t, onReplicaSet.GetName(), reportNameOf(t, h.dd.reimports[0]))
-}
-
 func TestReconcile_OwnReportsAreListedOncePerKindAndPass(t *testing.T) {
 	objects, own, _ := ownAndReplicaSetReports(t)
 	deployments := kindsOfWorkload()["Deployment"]
@@ -237,11 +220,11 @@ func TestReconcile_OwnReportsAreListedOncePerKindAndPass(t *testing.T) {
 		reports = append(reports, deployments.report(t, name, appContainer))
 	}
 
-	lists := 0
+	lists := map[string]int{}
 	counting := interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if l, ok := list.(*metav1.PartialObjectMetadataList); ok && l.GroupVersionKind().Group == trivy.TrivyGroup {
-				lists++
+				lists[l.GroupVersionKind().Kind]++
 			}
 
 			return c.List(ctx, list, opts...)
@@ -253,7 +236,8 @@ func TestReconcile_OwnReportsAreListedOncePerKindAndPass(t *testing.T) {
 	h.reconcile()
 
 	require.Len(t, h.dd.reimports, 4, "the report on web and the report of each ReplicaSet with no report on its Deployment")
-	assert.Equal(t, 1, lists, "one metadata list serves every report of the kind")
+	assert.Equal(t, map[string]int{"VulnerabilityReportList": 1, "ExposedSecretReportList": 1}, lists,
+		"one metadata list per kind serves every report of the kind and the reports on the stable workloads")
 }
 
 // pageOfDeployments serves the Deployments one at a time through continue tokens, and fails every page after the

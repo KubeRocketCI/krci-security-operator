@@ -22,7 +22,7 @@
 - A module returns a transient error from `Reconcile` with a zero `Result` (controller-runtime ignores the `Result` of an error); with a nil error it requeues only through `Result.RequeueAfter` (the resync, an absent optional dependency), never through `Result.Requeue`.
 - Background work that must change state wakes the controller through a channel source instead of acting itself, so the workqueue serializes it per key.
 - A module watches the metadata of large objects only and reads everything else through the API reader, so big objects never sit in the cache.
-- A module lists large objects in pages and finishes each page before it reads the next. Across pages it keeps the report metadata index of one kind and the container names, image references and components of the workloads for one pass, bounded by pages of 500 objects, and the test IDs and titles of the namespace. Every list goes through `trivy.ListPages`: a continue token that expired (HTTP 410) restarts the listing, at most 3 times, then the pass fails.
+- A module reads the body of a large object only when its metadata does not decide: the Trivy module lists report metadata, from the cache for a kind watched at start, and reads a report body once per report version and for an upload; it keeps the facts of a report version in memory, pruned at the end of every pass to the versions of the kinds it listed completely. A pass holds at most two report bodies. It keeps the report metadata of the namespace, the container names, image references and components of the workloads, and the test IDs and titles of the namespace for one pass. Every list through the API reader goes through `trivy.ListPages`, 500 objects per page: a continue token that expired (HTTP 410) restarts the listing, at most 3 times, then the pass fails. A kind of reports is listed completely before any of its reports is decided.
 - The ClusterRole stays read-only and lists exactly what the code calls. A new module that needs more access adds its rules to `deploy-templates/templates/role.yaml` and to the access table of [trivy.md](trivy.md#access); `test/deploy` fails on a write verb in the ClusterRole.
 
 ## Code rules
@@ -61,8 +61,10 @@ Tests:
 |---|---|
 | `trivy.go` | `SetupWithManager`: the controller keyed by namespace, the metadata watches of the reports, the Namespace watch, the sweeper |
 | `config.go` | `Config`, its environment variables, defaults and validation |
-| `reconciler.go` | `Reconcile`, the credentials Secret and its cache, the pass over a namespace, the choice of the report of a test, the reimport of a report, and the in-memory state: reimported report versions, rejected report versions, closed tests, released namespaces |
-| `workload_report.go` | the report on the stable workload itself: the metadata index of the reports of a kind, and the check that it can be uploaded before the report of a ReplicaSet or Job is |
+| `reconciler.go` | `Reconcile`, the credentials Secret and its cache, the pass over a namespace, the decision on a report and the choice of the report of a test, the reimport of a report, and the in-memory state: reimported report versions, rejected report versions, facts of report versions, closed tests, released namespaces |
+| `report_list.go` | the report metadata of a pass: the listing of a kind from the cache or the API reader, the records by kind and name, the worklist in name order, the index of the reports by resource and container, and `adopt` of a read that returned another version or found the report gone |
+| `report_body.go` | `reportBodies`: the read of a report body, compared with the requested report version, and the facts of a report version (image, broken body) |
+| `workload_report.go` | the report on the stable workload itself: the check that it can be uploaded before the report of a ReplicaSet or Job is |
 | `namespace.go` | the live namespace and `excludeNamespaces` |
 | `closing.go` | the namespace product lookup and the tests list of a pass (read before the first upload that no reimport of the process covers, and again after a pass that uploaded; the close rules use it), closing of stale and released tests, product tags; the sweeper that wakes namespaces for the controller |
 | `watch.go` | mapping of report events to namespaces |

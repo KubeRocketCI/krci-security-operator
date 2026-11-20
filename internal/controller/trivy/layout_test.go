@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
@@ -61,7 +62,7 @@ func TestReconcile_SameNamespaceOfTwoClustersGivesTwoProducts(t *testing.T) {
 	cfg := baseConfig()
 	cfg.ClusterName = "prod-eu"
 
-	other := NewReconciler(h.client, h.client, cfg, func(string, string) DefectDojo { return h.dd })
+	other := NewReconciler(h.client, h.client, cfg, h.reconciler.watched, func(string, string) DefectDojo { return h.dd })
 	other.now = h.reconciler.now
 	other.random = h.reconciler.random
 
@@ -111,8 +112,8 @@ func TestReconcile_KubeRocketCIResourcesAndLabelsChangeNothing(t *testing.T) {
 
 	krci := newHarness(t, withReports(stageLikeObjects(), goApp(t)), interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			if u, ok := list.(*unstructured.UnstructuredList); ok {
-				record(u.GroupVersionKind().Group)
+			if gvk, err := apiutil.GVKForObject(list, c.Scheme()); err == nil {
+				record(gvk.Group)
 			}
 
 			return c.List(ctx, list, opts...)
@@ -220,7 +221,7 @@ func TestRelease_OnlyOwnedTests(t *testing.T) {
 func TestReconcile_ExcludedNamespaceIsNotReadForReports(t *testing.T) {
 	h := newHarness(t, withReports(goAppObjects(), goApp(t)), interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			if _, ok := list.(*unstructured.UnstructuredList); ok {
+			if isReportList(list) {
 				return errors.New("an excluded namespace lists no reports")
 			}
 

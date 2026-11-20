@@ -63,7 +63,7 @@ type Config struct {
 	ResyncPeriod time.Duration
 	// Concurrency is the number of namespaces reconciled in parallel.
 	Concurrency int
-	// ReportKinds lists the Trivy report kinds that are imported.
+	// ReportKinds lists the Trivy report kinds that are imported, each once: LoadConfig drops a repeated kind.
 	ReportKinds []string
 }
 
@@ -84,7 +84,7 @@ func LoadConfig(lookup func(string) (string, bool)) (Config, error) {
 		ClusterName:       env.get(EnvClusterName, ""),
 		ExcludeNamespaces: env.list(EnvExcludeNamespaces, nil),
 		ComponentPrefixes: env.list(EnvComponentPrefixes, []string{defaultComponentPrefix}),
-		ReportKinds:       env.list(EnvReportKinds, slices.Clone(trivy.ReportKinds)),
+		ReportKinds:       uniqueInOrder(env.list(EnvReportKinds, slices.Clone(trivy.ReportKinds))),
 		ResyncPeriod:      parseEnv(env, EnvResyncPeriod, defaultResyncPeriod, time.ParseDuration),
 		Concurrency:       parseEnv(env, EnvConcurrency, defaultConcurrency, strconv.Atoi),
 	}
@@ -243,6 +243,19 @@ func (c Config) excludeErrors() []error {
 	}
 
 	return errs
+}
+
+// uniqueInOrder returns the items without repeats, each at its first occurrence.
+func uniqueInOrder(items []string) []string {
+	var out []string
+
+	for _, item := range items {
+		if !slices.Contains(out, item) {
+			out = append(out, item)
+		}
+	}
+
+	return out
 }
 
 func splitList(v string) []string {

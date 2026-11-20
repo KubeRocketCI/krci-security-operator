@@ -35,21 +35,20 @@ func (i Image) Version() string {
 	return algo + ":" + hex[:min(len(hex), digestHexLen)]
 }
 
-// ImageOf returns the image a report was produced for: the registry, repository, tag and digest of the report.
-// ref is the image reference of the container in the pod template of its workload, "" when it is not known.
-// When ref has a digest and no tag, and the digest is the digest of the report, the tag of the report is dropped:
-// Trivy Operator writes the last segment of the repository as the tag of a digest-only image.
-func ImageOf(report *unstructured.Unstructured, ref string) Image {
-	image := imageOfReport(report)
-
-	if digest := digestOf(ref); digest != "" && digest == image.Digest && tagOf(ref) == "" {
-		image.Tag = ""
+// For returns the image as the container reference ref names it; ref is the image reference of the container in the
+// pod template of the workload, "" when it is not known. When ref has a digest and no tag, and the digest is the
+// digest of the image, the tag is dropped: Trivy Operator writes the last segment of the repository as the tag of a
+// digest-only image.
+func (i Image) For(ref string) Image {
+	if digest := digestOf(ref); digest != "" && digest == i.Digest && tagOf(ref) == "" {
+		i.Tag = ""
 	}
 
-	return image
+	return i
 }
 
-func imageOfReport(report *unstructured.Unstructured) Image {
+// ReportImage returns the image a report was produced for: the registry, repository, tag and digest of the report.
+func ReportImage(report *unstructured.Unstructured) Image {
 	server, _, _ := unstructured.NestedString(report.Object, "report", "registry", "server")
 	repository, _, _ := unstructured.NestedString(report.Object, "report", "artifact", "repository")
 	tag, _, _ := unstructured.NestedString(report.Object, "report", "artifact", "tag")

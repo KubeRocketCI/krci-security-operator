@@ -57,6 +57,9 @@ const (
 
 var scanDate = time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 
+// watchedKinds are the report kinds the harness lists from the cache: both, as on a cluster that serves them at start.
+var watchedKinds = []string{trivy.KindVulnerabilityReport, trivy.KindExposedSecretReport}
+
 // goAppContext is where the reports of the namespace appNS are imported: the namespace product of the cluster.
 var goAppContext = ddContext{productType: "KubeRocketCI", product: "in-cluster/krci-demo-dev", engagement: "trivy-operator"}
 
@@ -65,6 +68,14 @@ func testScheme(t *testing.T) *runtime.Scheme {
 
 	s := runtime.NewScheme()
 	require.NoError(t, clientgoscheme.AddToScheme(s))
+
+	// The fake client otherwise registers the type of the first request of a kind, and a metadata list first makes
+	// the stored reports unreadable.
+	for _, kind := range trivy.ReportKinds {
+		gvk := trivy.ReportGVK(kind)
+		s.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
+		s.AddKnownTypeWithName(gvk.GroupVersion().WithKind(kind+"List"), &unstructured.UnstructuredList{})
+	}
 
 	return s
 }
@@ -218,7 +229,7 @@ func newHarness(t *testing.T, objects []client.Object, funcs ...interceptor.Func
 		WithInterceptorFuncs(rejectInvalidSelectors(user)).Build()
 	dd := newFakeDefectDojo()
 
-	r := NewReconciler(c, c, baseConfig(), func(string, string) DefectDojo { return dd })
+	r := NewReconciler(c, c, baseConfig(), watchedKinds, func(string, string) DefectDojo { return dd })
 	r.now = func() time.Time { return scanDate }
 	r.random = func() float64 { return 0.5 }
 
@@ -646,7 +657,7 @@ func TestReconcile_ListTestsErrorReturnsError(t *testing.T) {
 func TestReconcile_NoOps(t *testing.T) {
 	noMatch := interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GroupVersionKind().Group == trivy.TrivyGroup {
+			if isReportList(list) {
 				return noKindMatch()
 			}
 
@@ -785,16 +796,32 @@ func noKindMatch() error {
 	return &meta.NoKindMatchError{GroupKind: trivy.ReportGVK(trivy.KindVulnerabilityReport).GroupKind()}
 }
 
-// pagedReports serves the VulnerabilityReports of the namespace appNS in two pages, checks that every list reads one
-// page of that namespace, and records the continue token of every list. The list of the second page fails with err
-// the first failures times.
+// isReportList reports whether the list is a metadata list of a Trivy Operator report kind.
+func isReportList(list client.ObjectList) bool {
+	l, ok := list.(*metav1.PartialObjectMetadataList)
+
+	return ok && l.GroupVersionKind().Group == trivy.TrivyGroup
+}
+
+// isReportListOf reports whether the list is a metadata list of the report kind.
+func isReportListOf(list client.ObjectList, kind string) bool {
+	l, ok := list.(*metav1.PartialObjectMetadataList)
+
+	return ok && l.GroupVersionKind().Kind == kind+"List"
+}
+
+// unwatch makes the harness list every report kind through the API reader, as for kinds not served at start.
+func (h *harness) unwatch() { h.reconciler.watched = nil }
+
+// pagedReports serves the metadata of the VulnerabilityReports of the namespace appNS in two pages, the first holding
+// the first report by name, checks that every list reads one page of that namespace, and records the continue token
+// of every list. The list of the second page fails with err the first failures times.
 func pagedReports(t *testing.T, calls *[]string, err error, failures int) interceptor.Funcs {
 	t.Helper()
 
 	return interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			u, ok := list.(*unstructured.UnstructuredList)
-			if !ok || u.GroupVersionKind().Kind != "VulnerabilityReportList" {
+			if !isReportListOf(list, trivy.KindVulnerabilityReport) {
 				return c.List(ctx, list, opts...)
 			}
 
@@ -802,35 +829,47 @@ func pagedReports(t *testing.T, calls *[]string, err error, failures int) interc
 			lo.ApplyOptions(opts)
 
 			assert.Equal(t, appNS, lo.Namespace, "every list reads the namespace of the pass")
-			assert.Equal(t, int64(reportsPageSize), lo.Limit, "every list reads one page")
+			assert.Equal(t, int64(500), lo.Limit, "every list reads one page")
 
 			*calls = append(*calls, lo.Continue)
 
-			if lo.Continue == "" {
-				u.Items = []unstructured.Unstructured{*goApp(t)}
-				u.SetContinue("page-2")
-
-				return nil
-			}
-
-			if failures > 0 {
+			if lo.Continue != "" && failures > 0 {
 				failures--
 
 				return err
 			}
 
-			u.Items = []unstructured.Unstructured{*fixture(t, "vulnerabilityreport_dockerhub.json")}
-
-			return nil
+			return pageOfReports(ctx, c, list.(*metav1.PartialObjectMetadataList), lo.Continue)
 		},
 	}
+}
+
+// pageOfReports lists the report metadata of appNS by name and keeps the first item for the first page and the rest
+// for the page "page-2".
+func pageOfReports(ctx context.Context, c client.WithWatch, list *metav1.PartialObjectMetadataList, token string) error {
+	if err := c.List(ctx, list, client.InNamespace(appNS)); err != nil {
+		return err
+	}
+
+	slices.SortFunc(list.Items, func(a, b metav1.PartialObjectMetadata) int { return strings.Compare(a.Name, b.Name) })
+
+	if token == "" {
+		list.Items = list.Items[:min(1, len(list.Items))]
+		list.SetContinue("page-2")
+
+		return nil
+	}
+
+	list.Items = list.Items[min(1, len(list.Items)):]
+
+	return nil
 }
 
 // unservedReports answers the lists of VulnerabilityReports with err while *unserved is true.
 func unservedReports(err error, unserved *bool) interceptor.Funcs {
 	return interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			if u, ok := list.(*unstructured.UnstructuredList); ok && *unserved && u.GroupVersionKind().Kind == "VulnerabilityReportList" {
+			if *unserved && isReportListOf(list, trivy.KindVulnerabilityReport) {
 				return err
 			}
 
@@ -840,15 +879,27 @@ func unservedReports(err error, unserved *bool) interceptor.Funcs {
 }
 
 // pagedObjects are the objects behind the two pages of pagedReports.
-func pagedObjects() []client.Object {
-	return []client.Object{
+func pagedObjects(t *testing.T) []client.Object {
+	t.Helper()
+
+	return withReports([]client.Object{
 		integrationSecret(),
 		namespaceObject(appNS, nil),
 		deployment("test-go-app", "1"),
 		replicaSet("test-go-app-9dc66c9c6", "test-go-app", "1"),
 		deployment("defectdojo-primary", "1", "postgres"),
 		replicaSet("defectdojo-primary-55747b486", "defectdojo-primary", "1"),
-	}
+	}, goApp(t), fixture(t, "vulnerabilityreport_dockerhub.json"))
+}
+
+// pagedHarness lists the reports through the API reader in the two pages of pagedReports.
+func pagedHarness(t *testing.T, calls *[]string, err error, failures int) *harness {
+	t.Helper()
+
+	h := newHarness(t, pagedObjects(t), pagedReports(t, calls, err, failures))
+	h.unwatch()
+
+	return h
 }
 
 // uploadsOf counts the uploads into the test with the title.
@@ -867,7 +918,7 @@ func (h *harness) uploadsOf(title string) int {
 func TestReconcile_PagesThroughReports(t *testing.T) {
 	var calls []string
 
-	h := newHarness(t, pagedObjects(), pagedReports(t, &calls, nil, 0))
+	h := pagedHarness(t, &calls, nil, 0)
 
 	h.reconcile()
 
@@ -902,9 +953,7 @@ func TestReconcile_UnservedReportKindClosesByWorkloadLikeAnyOther(t *testing.T) 
 func TestReconcile_UnservedReportKindKeepsWhatIsRemembered(t *testing.T) {
 	unserved := false
 
-	h := newHarness(t,
-		withReports(pagedObjects(), goApp(t), fixture(t, "vulnerabilityreport_dockerhub.json"), goAppSecrets(t)),
-		unservedReports(noKindMatch(), &unserved))
+	h := newHarness(t, withReports(pagedObjects(t), goAppSecrets(t)), unservedReports(noKindMatch(), &unserved))
 	h.dd.reimportErr = rejectGoApp
 
 	h.reconcile()
@@ -925,7 +974,7 @@ func TestReconcile_UnservedReportKindKeepsWhatIsRemembered(t *testing.T) {
 func TestReconcile_ReportKindGoneOnALaterPageClosesByWorkload(t *testing.T) {
 	var calls []string
 
-	h := newHarness(t, pagedObjects(), pagedReports(t, &calls, noKindMatch(), 1))
+	h := pagedHarness(t, &calls, noKindMatch(), 1)
 	h.dd.seedTests(ownedTest(7, staleTitle), ownedTest(8, staleSecretsTitle))
 
 	require.NoError(t, h.reconcileErr())
@@ -944,7 +993,7 @@ func TestReconcile_ExpiredContinueTokenStartsTheListAgain(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls []string
 
-			h := newHarness(t, pagedObjects(), pagedReports(t, &calls, tc.err, 1))
+			h := pagedHarness(t, &calls, tc.err, 1)
 
 			h.reconcile()
 
@@ -957,22 +1006,21 @@ func TestReconcile_ExpiredContinueTokenStartsTheListAgain(t *testing.T) {
 func TestReconcile_RestartedListDoesNotUploadARejectedReportAgain(t *testing.T) {
 	var calls []string
 
-	h := newHarness(t, pagedObjects(), pagedReports(t, &calls, errExpired, 1))
+	h := pagedHarness(t, &calls, errExpired, 1)
 	h.dd.reimportErr = rejectGoApp
 
 	h.reconcile()
 
 	assert.Equal(t, restartedCalls, calls)
-	assert.Equal(t, 1, h.uploadsOf(goAppTitle), "the version rejected on the first listing is not uploaded again")
+	assert.Equal(t, 1, h.uploadsOf(goAppTitle), "a restarted listing decides nothing twice")
 }
 
-func TestReconcile_ReportDeletedBeforeARestartClosesNothing(t *testing.T) {
+func TestReconcile_ReportDeletedBeforeARestartIsNotDecidedAndClosesNothing(t *testing.T) {
 	listings := 0
 
 	funcs := interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			u, ok := list.(*unstructured.UnstructuredList)
-			if !ok || u.GroupVersionKind().Kind != "VulnerabilityReportList" {
+			if !isReportListOf(list, trivy.KindVulnerabilityReport) {
 				return c.List(ctx, list, opts...)
 			}
 
@@ -985,38 +1033,57 @@ func TestReconcile_ReportDeletedBeforeARestartClosesNothing(t *testing.T) {
 
 			listings++
 
+			meta := list.(*metav1.PartialObjectMetadataList)
+			if err := c.List(ctx, meta, client.InNamespace(appNS)); err != nil {
+				return err
+			}
+
 			if listings == 1 {
-				u.Items = []unstructured.Unstructured{*goApp(t)}
-				u.SetContinue("page-2")
+				meta.SetContinue("page-2")
 
 				return nil
 			}
 
 			// The report of the go app was deleted before the listing started again.
-			u.Items = []unstructured.Unstructured{*fixture(t, "vulnerabilityreport_dockerhub.json")}
+			meta.Items = slices.DeleteFunc(meta.Items, func(m metav1.PartialObjectMetadata) bool {
+				return m.Name == goApp(t).GetName()
+			})
 
 			return nil
 		},
 	}
 
-	h := newHarness(t, pagedObjects(), funcs)
+	h := newHarness(t, pagedObjects(t), funcs)
+	h.unwatch()
 
 	h.reconcile()
 
 	assert.Equal(t, 2, listings)
-	require.Len(t, h.dd.reimports, 2)
+	require.Len(t, h.dd.reimports, 1, "a restarted listing keeps no record of its earlier pages")
+	assert.Equal(t, "VulnerabilityReport deployment/defectdojo-primary/postgres", h.dd.reimports[0].TestTitle)
 	assert.Empty(t, h.dd.closed, "the workload of the deleted report is running")
 }
 
 func TestReconcile_RejectedVersionIsNotUploadedAgainAfterAFailedPass(t *testing.T) {
 	before := testutil.ToFloat64(rejectedReports.WithLabelValues(trivy.KindVulnerabilityReport))
 
-	var calls []string
+	secretsFail := true
 
-	h := newHarness(t, pagedObjects(), pagedReports(t, &calls, errors.New("the API server is unavailable"), 1))
+	h := newHarness(t, withReports(goAppObjects(), goApp(t), goAppSecrets(t)), interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if secretsFail && isReportListOf(list, trivy.KindExposedSecretReport) {
+				return errors.New("the API server is unavailable")
+			}
+
+			return c.List(ctx, list, opts...)
+		},
+	})
 	h.dd.reimportErr = rejectGoApp
 
-	require.Error(t, h.reconcileErr(), "the list of the second page fails the first pass")
+	require.Error(t, h.reconcileErr(), "the listing of the second kind fails the first pass")
+	require.Equal(t, 1, h.uploadsOf(goAppTitle))
+
+	secretsFail = false
 
 	h.reconcile()
 
@@ -1028,7 +1095,7 @@ func TestReconcile_RejectedVersionIsNotUploadedAgainAfterAFailedPass(t *testing.
 func TestReconcile_ExpiredContinueTokenGivesUpAfterTheRestarts(t *testing.T) {
 	var calls []string
 
-	h := newHarness(t, pagedObjects(), pagedReports(t, &calls, errExpired, trivy.MaxListRestarts+1))
+	h := pagedHarness(t, &calls, errExpired, trivy.MaxListRestarts+1)
 	h.dd.seedTests(ownedTest(7, staleTitle))
 
 	err := h.reconcileErr()
@@ -1036,6 +1103,7 @@ func TestReconcile_ExpiredContinueTokenGivesUpAfterTheRestarts(t *testing.T) {
 	assert.Contains(t, err.Error(), fmt.Sprintf("after %d restarts", trivy.MaxListRestarts))
 	assert.Len(t, calls, 2*(1+trivy.MaxListRestarts), "the first listing and every restart read both pages")
 	assert.Empty(t, h.dd.closed, "an incomplete listing closes nothing")
+	assert.Empty(t, h.dd.reimports, "an incomplete listing decides nothing")
 }
 
 func TestReconcile_ReportIsNotModified(t *testing.T) {
@@ -1056,7 +1124,7 @@ func TestReconcile_ReportIsNotModified(t *testing.T) {
 func TestReconcile_ListErrorOfReportsIsReturned(t *testing.T) {
 	funcs := interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GroupVersionKind().Group == trivy.TrivyGroup {
+			if isReportList(list) {
 				return errors.New("forbidden")
 			}
 
@@ -1106,24 +1174,27 @@ func TestReconcile_ConnectsWithSecretCredentials(t *testing.T) {
 }
 
 func TestReconcile_ReadsOnlyThroughTheReaderWhatMustNotBeCached(t *testing.T) {
-	// The cache serves only Namespaces: reports, workloads and the Secret are read through the reader.
+	// The cache serves Namespaces and the metadata of the watched report kinds: report bodies, workloads and the
+	// Secret are read through the reader.
 	cached := interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 			if _, ok := obj.(*corev1.Namespace); !ok {
-				return errors.New("the cache must serve Namespaces only")
+				return errors.New("the cache serves no object but Namespaces")
 			}
 
 			return c.Get(ctx, key, obj, opts...)
 		},
-		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
-			return errors.New("the cache must serve Namespaces only")
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if !isReportList(list) {
+				return errors.New("the cache lists report metadata only")
+			}
+
+			return c.List(ctx, list, opts...)
 		},
 	}
 
 	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
-	h.reconciler.cache = interceptor.NewClient(
-		fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(goAppObjects()...).Build(), cached,
-	)
+	h.reconciler.cache = interceptor.NewClient(h.client.(client.WithWatch), cached)
 
 	h.reconcile()
 
@@ -1809,7 +1880,7 @@ func TestReconcile_ErrorSemantics(t *testing.T) {
 	denyList := func(kind string) interceptor.Funcs {
 		return interceptor.Funcs{
 			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-				if u, ok := list.(*unstructured.UnstructuredList); ok && u.GroupVersionKind().Kind == kind+"List" {
+				if isReportListOf(list, kind) {
 					return errors.New("apiserver unavailable")
 				}
 
@@ -1820,7 +1891,7 @@ func TestReconcile_ErrorSemantics(t *testing.T) {
 
 	noReportKind := interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GroupVersionKind().Group == trivy.TrivyGroup {
+			if isReportList(list) {
 				return noKindMatch()
 			}
 
@@ -2113,7 +2184,7 @@ func TestReconcile_RequeueIsSpreadByTenPercent(t *testing.T) {
 	}
 }
 
-func TestReconcile_ProcessesReportsPageByPage(t *testing.T) {
+func TestReconcile_ListsAKindCompletelyBeforeDecidingOnIt(t *testing.T) {
 	var (
 		h        *harness
 		limits   []int64
@@ -2122,8 +2193,7 @@ func TestReconcile_ProcessesReportsPageByPage(t *testing.T) {
 
 	funcs := interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			u, ok := list.(*unstructured.UnstructuredList)
-			if !ok || u.GroupVersionKind().Kind != "VulnerabilityReportList" {
+			if !isReportListOf(list, trivy.KindVulnerabilityReport) {
 				return c.List(ctx, list, opts...)
 			}
 
@@ -2133,28 +2203,18 @@ func TestReconcile_ProcessesReportsPageByPage(t *testing.T) {
 			limits = append(limits, lo.Limit)
 			imported = append(imported, len(h.dd.reimports))
 
-			switch lo.Continue {
-			case "":
-				u.Items = []unstructured.Unstructured{*goApp(t)}
-				u.SetContinue("page-2")
-			case "page-2":
-				u.Items = []unstructured.Unstructured{*fixture(t, "vulnerabilityreport_dockerhub.json")}
-				u.SetContinue("page-3")
-			default:
-				u.Items = nil
-			}
-
-			return nil
+			return pageOfReports(ctx, c, list.(*metav1.PartialObjectMetadataList), lo.Continue)
 		},
 	}
 
-	h = newHarness(t, pagedObjects(), funcs)
+	h = newHarness(t, pagedObjects(t), funcs)
+	h.unwatch()
 	h.dd.seedTests(ownedTest(7, "VulnerabilityReport deployment/removed/removed"))
 
 	h.reconcile()
 
-	assert.Equal(t, []int{0, 1, 2}, imported[:3], "a page is imported before the next one is read")
-	assert.Equal(t, []int64{reportsPageSize, reportsPageSize, reportsPageSize}, limits[:3])
+	assert.Equal(t, []int{0, 0}, imported, "no report is decided while its kind is listed")
+	assert.Equal(t, []int64{500, 500}, limits)
 	assert.Len(t, h.dd.reimports, 2)
 	assert.Equal(t, []int{7}, h.dd.closed, "tests imported from earlier pages stay open")
 }
