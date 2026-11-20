@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/KubeRocketCI/krci-security-operator/pkg/defectdojo"
 )
@@ -615,6 +616,7 @@ func TestWithProductTags(t *testing.T) {
 	tests := []struct {
 		name        string
 		have        []string
+		labelTags   []string
 		want        []string
 		wantChanged bool
 	}{
@@ -640,16 +642,211 @@ func TestWithProductTags(t *testing.T) {
 			want:        []string{"owner:team-a", "k8s-cluster:c1", "k8s-namespace:ns"},
 			wantChanged: true,
 		},
+		{
+			name:        "label tags are added",
+			have:        []string{"owner:team-a", "k8s-cluster:c1", "k8s-namespace:ns"},
+			labelTags:   []string{"k8s-ns-label.team:a", "k8s-ns-label.env:dev"},
+			want:        []string{"owner:team-a", "k8s-cluster:c1", "k8s-namespace:ns", "k8s-ns-label.team:a", "k8s-ns-label.env:dev"},
+			wantChanged: true,
+		},
+		{
+			name:        "a label tag with another value is corrected",
+			have:        []string{"k8s-cluster:c1", "k8s-namespace:ns", "k8s-ns-label.team:old"},
+			labelTags:   []string{"k8s-ns-label.team:a"},
+			want:        []string{"k8s-cluster:c1", "k8s-namespace:ns", "k8s-ns-label.team:a"},
+			wantChanged: true,
+		},
+		{
+			name:        "a label tag that is not wanted is removed, the other tags stay",
+			have:        []string{"owner:team-a", "k8s-cluster:c1", "k8s-namespace:ns", "k8s-ns-label.team:a", "k8s-ns-label.env:dev"},
+			labelTags:   []string{"k8s-ns-label.team:a"},
+			want:        []string{"owner:team-a", "k8s-cluster:c1", "k8s-namespace:ns", "k8s-ns-label.team:a"},
+			wantChanged: true,
+		},
+		{
+			name:        "every label tag is removed when none is wanted",
+			have:        []string{"owner:team-a", "k8s-cluster:c1", "k8s-namespace:ns", "k8s-ns-label.team:a"},
+			want:        []string{"owner:team-a", "k8s-cluster:c1", "k8s-namespace:ns"},
+			wantChanged: true,
+		},
+		{
+			name:        "a repeated label tag is written once",
+			have:        []string{"k8s-cluster:c1", "k8s-namespace:ns", "k8s-ns-label.team:a", "k8s-ns-label.team:a"},
+			labelTags:   []string{"k8s-ns-label.team:a"},
+			want:        []string{"k8s-cluster:c1", "k8s-namespace:ns", "k8s-ns-label.team:a"},
+			wantChanged: true,
+		},
+		{
+			name:      "the label tags in any order are not a change",
+			have:      []string{"k8s-ns-label.env:dev", "owner:team-a", "k8s-ns-label.team:a", "k8s-namespace:ns", "k8s-cluster:c1"},
+			labelTags: []string{"k8s-ns-label.team:a", "k8s-ns-label.env:dev"},
+			want: []string{
+				"owner:team-a", "k8s-cluster:c1", "k8s-namespace:ns", "k8s-ns-label.team:a", "k8s-ns-label.env:dev",
+			},
+		},
+		{
+			name: "a tag that only contains the prefix is not owned",
+			have: []string{"k8s-cluster:c1", "k8s-namespace:ns", "x-k8s-ns-label.team:a", "k8s-ns-label:a"},
+			want: []string{"k8s-cluster:c1", "k8s-namespace:ns", "x-k8s-ns-label.team:a", "k8s-ns-label:a"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, changed := WithProductTags(tt.have, "c1", "ns")
+			got, changed := WithProductTags(tt.have, "c1", "ns", tt.labelTags)
 
 			assert.ElementsMatch(t, tt.want, got)
 			assert.Equal(t, tt.wantChanged, changed)
 		})
 	}
+}
+
+func TestNamespaceLabelTags(t *testing.T) {
+	tests := []struct {
+		name   string
+		keys   []string
+		labels map[string]string
+		want   []string
+	}{
+		{name: "no key is listed", labels: map[string]string{"team": "a"}},
+		{name: "the namespace has no labels", keys: []string{"team"}},
+		{
+			name: "a listed key that the namespace lacks",
+			keys: []string{"team", "env"}, labels: map[string]string{"team": "a"},
+			want: []string{"k8s-ns-label.team:a"},
+		},
+		{
+			name: "a label that is not listed",
+			keys: []string{"team"}, labels: map[string]string{"team": "a", "env": "dev"},
+			want: []string{"k8s-ns-label.team:a"},
+		},
+		{
+			name: "the order of the keys",
+			keys: []string{"env", "team"}, labels: map[string]string{"team": "a", "env": "dev"},
+			want: []string{"k8s-ns-label.env:dev", "k8s-ns-label.team:a"},
+		},
+		{
+			name: "a key with a prefix",
+			keys: []string{"example.com/tenant"}, labels: map[string]string{"example.com/tenant": "krci"},
+			want: []string{"k8s-ns-label.example.com/tenant:krci"},
+		},
+		{
+			name: "the key and the value are in lower case",
+			keys: []string{"Team.Name"}, labels: map[string]string{"Team.Name": "Prod_EU"},
+			want: []string{"k8s-ns-label.team.name:prod_eu"},
+		},
+		{
+			name: "the key is matched as it is written",
+			keys: []string{"team"}, labels: map[string]string{"Team": "a"},
+		},
+		{
+			name: "a value with characters DefectDojo rejects",
+			keys: []string{"team"}, labels: map[string]string{"team": `a b,c'd"e`},
+			want: []string{"k8s-ns-label.team:a-b-c-d-e"},
+		},
+		{
+			name: "an empty value gives no tag",
+			keys: []string{"team", "env"}, labels: map[string]string{"team": "", "env": "dev"},
+			want: []string{"k8s-ns-label.env:dev"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, NamespaceLabelTags(tt.keys, tt.labels))
+		})
+	}
+}
+
+// TestMaxNamespaceLabelKeyLen guards the number that docs/trivy.md states.
+func TestMaxNamespaceLabelKeyLen(t *testing.T) {
+	assert.Equal(t, 178, MaxNamespaceLabelKeyLen)
+}
+
+func TestNamespaceLabelTags_LongestValue(t *testing.T) {
+	for name, tc := range map[string]struct {
+		keyLen    int
+		shortened bool
+	}{
+		"a key at the limit keeps the value":                   {keyLen: MaxNamespaceLabelKeyLen},
+		"a key over the limit shortens the value, not the key": {keyLen: MaxNamespaceLabelKeyLen + 1, shortened: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			key := strings.Repeat("k", tc.keyLen)
+			value := strings.Repeat("v", validation.LabelValueMaxLength)
+			tagKey := TagPrefixNamespaceLabel + key
+
+			got := NamespaceLabelTags([]string{key}, map[string]string{key: value})
+
+			require.Equal(t, []string{tagKey + ":" + Shorten(value, MaxTagLen-len(tagKey)-1)}, got)
+			assert.Len(t, got[0], MaxTagLen)
+
+			if tc.shortened {
+				assert.Regexp(t, `~[0-9a-f]{12}$`, got[0])
+			} else {
+				assert.True(t, strings.HasSuffix(got[0], ":"+value), "the value is kept")
+			}
+		})
+	}
+}
+
+func TestNamespaceLabelTagsOfKeys(t *testing.T) {
+	have := []string{
+		"owner:a", "k8s-ns-label.team:a", "k8s-cluster:c", "k8s-ns-label.env:dev", "k8s-ns-label.old:x", "x-k8s-ns-label.team:a",
+	}
+
+	assert.Equal(t, []string{"k8s-ns-label.team:a", "k8s-ns-label.env:dev"}, NamespaceLabelTagsOfKeys(have, []string{"env", "team"}))
+	assert.Equal(t, []string{"k8s-ns-label.team:a"}, NamespaceLabelTagsOfKeys(have, []string{"team"}), "a key that left the list")
+	assert.Equal(t, []string{"k8s-ns-label.env:dev"}, NamespaceLabelTagsOfKeys(have, []string{"ENV"}),
+		"the tag key is lower case")
+	assert.Empty(t, NamespaceLabelTagsOfKeys(have, nil), "no key is listed")
+	assert.Empty(t, NamespaceLabelTagsOfKeys(have, []string{"absent"}))
+	assert.Len(t, have, 6, "the argument is not modified")
+}
+
+func TestReportImport_NamespaceLabelTagsAreTagsOfTheTest(t *testing.T) {
+	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
+	target := testTarget()
+	target.LabelTags = []string{"k8s-ns-label.example.com/tenant:krci", "k8s-ns-label.env:dev"}
+
+	got := newReimport(target, report, Workload{"deployment", "test-go-app"}, "go-app")
+
+	assert.Equal(t, []string{
+		"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
+		"k8s-ns-label.example.com/tenant:krci", "k8s-ns-label.env:dev",
+		"k8s-workload:deployment.test-go-app", "k8s-container:test-go-app",
+		"oci-image:gitlab.127.0.0.1.nip.io:5050/krci/test-go-app", "app:go-app",
+	}, got.Tags)
+}
+
+func TestReportImport_NoLabelTagsChangeNothing(t *testing.T) {
+	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
+	workload := Workload{"deployment", "test-go-app"}
+
+	plain := newReimport(testTarget(), report, workload, "go-app")
+
+	empty := testTarget()
+	empty.LabelTags = []string{}
+
+	assert.Equal(t, plain, newReimport(empty, report, workload, "go-app"))
+	assert.Equal(t, plain.UploadMarker(report), newReimport(empty, report, workload, "go-app").UploadMarker(report))
+}
+
+func TestUploadMarker_ChangesWithANamespaceLabelTag(t *testing.T) {
+	report := loadFixture(t, "vulnerabilityreport_replicaset.json")
+	workload := Workload{"deployment", "test-go-app"}
+
+	marker := func(labelTags ...string) string {
+		target := testTarget()
+		target.LabelTags = labelTags
+
+		return newReimport(target, report, workload, "go-app").UploadMarker(report)
+	}
+
+	assert.NotEqual(t, marker(), marker("k8s-ns-label.team:a"), "a label that is listed and present")
+	assert.NotEqual(t, marker("k8s-ns-label.team:a"), marker("k8s-ns-label.team:b"), "another value")
+	assert.Equal(t, marker("k8s-ns-label.team:a", "k8s-ns-label.env:dev"), marker("k8s-ns-label.env:dev", "k8s-ns-label.team:a"),
+		"the order of the label tags does not matter")
 }
 
 func TestPayload_DoesNotModifyTheReport(t *testing.T) {

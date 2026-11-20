@@ -12,6 +12,7 @@ flowchart LR
 
 - **One product per cluster and namespace.** Every namespace has its own DefectDojo product, `<clusterName>/<namespace>`, under one Product Type (`KubeRocketCI` by default), with one engagement, `trivy-operator`. The operator reads no KubeRocketCI resource or label, so it also works on a cluster without KubeRocketCI.
 - **One test per container.** Each container of a workload has one DefectDojo test per report kind, `<ReportKind> <kind>/<name>/<container>`, so a redeploy updates the same test. Only changed reports are uploaded.
+- **Optional namespace label tags.** The Namespace labels whose keys you list in `namespaceLabelTags` become DefectDojo tags `k8s-ns-label.<key>:<value>` on the namespace product and its tests. The list is empty by default. See [docs/trivy.md](docs/trivy.md#defectdojo-naming).
 - **Closes what is gone.** The findings of removed workloads and of deleted or excluded namespaces are closed. The operator closes only the tests of its own cluster.
 - **Read-only in the cluster.** Apart from its leader-election Lease and events, it writes only to DefectDojo. No CRDs, no webhooks.
 

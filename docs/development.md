@@ -65,7 +65,7 @@ Tests:
 | `report_list.go` | the report metadata of a pass: the listing of a kind from the cache or the API reader, the records by kind and name, the worklist in name order, the index of the reports by resource and container, and `adopt` of a read that returned another version or found the report gone |
 | `report_body.go` | `reportBodies`: the read of a report body, compared with the requested report version, and the facts of a report version (image, broken body) |
 | `workload_report.go` | the report on the stable workload itself: the check that it can be uploaded before the report of a ReplicaSet or Job is |
-| `namespace.go` | the live namespace and `excludeNamespaces` |
+| `namespace.go` | the live namespace, `excludeNamespaces` and the tags of the listed namespace labels |
 | `closing.go` | the namespace product lookup and the tests list of a pass (read before the first upload that no reimport of the process covers, and again after a pass that uploaded; the close rules use it), closing of stale and released tests, product tags; the sweeper that wakes namespaces for the controller |
 | `watch.go` | mapping of report events to namespaces |
 
@@ -138,6 +138,12 @@ Confirmed on a DefectDojo 3.5.200 testbed (`build_id`):
 - A reimport without `build_id` writes `""`.
 - Up to 150 characters are accepted; 151 characters give HTTP 500.
 - `PATCH /api/v2/tests/<id>/` with `{"build_id":""}` is accepted and clears it.
+
+Confirmed on a DefectDojo 3.5.200 testbed (tags, scenarios `form-validation` and `product-tags`):
+
+- A reimport stores the tags of a test in lower case: `K8s-Workload:Deployment/App` becomes `k8s-workload:deployment/app`.
+- `PATCH /api/v2/products/<id>/` stores a product tag as sent: `Owner:Team` stays.
+- A tag over 255 characters fails the save of the test with HTTP 500, and a tag with a space or a single quote gives 400.
 
 Confirmed on a DefectDojo 3.5.200 testbed (the close with a reimport of an empty report):
 

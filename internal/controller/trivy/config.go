@@ -23,6 +23,7 @@ const (
 	EnvClusterName           = "CLUSTER_NAME"
 	EnvExcludeNamespaces     = "EXCLUDE_NAMESPACES"
 	EnvComponentPrefixes     = "COMPONENT_PREFIXES"
+	EnvNamespaceLabelTags    = "NAMESPACE_LABEL_TAGS"
 	EnvResyncPeriod          = "RESYNC_PERIOD"
 	EnvConcurrency           = "CONCURRENCY"
 	EnvReportKinds           = "REPORT_KINDS"
@@ -59,6 +60,9 @@ type Config struct {
 	ExcludeNamespaces []string
 	// ComponentPrefixes are stripped from the Argo CD application name to derive the component tag.
 	ComponentPrefixes []string
+	// NamespaceLabelTags lists the keys of the Namespace labels that are copied into the tags of the namespace product
+	// and of its tests. Empty copies none.
+	NamespaceLabelTags []string
 	// ResyncPeriod is the interval of the periodic requeue of a namespace.
 	ResyncPeriod time.Duration
 	// Concurrency is the number of namespaces reconciled in parallel.
@@ -78,15 +82,16 @@ func LoadConfig(lookup func(string) (string, bool)) (Config, error) {
 	env := &envReader{lookup: lookup}
 
 	cfg := Config{
-		OperatorNamespace: env.get(EnvPodNamespace, ""),
-		SecretName:        env.get(EnvDefectDojoSecretName, ""),
-		ProductType:       env.get(EnvDefectDojoProductType, defaultProductType),
-		ClusterName:       env.get(EnvClusterName, ""),
-		ExcludeNamespaces: env.list(EnvExcludeNamespaces, nil),
-		ComponentPrefixes: env.list(EnvComponentPrefixes, []string{defaultComponentPrefix}),
-		ReportKinds:       uniqueInOrder(env.list(EnvReportKinds, slices.Clone(trivy.ReportKinds))),
-		ResyncPeriod:      parseEnv(env, EnvResyncPeriod, defaultResyncPeriod, time.ParseDuration),
-		Concurrency:       parseEnv(env, EnvConcurrency, defaultConcurrency, strconv.Atoi),
+		OperatorNamespace:  env.get(EnvPodNamespace, ""),
+		SecretName:         env.get(EnvDefectDojoSecretName, ""),
+		ProductType:        env.get(EnvDefectDojoProductType, defaultProductType),
+		ClusterName:        env.get(EnvClusterName, ""),
+		ExcludeNamespaces:  env.list(EnvExcludeNamespaces, nil),
+		ComponentPrefixes:  env.list(EnvComponentPrefixes, []string{defaultComponentPrefix}),
+		NamespaceLabelTags: env.list(EnvNamespaceLabelTags, nil),
+		ReportKinds:        uniqueInOrder(env.list(EnvReportKinds, slices.Clone(trivy.ReportKinds))),
+		ResyncPeriod:       parseEnv(env, EnvResyncPeriod, defaultResyncPeriod, time.ParseDuration),
+		Concurrency:        parseEnv(env, EnvConcurrency, defaultConcurrency, strconv.Atoi),
 	}
 
 	if len(env.errs) > 0 {
@@ -145,7 +150,8 @@ func parseEnv[T any](e *envReader, key string, def T, parse func(string) (T, err
 
 // Validate reports every violated constraint of the configuration.
 func (c Config) Validate() error {
-	errs := slices.Concat(c.identityErrors(), c.nameErrors(), c.tuningErrors(), c.reportKindErrors(), c.excludeErrors())
+	errs := slices.Concat(c.identityErrors(), c.nameErrors(), c.tuningErrors(), c.reportKindErrors(), c.excludeErrors(),
+		c.labelTagErrors())
 	if len(errs) > 0 {
 		return invalidConfig(errs)
 	}
@@ -240,6 +246,39 @@ func (c Config) excludeErrors() []error {
 		if _, err := path.Match(p, ""); err != nil {
 			errs = append(errs, fmt.Errorf("%s: invalid glob %q: %w", EnvExcludeNamespaces, p, err))
 		}
+	}
+
+	return errs
+}
+
+// labelTagErrors checks that every listed namespace label key is a Kubernetes label key whose tag fits a DefectDojo
+// tag, and that no two keys give the same tag key.
+func (c Config) labelTagErrors() []error {
+	var errs []error
+
+	seen := make(map[string]string, len(c.NamespaceLabelTags))
+
+	for _, key := range c.NamespaceLabelTags {
+		if msgs := validation.IsQualifiedName(key); len(msgs) > 0 {
+			errs = append(errs, fmt.Errorf("%s: %q is not a valid label key: %s",
+				EnvNamespaceLabelTags, key, strings.Join(msgs, "; ")))
+
+			continue
+		}
+
+		if len(key) > trivy.MaxNamespaceLabelKeyLen {
+			errs = append(errs, fmt.Errorf("%s: label key %q is too long: it has %d characters, at most %d fit a DefectDojo "+
+				"tag with any label value", EnvNamespaceLabelTags, key, len(key), trivy.MaxNamespaceLabelKeyLen))
+		}
+
+		tagKey := trivy.NamespaceLabelTagKey(key)
+
+		if first, ok := seen[tagKey]; ok {
+			errs = append(errs, fmt.Errorf("%s: label keys %q and %q give the same tag key %q",
+				EnvNamespaceLabelTags, first, key, tagKey))
+		}
+
+		seen[tagKey] = key
 	}
 
 	return errs

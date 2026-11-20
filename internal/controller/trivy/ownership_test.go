@@ -40,6 +40,12 @@ func importedGoApp(t *testing.T, h *harness) int {
 	return ids[0]
 }
 
+// leavingNamespace holds the ways the namespace of the go app stops being imported.
+var leavingNamespace = map[string]func(h *harness){
+	"gone":     func(h *harness) { h.remove(namespaceObject(appNS, nil)) },
+	"excluded": func(h *harness) { h.reconciler.config.ExcludeNamespaces = []string{appNS} },
+}
+
 func TestReconcile_DeletedNamespaceClosesTheFindingsAndKeepsProductAndTest(t *testing.T) {
 	h := newHarness(t, withReports(goAppObjects(), goApp(t)))
 	testID := importedGoApp(t, h)
@@ -277,10 +283,7 @@ func TestSweep_WakesAReleasedNamespaceWithWrongTagsAndTheControllerKeepsItsClose
 }
 
 func TestReconcile_GoneOrExcludedNamespaceRepairsTheTagsOfItsProduct(t *testing.T) {
-	for name, leave := range map[string]func(h *harness){
-		"gone":     func(h *harness) { h.remove(namespaceObject(appNS, nil)) },
-		"excluded": func(h *harness) { h.reconciler.config.ExcludeNamespaces = []string{appNS} },
-	} {
+	for name, leave := range leavingNamespace {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, withReports(goAppObjects(), goApp(t)))
 			testID := importedGoApp(t, h)

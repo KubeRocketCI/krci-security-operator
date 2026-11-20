@@ -246,12 +246,15 @@ func named(t *testing.T, name string) *unstructured.Unstructured {
 
 var webRS = containerKey{kind: "replicaset", name: "web-rs", container: appContainer}
 
+// target is the target of the namespace of the go app, which has no labels.
+func (h *harness) target() trivy.Target { return h.reconciler.target(namespaceObject(appNS, nil)) }
+
 func TestListReports_SortsByNameAndIndexesInNameOrder(t *testing.T) {
 	expired := named(t, "b-expired")
 	expired.SetAnnotations(map[string]string{trivy.AnnotationReportTTL: "0s"})
 
 	h := newHarness(t, withReports(base(), named(t, "c-report"), expired, named(t, "a-report")), descendingReports())
-	p := &pass{target: h.reconciler.target(appNS), reports: newReportListing()}
+	p := &pass{target: h.target(), reports: newReportListing()}
 
 	listed, err := h.reconciler.listReports(context.Background(), p, trivy.KindVulnerabilityReport)
 
@@ -298,7 +301,7 @@ func TestListReports_RestartedListingKeepsNoRecordOfItsEarlierPages(t *testing.T
 	})
 	h.unwatch()
 
-	p := &pass{target: h.reconciler.target(appNS), reports: newReportListing()}
+	p := &pass{target: h.target(), reports: newReportListing()}
 
 	listed, err := h.reconciler.listReports(context.Background(), p, trivy.KindVulnerabilityReport)
 
@@ -310,7 +313,7 @@ func TestListReports_RestartedListingKeepsNoRecordOfItsEarlierPages(t *testing.T
 
 func TestListReports_FailedListingLeavesNoRecords(t *testing.T) {
 	h := newHarness(t, withReports(base(), named(t, "a-report")), failMetadataOfReports(errors.New("down")))
-	p := &pass{target: h.reconciler.target(appNS), reports: newReportListing()}
+	p := &pass{target: h.target(), reports: newReportListing()}
 
 	listed, err := h.reconciler.listReports(context.Background(), p, trivy.KindVulnerabilityReport)
 

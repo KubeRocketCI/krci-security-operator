@@ -235,7 +235,7 @@ func TestReconcile_ExcludedNamespaceIsNotReadForReports(t *testing.T) {
 	assert.Empty(t, h.dd.reimports)
 }
 
-func TestIsImportable(t *testing.T) {
+func TestImportableNamespace(t *testing.T) {
 	tests := []struct {
 		name      string
 		namespace string
@@ -258,10 +258,14 @@ func TestIsImportable(t *testing.T) {
 			h := newHarness(t, []client.Object{namespaceObject(appNS, nil), terminating})
 			h.reconciler.config.ExcludeNamespaces = tt.excluded
 
-			got, err := h.reconciler.isImportable(context.Background(), tt.namespace)
+			got, err := h.reconciler.importableNamespace(context.Background(), tt.namespace)
 
 			require.NoError(t, err)
-			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.want, got != nil)
+
+			if tt.want {
+				assert.Equal(t, tt.namespace, got.Name)
+			}
 		})
 	}
 }
