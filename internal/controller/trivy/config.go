@@ -23,6 +23,8 @@ const (
 	EnvClusterName           = "CLUSTER_NAME"
 	EnvExcludeNamespaces     = "EXCLUDE_NAMESPACES"
 	EnvComponentPrefixes     = "COMPONENT_PREFIXES"
+	EnvNamespaceLabelTags    = "NAMESPACE_LABEL_TAGS"
+	EnvWorkloadLabelTags     = "WORKLOAD_LABEL_TAGS"
 	EnvResyncPeriod          = "RESYNC_PERIOD"
 	EnvConcurrency           = "CONCURRENCY"
 	EnvReportKinds           = "REPORT_KINDS"
@@ -59,6 +61,12 @@ type Config struct {
 	ExcludeNamespaces []string
 	// ComponentPrefixes are stripped from the Argo CD application name to derive the component tag.
 	ComponentPrefixes []string
+	// NamespaceLabelTags lists the keys of the Namespace labels that become tags of the namespace product, as
+	// "<label key>:<label value>". Empty copies none.
+	NamespaceLabelTags []string
+	// WorkloadLabelTags lists the keys of the workload labels that become tags of the tests of the workload, as
+	// "<label key>:<label value>". Empty copies none.
+	WorkloadLabelTags []string
 	// ResyncPeriod is the interval of the periodic requeue of a namespace.
 	ResyncPeriod time.Duration
 	// Concurrency is the number of namespaces reconciled in parallel.
@@ -78,15 +86,17 @@ func LoadConfig(lookup func(string) (string, bool)) (Config, error) {
 	env := &envReader{lookup: lookup}
 
 	cfg := Config{
-		OperatorNamespace: env.get(EnvPodNamespace, ""),
-		SecretName:        env.get(EnvDefectDojoSecretName, ""),
-		ProductType:       env.get(EnvDefectDojoProductType, defaultProductType),
-		ClusterName:       env.get(EnvClusterName, ""),
-		ExcludeNamespaces: env.list(EnvExcludeNamespaces, nil),
-		ComponentPrefixes: env.list(EnvComponentPrefixes, []string{defaultComponentPrefix}),
-		ReportKinds:       uniqueInOrder(env.list(EnvReportKinds, slices.Clone(trivy.ReportKinds))),
-		ResyncPeriod:      parseEnv(env, EnvResyncPeriod, defaultResyncPeriod, time.ParseDuration),
-		Concurrency:       parseEnv(env, EnvConcurrency, defaultConcurrency, strconv.Atoi),
+		OperatorNamespace:  env.get(EnvPodNamespace, ""),
+		SecretName:         env.get(EnvDefectDojoSecretName, ""),
+		ProductType:        env.get(EnvDefectDojoProductType, defaultProductType),
+		ClusterName:        env.get(EnvClusterName, ""),
+		ExcludeNamespaces:  env.list(EnvExcludeNamespaces, nil),
+		ComponentPrefixes:  env.list(EnvComponentPrefixes, []string{defaultComponentPrefix}),
+		NamespaceLabelTags: env.list(EnvNamespaceLabelTags, nil),
+		WorkloadLabelTags:  env.list(EnvWorkloadLabelTags, nil),
+		ReportKinds:        uniqueInOrder(env.list(EnvReportKinds, slices.Clone(trivy.ReportKinds))),
+		ResyncPeriod:       parseEnv(env, EnvResyncPeriod, defaultResyncPeriod, time.ParseDuration),
+		Concurrency:        parseEnv(env, EnvConcurrency, defaultConcurrency, strconv.Atoi),
 	}
 
 	if len(env.errs) > 0 {
@@ -145,7 +155,8 @@ func parseEnv[T any](e *envReader, key string, def T, parse func(string) (T, err
 
 // Validate reports every violated constraint of the configuration.
 func (c Config) Validate() error {
-	errs := slices.Concat(c.identityErrors(), c.nameErrors(), c.tuningErrors(), c.reportKindErrors(), c.excludeErrors())
+	errs := slices.Concat(c.identityErrors(), c.nameErrors(), c.tuningErrors(), c.reportKindErrors(), c.excludeErrors(),
+		c.labelTagErrors())
 	if len(errs) > 0 {
 		return invalidConfig(errs)
 	}
@@ -243,6 +254,57 @@ func (c Config) excludeErrors() []error {
 	}
 
 	return errs
+}
+
+// labelTagErrors checks the label keys of both label tag settings.
+func (c Config) labelTagErrors() []error {
+	return slices.Concat(labelKeyErrors(EnvNamespaceLabelTags, c.NamespaceLabelTags),
+		labelKeyErrors(EnvWorkloadLabelTags, c.WorkloadLabelTags))
+}
+
+// labelKeyErrors checks the label keys of the setting env: each is a Kubernetes label key whose tag key is not one the
+// operator writes itself and whose tag fits a DefectDojo tag with any label value, and no two keys give the same tag
+// key.
+func labelKeyErrors(env string, keys []string) []error {
+	var errs []error
+
+	seen := make(map[string]string, len(keys))
+
+	for _, key := range keys {
+		if err := labelKeyError(key); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", env, err))
+
+			continue
+		}
+
+		tagKey := trivy.LabelTagKey(key)
+
+		if first, ok := seen[tagKey]; ok {
+			errs = append(errs, fmt.Errorf("%s: label keys %q and %q give the same tag key %q", env, first, key, tagKey))
+		}
+
+		seen[tagKey] = key
+	}
+
+	return errs
+}
+
+// labelKeyError returns why the label key cannot be the key of a tag, or nil.
+func labelKeyError(key string) error {
+	if msgs := validation.IsQualifiedName(key); len(msgs) > 0 {
+		return fmt.Errorf("%q is not a valid label key: %s", key, strings.Join(msgs, "; "))
+	}
+
+	if tagKey := trivy.LabelTagKey(key); slices.Contains(trivy.ReservedTagKeys, tagKey) {
+		return fmt.Errorf("label key %q gives the tag key %q, which the operator writes itself", key, tagKey)
+	}
+
+	if len(key) > trivy.MaxLabelKeyLen {
+		return fmt.Errorf("label key %q is too long: it has %d characters, at most %d fit a tag with any label value",
+			key, len(key), trivy.MaxLabelKeyLen)
+	}
+
+	return nil
 }
 
 // uniqueInOrder returns the items without repeats, each at its first occurrence.

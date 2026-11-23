@@ -211,7 +211,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, request reconcile.Request) (
 
 	r.markImportable(namespace)
 
-	if err = r.syncNamespace(ctx, dd, r.target(namespace)); err != nil {
+	if err = r.syncNamespace(ctx, dd, r.target(namespace), ns.Labels); err != nil {
 		return reconcile.Result{}, err
 	}
 
@@ -377,14 +377,21 @@ func (p *pass) listed(title string) bool {
 }
 
 // syncNamespace reimports the reports of a namespace kind by kind, closes the tests of workloads and
-// containers that are gone and makes sure the namespace product has its tags.
+// containers that are gone and makes sure the namespace product has its tags, the label tags of the namespace labels
+// included.
 // A report that is missing closes nothing. A failed upload keeps its report for the next pass and does not stop
 // the other uploads and the closing; its error is returned with the others.
 // The facts of the report versions are kept at the end of every pass, also one that fails or panics.
-func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target trivy.Target) error {
+func (r *Reconciler) syncNamespace(
+	ctx context.Context,
+	dd DefectDojo,
+	target trivy.Target,
+	labels map[string]string,
+) error {
 	p := &pass{
-		target:   target,
-		resolver: trivy.NewWorkloadResolver(r.reader, target.Namespace, r.config.ComponentPrefixes),
+		target: target,
+		resolver: trivy.NewWorkloadResolver(r.reader, target.Namespace, r.config.ComponentPrefixes,
+			r.config.WorkloadLabelTags),
 		reports:  newReportListing(),
 		bodies:   newReportBodies(r.reader, target.Namespace, r.knownFacts(target.Namespace)),
 		current:  map[testKey]reimportedReport{},
@@ -427,7 +434,9 @@ func (r *Reconciler) syncNamespace(ctx context.Context, dd DefectDojo, target tr
 		closeErr = r.closeStaleTests(ctx, dd, target, remote.tests)
 	}
 
-	return errors.Join(append(p.uploadErrors, closeErr, r.setProductTags(ctx, dd, target.Namespace, remote.product))...)
+	tagsErr := r.setProductTags(ctx, dd, target.Namespace, remote.product, r.config.NamespaceLabelTags, labels)
+
+	return errors.Join(append(p.uploadErrors, closeErr, tagsErr)...)
 }
 
 // candidate is a current report with its workload, its test and what is remembered about the test.
@@ -436,6 +445,7 @@ type candidate struct {
 	// ref is the image reference of the container of the report in the pod template of the workload.
 	ref       string
 	component string
+	labelTags []string
 	mine      choice
 	// held is true when the version is a rejected version whose retry is not due.
 	held bool
@@ -532,8 +542,13 @@ func (r *Reconciler) candidateOf(ctx context.Context, p *pass, rec reportMeta) (
 		return candidate{}, false, err
 	}
 
+	labelTags, err := p.resolver.LabelTags(ctx, workload)
+	if err != nil {
+		return candidate{}, false, err
+	}
+
 	// The layout does not depend on the image.
-	key := keyOf(trivy.NewReimport(p.target, rec.kind, rec.obj, workload, component, trivy.Image{}))
+	key := keyOf(trivy.NewReimport(p.target, rec.kind, rec.obj, workload, component, trivy.Image{}, labelTags))
 
 	u := reportUpload{report: rec, key: key, version: versionOf(rec.obj)}
 	u.prev = r.lastReimport(p.target.Namespace, key)
@@ -543,6 +558,7 @@ func (r *Reconciler) candidateOf(ctx context.Context, p *pass, rec reportMeta) (
 		workload:  workload,
 		ref:       ref,
 		component: component,
+		labelTags: labelTags,
 		mine:      choice{report: rec.obj.GetName(), onWorkload: namesWorkload(rec.obj, workload)},
 		held:      u.rejection != nil && !r.retryDue(*u.rejection),
 		u:         u,
@@ -569,7 +585,8 @@ func (r *Reconciler) chooseAndUpload(
 		return nil
 	}
 
-	dest := trivy.NewReimport(p.target, u.report.kind, u.report.obj, c.workload, c.component, f.image.For(c.ref))
+	dest := trivy.NewReimport(p.target, u.report.kind, u.report.obj, c.workload, c.component, f.image.For(c.ref),
+		c.labelTags)
 	u.marker = dest.UploadMarker(u.report.obj)
 
 	if u.prev != nil && u.prev.reportVersion == u.version && u.prev.marker == u.marker {

@@ -40,7 +40,7 @@ We follow a coordinated disclosure process:
 | Kubernetes API | the operator | read-only ClusterRole for reports, namespaces and workloads ([access table](docs/trivy.md#access)); in its own namespace, `get` on the one named credentials Secret, its Lease and `create` on events |
 | DefectDojo credentials | the operator namespace | a Secret with `url` and `token`, read without a cache at most once a minute; the token goes only into the `Authorization` header of requests to that `url`. Keep tenants out of this namespace |
 | DefectDojo API | the operator | writes `reimport-scan`, the closing of findings and the tags of namespace products, and closes findings only in tests of products whose name starts with its own cluster name and `/` |
-| Workloads | tenants | workload labels and annotations only feed the lower-cased `app` tag of a test; the operator reads no KubeRocketCI resource or label |
+| Workloads | tenants | workload labels and annotations feed the lower-cased `app` tag of a test, and the labels whose keys the installer lists in `labelTags.workload` feed its label tags; the operator reads no KubeRocketCI resource and names no KubeRocketCI label |
 | Probes and metrics | the pod IP | probes on `:8081`; metrics only with `metrics.enabled`, plain HTTP on `:8080`, counters without credentials; the chart creates no Service |
 | Pod | | distroless static image, non-root user 65532, read-only root filesystem, no capabilities, no privilege escalation, seccomp `RuntimeDefault` |
 

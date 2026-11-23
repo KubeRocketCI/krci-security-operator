@@ -171,8 +171,11 @@ func deployment(name, revision string, containers ...string) *appsv1.Deployment 
 	}
 }
 
-// goAppDeployment is the index of the Deployment in goAppObjects.
-const goAppDeployment = 2
+// goAppNamespace and goAppDeployment are the indexes of the namespace and the Deployment in goAppObjects.
+const (
+	goAppNamespace  = 1
+	goAppDeployment = 2
+)
 
 // goAppObjects is a running go app in the namespace appNS of a cluster without KubeRocketCI: its Deployment on
 // revision 1, the current ReplicaSet, the namespace and the credentials.

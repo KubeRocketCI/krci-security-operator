@@ -201,7 +201,7 @@ func (r *Reconciler) closeStaleTests(
 // kind, stable workload and container of its pod template. The workloads are listed at the time of the call, not
 // taken from the lists of the import: a workload created in between keeps its test.
 func (r *Reconciler) expectedTitles(ctx context.Context, namespace string) (map[string]struct{}, error) {
-	resolver := trivy.NewWorkloadResolver(r.reader, namespace, r.config.ComponentPrefixes)
+	resolver := trivy.NewWorkloadResolver(r.reader, namespace, r.config.ComponentPrefixes, nil)
 
 	workloads, err := resolver.StableWorkloads(ctx)
 	if err != nil {
@@ -227,7 +227,8 @@ func (r *Reconciler) expectedTitles(ctx context.Context, namespace string) (map[
 }
 
 // release closes every owned test of a namespace that is gone or excluded, once per process
-// until the namespace is imported again, and makes sure its product has its tags. The product and the tests stay.
+// until the namespace is imported again, and makes sure its product has its two product tags. The product, its label
+// tags and the tests stay: the labels of such a namespace are not followed.
 func (r *Reconciler) release(ctx context.Context, dd DefectDojo, namespace string) error {
 	product, found, err := r.namespaceProduct(ctx, dd, namespace)
 	if r.productTypeMissing(ctx, err) {
@@ -255,7 +256,7 @@ func (r *Reconciler) release(ctx context.Context, dd DefectDojo, namespace strin
 		r.markReleased(namespace)
 	}
 
-	return r.setProductTags(ctx, dd, namespace, product)
+	return r.setProductTags(ctx, dd, namespace, product, nil, nil)
 }
 
 // closeOwnedTests closes every owned test of the namespace product.
@@ -336,15 +337,18 @@ func (r *Reconciler) ownsTest(ctx context.Context, test defectdojo.Test) bool {
 	return false
 }
 
-// setProductTags makes sure the namespace product has its two product tags and keeps its other tags. The product
-// comes from a lookup of the same pass. PATCH replaces the tags of a product, so the full list is sent.
+// setProductTags makes sure the namespace product has its two product tags and the label tags that labels give for
+// labelKeys, and keeps its other tags, see trivy.WithProductTags. The product comes from a lookup of the same pass.
+// PATCH replaces the tags of a product, so the full list is sent.
 func (r *Reconciler) setProductTags(
 	ctx context.Context,
 	dd DefectDojo,
 	namespace string,
 	product defectdojo.Product,
+	labelKeys []string,
+	labels map[string]string,
 ) error {
-	tags, changed := trivy.WithProductTags(product.Tags, r.config.ClusterName, namespace)
+	tags, changed := trivy.WithProductTags(product.Tags, r.config.ClusterName, namespace, labelKeys, labels)
 	if !changed {
 		return nil
 	}
@@ -382,7 +386,8 @@ func (r *Reconciler) runSweeper(ctx context.Context) error {
 // sweep hands the namespaces that need the controller to it, and writes nothing to DefectDojo: the closing of a
 // namespace and the repair of its product tags are serialized with its imports by the workqueue.
 // A namespace needs it when it has a product although it no longer exists or is excluded and was not released yet,
-// or when its product has wrong or missing product tags.
+// or when its product has wrong or missing product tags: the two product tags, not the label tags, which the pass over
+// an imported namespace corrects.
 // An ended context stops the sweep before it prunes the released namespaces.
 func (r *Reconciler) sweep(ctx context.Context) error {
 	dd, available, err := r.defectDojo(ctx)
@@ -474,7 +479,7 @@ func (r *Reconciler) sweepCandidates(products []defectdojo.Product) ([]sweepCand
 
 		withProduct[namespace] = struct{}{}
 
-		_, tagsWrong := trivy.WithProductTags(product.Tags, r.config.ClusterName, namespace)
+		_, tagsWrong := trivy.WithProductTags(product.Tags, r.config.ClusterName, namespace, nil, nil)
 		candidates = append(candidates, sweepCandidate{namespace: namespace, tagsWrong: tagsWrong})
 	}
 

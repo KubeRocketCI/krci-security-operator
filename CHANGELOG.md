@@ -3,6 +3,7 @@
 
 ### Features
 
+- Copy allowlisted namespace and workload labels into tags
 - Tag every runtime test with its report kind
 
 ### Routine

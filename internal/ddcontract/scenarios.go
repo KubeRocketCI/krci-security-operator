@@ -151,6 +151,7 @@ func Scenarios() []Scenario {
 		twoEngagements(),
 		riskAcceptance(),
 		reportKindTag(),
+		labelTags(),
 	}
 }
 
@@ -372,5 +373,37 @@ func reportKindTag() Scenario {
 			withTitle(secretTitle), withTags(secretTags...)),
 		upload("reimport A with the report-kind tag again", VulnerabilityReport(app, vulnA), withTags(vulnTags...)),
 		listTests("list the tests"),
+	}}
+}
+
+// labelTags checks the tags that a label key gives, a key with "." and "/" such as app.edp.epam.com/tenant: a test
+// and a product store them as sent, a reimport replaces the test tags with the tags of its request, so a changed or
+// removed label changes or removes its tag, and a PATCH does the same for the product tags.
+func labelTags() Scenario {
+	const (
+		tenant = "app.edp.epam.com/tenant"
+		team   = "example.com/team"
+	)
+
+	withLabels := func(tags ...string) option { return withTags(slices.Concat(workloadTags, tags)...) }
+	productTagsWith := func(tags ...string) []string {
+		return slices.Concat([]string{"k8s-cluster:x", "k8s-namespace:ns"}, tags, []string{"owner:team"})
+	}
+
+	return Scenario{Name: "label-tags", Steps: []Step{
+		upload("first reimport of A with two label tags", VulnerabilityReport(app, vulnA),
+			withLabels(team+":payments", "tier:backend")),
+		listTests("list the tests with the label tags"),
+		upload("reimport A with another value of a label tag", VulnerabilityReport(app, vulnA),
+			withLabels(team+":billing", "tier:backend")),
+		upload("reimport A with a label tag removed", VulnerabilityReport(app, vulnA), withLabels("tier:backend")),
+		upload("reimport A without label tags", VulnerabilityReport(app, vulnA), withLabels()),
+		listTests("list the tests without the label tags"),
+		setProductTags("set the product tags with a label tag", productTagsWith(tenant+":ns")...),
+		listProducts("list the products with the label tag"),
+		setProductTags("change the value of the label tag", productTagsWith(tenant+":other")...),
+		listProducts("list the products with the changed label tag"),
+		setProductTags("remove the label tag", productTagsWith()...),
+		listProducts("list the products without the label tag"),
 	}}
 }

@@ -72,12 +72,13 @@ func (w Workload) Tag() string { return w.Kind + "." + w.Name }
 // WorkloadResolver maps the resource a report was produced for to a Workload.
 // It lists each kind of workload of the namespace at most once, in pages, and reads each Pod at most once. It keeps
 // of every object only what it decides with: owner, revision, creation time, the image reference of each
-// container and the component of a stable workload; no labels or annotations. Its lists are a snapshot: it is meant
-// to live for one decision, not across a long pass.
+// container, the component of a stable workload and the tags of its labels for the listed keys; no other labels or
+// annotations. Its lists are a snapshot: it is meant to live for one decision, not across a long pass.
 type WorkloadResolver struct {
 	reader            client.Reader
 	namespace         string
 	componentPrefixes []string
+	labelKeys         []string
 
 	loaded      bool
 	replicaSets map[string]replicaSetInfo
@@ -101,6 +102,8 @@ type podSpec struct {
 	containers map[string]string
 	// component is the app tag value; "" when no source names one.
 	component string
+	// labelTags are the label tags of the object the component is read from.
+	labelTags []string
 }
 
 // replicaSetInfo is what the resolver keeps of a ReplicaSet. spec is set only without a Deployment, and has no
@@ -142,12 +145,18 @@ func (j newestJob) newerThan(other newestJob) bool {
 var templateKinds = []string{workloadStatefulSet, workloadDaemonSet, workloadCronJob}
 
 // NewWorkloadResolver returns a resolver that reads the workloads of namespace. componentPrefixes are stripped from
-// the Argo CD application name of a component, see Component.
-func NewWorkloadResolver(reader client.Reader, namespace string, componentPrefixes []string) *WorkloadResolver {
+// the Argo CD application name of a component, see Component. labelKeys are the workload label keys that give label
+// tags, see LabelTags.
+func NewWorkloadResolver(
+	reader client.Reader,
+	namespace string,
+	componentPrefixes, labelKeys []string,
+) *WorkloadResolver {
 	return &WorkloadResolver{
 		reader:            reader,
 		namespace:         namespace,
 		componentPrefixes: componentPrefixes,
+		labelKeys:         labelKeys,
 		templateNames:     map[string][]string{},
 		podSpecs:          map[Workload]podSpec{},
 	}
@@ -222,16 +231,30 @@ func (r *WorkloadResolver) Containers(
 // annotations of a Deployment, StatefulSet, DaemonSet, CronJob or Job in its list, of a Pod from its Get. It is ""
 // for a ReplicaSet, a workload that does not exist and a kind the operator does not read.
 func (r *WorkloadResolver) Component(ctx context.Context, w Workload) (string, error) {
-	spec, err := r.spec(ctx, w)
+	spec, err := r.knownSpec(ctx, w)
 
-	switch {
-	case errors.Is(err, ErrUnsupportedKind):
-		return "", nil
-	case err != nil:
-		return "", err
+	return spec.component, err
+}
+
+// LabelTags returns the tags of the labels of a workload for the listed keys, see the package function LabelTags. The
+// labels are those of the object the component is read from, see Component: the top workload object, not the
+// ReplicaSet of a Deployment or the Job of a CronJob. It is empty for a ReplicaSet without a Deployment, a workload
+// that does not exist and a kind the operator does not read.
+func (r *WorkloadResolver) LabelTags(ctx context.Context, w Workload) ([]string, error) {
+	spec, err := r.knownSpec(ctx, w)
+
+	return spec.labelTags, err
+}
+
+// knownSpec returns the pod specification of a workload like spec, and an empty one for a kind the operator does not
+// read.
+func (r *WorkloadResolver) knownSpec(ctx context.Context, w Workload) (podSpec, error) {
+	spec, err := r.spec(ctx, w)
+	if errors.Is(err, ErrUnsupportedKind) {
+		return podSpec{}, nil
 	}
 
-	return spec.component, nil
+	return spec, err
 }
 
 // spec returns the pod specification of a workload, read at most once per resolver.
@@ -250,12 +273,13 @@ func (r *WorkloadResolver) spec(ctx context.Context, w Workload) (podSpec, error
 	return spec, nil
 }
 
-// specOf returns the pod specification of a workload object that exists, with its component.
+// specOf returns the pod specification of a workload object that exists, with its component and label tags.
 func (r *WorkloadResolver) specOf(obj metav1.Object, template *corev1.PodSpec) podSpec {
 	return podSpec{
 		found:      true,
 		containers: containerImages(template),
 		component:  Component(obj.GetLabels(), obj.GetAnnotations(), r.componentPrefixes),
+		labelTags:  LabelTags(r.labelKeys, obj.GetLabels()),
 	}
 }
 
