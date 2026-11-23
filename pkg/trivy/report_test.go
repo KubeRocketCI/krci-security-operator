@@ -35,7 +35,7 @@ func testTarget() Target {
 
 // newReimport is NewReimport with the kind and the image of the report, for a container without a known reference.
 func newReimport(target Target, report *unstructured.Unstructured, workload Workload, component string) Reimport {
-	return NewReimport(target, report.GetKind(), report, workload, component, ReportImage(report))
+	return NewReimport(target, report.GetKind(), report, workload, component, ReportImage(report), nil)
 }
 
 func TestReportImport(t *testing.T) {
@@ -537,7 +537,7 @@ func TestNewReimport_ReadsTheKindAndTheMetadataOnly(t *testing.T) {
 	}}
 	image := Image{Name: "registry.example.com/app", Tag: "1.0"}
 
-	got := NewReimport(testTarget(), KindExposedSecretReport, metadata, Workload{"deployment", "test-go-app"}, "", image)
+	got := NewReimport(testTarget(), KindExposedSecretReport, metadata, Workload{"deployment", "test-go-app"}, "", image, nil)
 
 	assert.Equal(t, Reimport{
 		Product:    "in-cluster/krci-demo-dev",
@@ -648,7 +648,7 @@ func TestWithProductTags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, changed := WithProductTags(tt.have, "c1", "ns")
+			got, changed := WithProductTags(tt.have, "c1", "ns", nil, nil)
 
 			assert.ElementsMatch(t, tt.want, got)
 			assert.Equal(t, tt.wantChanged, changed)

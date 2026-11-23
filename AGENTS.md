@@ -16,6 +16,7 @@ Go operator (controller-runtime), one module per security integration; the Trivy
 - Every report of every namespace goes to the product `<cluster name>/<namespace>` under the Product Type setting, engagement `trivy-operator`, test `<ReportKind> <kind>/<name>/<container>` (ADR 0002). The layout is a contract other systems read: change it only with its ADR.
 - The cluster name has no default: the operator does not start and the chart does not render without it.
 - The only namespace filter is `excludeNamespaces`. There are no scopes, scope switches or platform product.
+- A Namespace or workload label becomes a tag only for a key the installer lists in `labelTags.namespace` or `labelTags.workload`: the operator names no label itself, and a key that gives a tag key of the operator stops the start (ADR 0010).
 
 ## Generated files
 

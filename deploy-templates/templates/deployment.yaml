@@ -52,6 +52,10 @@ spec:
               value: {{ join "," .Values.excludeNamespaces | quote }}
             - name: COMPONENT_PREFIXES
               value: {{ join "," .Values.componentPrefixes | quote }}
+            - name: NAMESPACE_LABEL_TAGS
+              value: {{ join "," .Values.labelTags.namespace | quote }}
+            - name: WORKLOAD_LABEL_TAGS
+              value: {{ join "," .Values.labelTags.workload | quote }}
             - name: RESYNC_PERIOD
               value: {{ .Values.resyncPeriod | quote }}
             - name: CONCURRENCY

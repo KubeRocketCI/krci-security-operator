@@ -11,4 +11,4 @@ The operator reads only Kubernetes and Trivy Operator objects: Namespaces, the w
 
 - The product, engagement, test and tags carry Kubernetes names only.
 - `KubeRocketCI` remains only as the default Product Type name, which the person who installs the operator can change (ADR 0002). It is a name, not an input.
-- Environment, codebase and tenant views need a later decision on how KubeRocketCI connects to the namespace products.
+- Environment, codebase and tenant views need a later decision on how KubeRocketCI connects to the namespace products. The operator offers one generic input for it: the label keys that the installer lists, which it copies into tags without knowing what they mean (ADR 0010). The keys come from settings, and no default lists a KubeRocketCI label.

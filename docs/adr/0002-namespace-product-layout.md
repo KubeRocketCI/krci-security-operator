@@ -8,7 +8,8 @@ The contract the operator writes and other systems read. Field and tag rules are
 
 ```
 Product Type   <product type>                              setting, default KubeRocketCI; the same for all operators of one DefectDojo
-└── Product    <cluster name>/<namespace>                  product tags: k8s-cluster:<cluster name>, k8s-namespace:<namespace>
+└── Product    <cluster name>/<namespace>                  product tags: k8s-cluster:<cluster name>, k8s-namespace:<namespace>,
+                                                           <label key>:<value> for each key of labelTags.namespace that the namespace has
     └── Engagement  trivy-operator                         type CI/CD; deduplication on the engagement
         └── Test    "<ReportKind> <kind>/<name>/<container>"
               scan_type  Trivy Operator Scan
@@ -20,6 +21,7 @@ Product Type   <product type>                              setting, default Kube
                          oci-image:<registry>/<repository>
                          report-kind:<kind>                vulnerabilityreport | exposedsecretreport
                          app:<component>                   only when a source exists
+                         <label key>:<value>               for each key of labelTags.workload that the workload has
               └── Finding
                     service   <namespace>/<Kind>/<name>/<container>
                     tags      none from the operator; filter findings by test tag
@@ -27,7 +29,7 @@ Product Type   <product type>                              setting, default Kube
 
 - `<ReportKind>`: `VulnerabilityReport` or `ExposedSecretReport`.
 - `<kind>/<name>`: the stable workload, lower-case kind: `deployment`, `statefulset`, `daemonset`, `cronjob`, `job`, `replicaset` (a ReplicaSet without a Deployment), `pod`. ReplicationController reports are not imported.
-- On every pass over the namespace, also a gone or excluded one, and when a sweep finds the tags wrong, the operator makes sure both product tags exist with the correct values and keeps other tags, so a failed first attempt is repaired. The sweep only wakes the namespace.
+- On every pass over the namespace, also a gone or excluded one, and when a sweep finds the tags wrong, the operator makes sure both product tags exist with the correct values and keeps other tags, so a failed first attempt is repaired. The sweep only wakes the namespace. The label tags of the product are set on the pass over an imported namespace; which product tags the operator owns is in ADR 0010.
 - `<Kind>` in the service: the same kind in Kubernetes spelling: `Deployment`, `CronJob`, …
 - The CI pipeline writes codebase products under the same Product Type (`<codebase>`, engagements `code-security-<branch>` and `image:<registry>/<repository>`). The operator never reads or writes them.
 

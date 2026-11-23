@@ -3,6 +3,7 @@ package trivy
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -49,7 +50,7 @@ func controllerOptions(cfg Config) controller.Options {
 func SetupWithManager(mgr ctrl.Manager, cfg Config) error {
 	b := ctrl.NewControllerManagedBy(mgr).
 		Named(controllerName).
-		For(&corev1.Namespace{}, builder.WithPredicates(namespacePredicate())).
+		For(&corev1.Namespace{}, builder.WithPredicates(namespacePredicate(cfg.NamespaceLabelTags))).
 		WithOptions(controllerOptions(cfg))
 
 	log := mgr.GetLogger().WithName(controllerName)
@@ -112,11 +113,14 @@ func isServed(mgr ctrl.Manager, gvk schema.GroupVersionKind) (bool, error) {
 // reportPredicate drops the updates that change no resourceVersion, which are informer resyncs.
 func reportPredicate() predicate.Predicate { return predicate.ResourceVersionChangedPredicate{} }
 
-// namespacePredicate passes creations, deletions and the start of the termination.
-func namespacePredicate() predicate.Predicate {
+// namespacePredicate passes creations, deletions, the start of the termination, and a change of the label tags that
+// labelKeys give. Any other update enqueues nothing.
+func namespacePredicate(labelKeys []string) predicate.Predicate {
 	return predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			return !e.ObjectOld.GetDeletionTimestamp().Equal(e.ObjectNew.GetDeletionTimestamp())
+			return !e.ObjectOld.GetDeletionTimestamp().Equal(e.ObjectNew.GetDeletionTimestamp()) ||
+				!slices.Equal(trivy.LabelTags(labelKeys, e.ObjectOld.GetLabels()),
+					trivy.LabelTags(labelKeys, e.ObjectNew.GetLabels()))
 		},
 	}
 }

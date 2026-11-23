@@ -41,7 +41,8 @@ const (
 
 	// The keys of the tags, written as "<key>:<value>". A namespace product has TagKeyCluster and TagKeyNamespace.
 	// A test has all of them; TagKeyApp only when the workload names a component, TagKeyImage only when the report
-	// names an image. Findings have none.
+	// names an image. Findings have none. The label tags of the settings, see LabelTags, are on the product (namespace
+	// labels) and on the test (workload labels) next to them.
 	TagKeyCluster   = "k8s-cluster"
 	TagKeyNamespace = "k8s-namespace"
 	// TagKeyWorkload is the stable workload of a test: "k8s-workload:<kind>.<name>", the kind in lower case, so the
@@ -64,6 +65,11 @@ const (
 	digestHexLen = 12
 	digestAlgo   = "sha256"
 )
+
+// ReservedTagKeys are the tag keys the operator writes itself. The label key of a setting must not give one of them.
+var ReservedTagKeys = []string{
+	TagKeyCluster, TagKeyNamespace, TagKeyWorkload, TagKeyContainer, TagKeyImage, TagKeyApp, TagKeyReportKind,
+}
 
 // ReportKinds lists the Trivy Operator report kinds that are imported.
 var ReportKinds = []string{KindVulnerabilityReport, KindExposedSecretReport}
@@ -152,18 +158,32 @@ func tag(key, value string) string {
 	return key + ":" + Shorten(value, MaxTagLen-len(key)-1)
 }
 
-// WithProductTags returns the tags a product keeps: its other tags, then the two product tags with the correct
-// values, exactly once each. changed is false when the product has them already.
-func WithProductTags(have []string, cluster, namespace string) (tags []string, changed bool) {
-	want := ProductTags(cluster, namespace)
+// WithProductTags returns the tags a product keeps: its other tags, then the two product tags and the label tags of
+// labels for labelKeys (see LabelTags) with the correct values, exactly once each. The operator owns the tags whose key
+// is one of the two product tag keys or of labelKeys: a tag of such a key that the labels do not give is dropped. A
+// product keeps every other tag, so without labelKeys it keeps its label tags. changed is false when the product has
+// the tags already.
+func WithProductTags(
+	have []string,
+	cluster, namespace string,
+	labelKeys []string,
+	labels map[string]string,
+) (tags []string, changed bool) {
+	owned := make([]string, 0, 2+len(labelKeys))
+	owned = append(owned, TagKeyCluster, TagKeyNamespace)
 
-	for _, tag := range have {
-		if !strings.HasPrefix(tag, TagKeyCluster+":") && !strings.HasPrefix(tag, TagKeyNamespace+":") {
-			tags = append(tags, tag)
+	for _, key := range labelKeys {
+		owned = append(owned, LabelTagKey(key))
+	}
+
+	for _, t := range have {
+		if !slices.ContainsFunc(owned, func(key string) bool { return strings.HasPrefix(t, key+":") }) {
+			tags = append(tags, t)
 		}
 	}
 
-	tags = append(tags, want...)
+	tags = append(tags, ProductTags(cluster, namespace)...)
+	tags = append(tags, LabelTags(labelKeys, labels)...)
 
 	return tags, !sameSet(have, tags)
 }
@@ -191,8 +211,8 @@ type Reimport struct {
 	// report is ignored when the container reference in the pod template is its digest without a tag.
 	Version string
 	// Tags are the tags of the test: "k8s-cluster", "k8s-namespace", "k8s-workload", "k8s-container", "oci-image",
-	// "app" when component is not empty, and "report-kind". A tag with an empty value is left out; a tag over
-	// MaxTagLen has its value shortened.
+	// "app" when component is not empty, and "report-kind", then the label tags of the workload. A tag with an empty
+	// value is left out; a tag over MaxTagLen has its value shortened.
 	Tags []string
 }
 
@@ -200,7 +220,7 @@ type Reimport struct {
 // the namespace product, the engagement of the integration and the test of the container. It reads the labels,
 // annotations and namespace of the report only.
 // component is the value of the app tag; empty gives no app tag. image is the image of the report as the container
-// reference names it, see Image.For.
+// reference names it, see Image.For. labelTags are the label tags of the workload, see WorkloadResolver.LabelTags.
 func NewReimport(
 	target Target,
 	kind string,
@@ -208,6 +228,7 @@ func NewReimport(
 	workload Workload,
 	component string,
 	image Image,
+	labelTags []string,
 ) Reimport {
 	return Reimport{
 		Product:    ProductName(target.Cluster, target.Namespace),
@@ -215,7 +236,7 @@ func NewReimport(
 		TestTitle:  ReportTitle(kind, report, workload),
 		Service:    Service(report, workload),
 		Version:    Shorten(image.Version(), MaxVersionLen),
-		Tags: slices.DeleteFunc([]string{
+		Tags: append(slices.DeleteFunc([]string{
 			tag(TagKeyCluster, target.Cluster),
 			tag(TagKeyNamespace, target.Namespace),
 			tag(TagKeyWorkload, workload.Tag()),
@@ -223,7 +244,7 @@ func NewReimport(
 			tag(TagKeyImage, image.Name),
 			tag(TagKeyApp, component),
 			tag(TagKeyReportKind, kind),
-		}, func(t string) bool { return t == "" }),
+		}, func(t string) bool { return t == "" }), labelTags...),
 	}
 }
 
