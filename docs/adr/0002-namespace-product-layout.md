@@ -18,6 +18,7 @@ Product Type   <product type>                              setting, default Kube
                          k8s-workload:<kind>.<name>
                          k8s-container:<container>
                          oci-image:<registry>/<repository>
+                         report-kind:<kind>                vulnerabilityreport | exposedsecretreport
                          app:<component>                   only when a source exists
               └── Finding
                     service   <namespace>/<Kind>/<name>/<container>
@@ -42,7 +43,8 @@ Product Type: KubeRocketCI
 │       └── Test "VulnerabilityReport deployment/checkout/checkout"        version 2.5.0-rc1
 │             tags k8s-cluster:in-cluster  k8s-namespace:krci-shop-dev
 │                  k8s-workload:deployment.checkout  k8s-container:checkout
-│                  oci-image:registry.example.com/shop/checkout  app:checkout
+│                  oci-image:registry.example.com/shop/checkout  report-kind:vulnerabilityreport
+│                  app:checkout
 │             service krci-shop-dev/Deployment/checkout/checkout
 ├── Product: prod-eu/krci-shop-prod                          tags k8s-cluster:prod-eu, k8s-namespace:krci-shop-prod
 │   └── Engagement: trivy-operator
@@ -52,17 +54,19 @@ Product Type: KubeRocketCI
         ├── Test "VulnerabilityReport deployment/api/api"                  version 1.8.0
         │     tags k8s-cluster:prod-eu  k8s-namespace:payments
         │          k8s-workload:deployment.api  k8s-container:api
-        │          oci-image:registry.example.com/pay/api  app:payments
+        │          oci-image:registry.example.com/pay/api  report-kind:vulnerabilityreport
+        │          app:payments
         │     service payments/Deployment/api/api
         ├── Test "VulnerabilityReport deployment/api/istio-proxy"          version 1.24.0
         │     tags … k8s-container:istio-proxy  oci-image:istio/proxyv2 …
         │     service payments/Deployment/api/istio-proxy
         ├── Test "VulnerabilityReport statefulset/redis/redis"             version 7.4
-        │     tags … k8s-workload:statefulset.redis  oci-image:redis  app:redis
+        │     tags … k8s-workload:statefulset.redis  oci-image:redis  report-kind:vulnerabilityreport  app:redis
         │     service payments/StatefulSet/redis/redis
         ├── Test "VulnerabilityReport cronjob/cleanup/cleanup"             version sha256:9155b03ee4d9
         │     service payments/CronJob/cleanup/cleanup
         └── Test "ExposedSecretReport deployment/api/api"                  version 1.8.0
+              tags … report-kind:exposedsecretreport  app:payments
               service payments/Deployment/api/api
 ```
 

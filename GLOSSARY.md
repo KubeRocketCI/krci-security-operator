@@ -5,7 +5,7 @@ The operator copies the Trivy Operator reports of one cluster into a shared Defe
 ## Kubernetes side
 
 **Cluster name**:
-The unique name of one cluster in the shared DefectDojo, set by the person who installs the operator.
+The unique name of one cluster in the shared DefectDojo, set by the person who installs the operator. In KubeRocketCI it equals the name the Stages use for the cluster, `in-cluster` for the platform's own cluster.
 _Avoid_: cluster id, context, in-cluster (as a meaning)
 
 **Stable workload**:
@@ -83,7 +83,7 @@ The finding field that names the stable workload and container: `<namespace>/<Ki
 _Avoid_: component, workload (for the field)
 
 **Tag**:
-A `<key>:<value>` label on a product or test, used for filters. The operator writes none on findings. On a test, `k8s-workload` and `k8s-container` also name its stable workload and container.
+A `<key>:<value>` label on a product or test, used for filters. The operator writes none on findings. On a test, `k8s-workload` and `k8s-container` also name its stable workload and container, and `report-kind` its report kind.
 _Avoid_: label (for DefectDojo tags)
 
 ## Sync

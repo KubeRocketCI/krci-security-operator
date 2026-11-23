@@ -75,6 +75,7 @@ KubeRocketCI
   | `k8s-workload` | `<kind>.<name>` of the stable workload, the kind in lower case (`deployment`, `statefulset`, `daemonset`, `cronjob`, `job`, `replicaset`, `pod`), so the kind ends at the first `.` |
   | `k8s-container` | `<container>` |
   | `oci-image` | `<registry>/<repository>` of the image of the report, without tag and digest; Docker Hub without host and `library/`. Left out when the report names no image. |
+  | `report-kind` | the report kind of the test in lower case: `vulnerabilityreport` or `exposedsecretreport` (ADR 0009); a test with no current report keeps the tags of its last upload |
   | `app` | the component, only when a source exists (see Component) |
 
   The tags are for filtering; the operator never reads them back to identify a test. A `k8s-workload` tag over 255 characters has its value shortened, so it is not the full workload name. Findings carry no operator tags: DefectDojo adds the tags of a request to findings and never removes them, so they would keep old images and apps. Filter findings by the tags of their test (`test__tags`). The tags that findings do carry come from the DefectDojo parser, see Findings.
@@ -86,6 +87,7 @@ KubeRocketCI
   - Severity: `CRITICAL`, `HIGH`, `MEDIUM` and `LOW` map to `Critical`, `High`, `Medium` and `Low`; `UNKNOWN` is imported as `Info`. `minimum_severity` is `Info`, so no severity is left out.
 - Every namespace product carries the tags `k8s-cluster:<clusterName>` and `k8s-namespace:<namespace>`. The operator sets them when the product has them wrong or missing, on every pass over the namespace (a sweep wakes the namespaces that need it), and keeps the other tags of the product. An update replaces the tags of a product, so the full list is sent.
 - The same namespace name in two clusters gives two products, because the cluster name is part of the product name. The cluster name is required and must be unique per DefectDojo; two clusters with one name write into the same products.
+- In KubeRocketCI the cluster name equals the name the Stages use for the cluster (`spec.clusterName` of a Stage), `in-cluster` for the platform's own cluster. The operator does not read Stages (ADR 0001), so the installer sets `clusterName` to that name.
 - Use one Product Type value for every operator that writes to the same DefectDojo. A reimport fails when the product already exists under another Product Type, so changing the value later leaves the existing products under the old one.
 - Products, engagements and tests are created on demand. Imports use `reimport-scan`; see [Reimport request](#reimport-request).
 - **Ownership.** An owned test is a test whose product name starts with `<clusterName>/` and whose scan type is `Trivy Operator Scan`. The operator closes only owned tests, so it never closes a test of another cluster, also when the namespace names are equal. A product whose name only contains `<clusterName>/` (`x-<clusterName>/<namespace>`), a codebase product of the CI pipeline and a test of another scan type are not owned. Tags are not used for ownership.

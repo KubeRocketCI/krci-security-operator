@@ -3,6 +3,7 @@ package ddcontract
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/KubeRocketCI/krci-security-operator/pkg/defectdojo"
@@ -149,6 +150,7 @@ func Scenarios() []Scenario {
 		otherTestSameService(),
 		twoEngagements(),
 		riskAcceptance(),
+		reportKindTag(),
 	}
 }
 
@@ -352,5 +354,23 @@ func riskAcceptance() Scenario {
 		upload("reimport A, B, C after A was gone", all),
 		triageStep("accept the risk of B", app.Service(), vulnB.ID, TriageRiskAccepted),
 		closeTest("close the test", vulnTitle),
+	}}
+}
+
+// reportKindTag checks that a reimport with the report-kind tag adds it to tests created without it, keeps their
+// other tags, and gives each report kind of a container its own tag.
+func reportKindTag() Scenario {
+	vulnTags := append(slices.Clone(workloadTags), "report-kind:vulnerabilityreport")
+	secretTags := append(slices.Clone(workloadTags), "report-kind:exposedsecretreport")
+
+	return Scenario{Name: "report-kind-tag", Steps: []Step{
+		upload("first reimport of A without the report-kind tag", VulnerabilityReport(app, vulnA), withTags(workloadTags...)),
+		upload("first reimport of the secret test without the report-kind tag", ExposedSecretReport(app),
+			withTitle(secretTitle), withTags(workloadTags...)),
+		upload("reimport A with the report-kind tag", VulnerabilityReport(app, vulnA), withTags(vulnTags...)),
+		upload("reimport a secret with the report-kind tag", ExposedSecretReport(app, awsKey),
+			withTitle(secretTitle), withTags(secretTags...)),
+		upload("reimport A with the report-kind tag again", VulnerabilityReport(app, vulnA), withTags(vulnTags...)),
+		listTests("list the tests"),
 	}}
 }

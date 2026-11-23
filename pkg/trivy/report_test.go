@@ -61,6 +61,7 @@ func TestReportImport(t *testing.T) {
 					"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
 					"k8s-workload:deployment.test-go-app", "k8s-container:test-go-app",
 					"oci-image:gitlab.127.0.0.1.nip.io:5050/krci/test-go-app", "app:go-app",
+					"report-kind:vulnerabilityreport",
 				},
 			},
 		},
@@ -78,7 +79,7 @@ func TestReportImport(t *testing.T) {
 				Tags: []string{
 					"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
 					"k8s-workload:deployment.defectdojo-primary", "k8s-container:postgres",
-					"oci-image:postgres", "app:go-app",
+					"oci-image:postgres", "app:go-app", "report-kind:vulnerabilityreport",
 				},
 			},
 		},
@@ -95,7 +96,7 @@ func TestReportImport(t *testing.T) {
 				Tags: []string{
 					"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
 					"k8s-workload:statefulset.defectdojo-valkey", "k8s-container:valkey",
-					"oci-image:valkey/valkey",
+					"oci-image:valkey/valkey", "report-kind:vulnerabilityreport",
 				},
 			},
 		},
@@ -114,6 +115,7 @@ func TestReportImport(t *testing.T) {
 					"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
 					"k8s-workload:deployment.test-go-app", "k8s-container:test-go-app",
 					"oci-image:gitlab.127.0.0.1.nip.io:5050/krci/test-go-app", "app:go-app",
+					"report-kind:exposedsecretreport",
 				},
 			},
 		},
@@ -150,6 +152,7 @@ func TestReportImport_OneTagPerKey(t *testing.T) {
 
 	assert.Equal(t, map[string]int{
 		"k8s-cluster": 1, "k8s-namespace": 1, "k8s-workload": 1, "k8s-container": 1, "oci-image": 1, "app": 1,
+		"report-kind": 1,
 	}, keys)
 }
 
@@ -545,6 +548,7 @@ func TestNewReimport_ReadsTheKindAndTheMetadataOnly(t *testing.T) {
 		Tags: []string{
 			"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
 			"k8s-workload:deployment.test-go-app", "k8s-container:test-go-app", "oci-image:registry.example.com/app",
+			"report-kind:exposedsecretreport",
 		},
 	}, got)
 }

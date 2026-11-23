@@ -2,6 +2,7 @@ package trivy
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -263,6 +265,49 @@ func TestReconcile_AfterARestartATestWithAnotherOrNoMarkerIsUploaded(t *testing.
 			assert.Equal(t, []int{7}, h.dd.testIDs(), "the report goes into the existing test")
 			assert.Equal(t, h.dd.reimports[0].BuildID, h.markerOf(7))
 			assert.Len(t, h.dd.findingsIn(7), 2)
+		})
+	}
+}
+
+func TestReconcile_TestUploadedBeforeTheReportKindTagIsUploadedOnceAndCarriesTheTag(t *testing.T) {
+	// The tags of a test and the marker of its report as the operator wrote them before the report-kind tag.
+	beforeTags := []string{
+		"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev", "k8s-workload:deployment.test-go-app",
+		"k8s-container:test-go-app", "oci-image:gitlab.127.0.0.1.nip.io:5050/krci/test-go-app",
+	}
+
+	for name, tc := range map[string]struct {
+		report       func(*testing.T) *unstructured.Unstructured
+		title        string
+		beforeMarker string
+		kindTag      string
+	}{
+		"vulnerability report": {
+			report: goApp, title: goAppTitle,
+			beforeMarker: "uid-vulnerabilityreport_replicaset.json:100:0180cbf87179", kindTag: "report-kind:vulnerabilityreport",
+		},
+		"exposed secret report": {
+			report: goAppSecrets, title: secretsTitle,
+			beforeMarker: "uid-exposedsecretreport_replicaset.json:100:a90a13383437", kindTag: "report-kind:exposedsecretreport",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, withReports(goAppObjects(), tc.report(t)))
+			h.dd.seedTests(defectdojo.Test{ID: 7, Title: tc.title, BuildID: tc.beforeMarker, Tags: beforeTags})
+
+			h.reconcile()
+
+			require.Len(t, h.dd.reimports, 1, "the tag is part of the request: the marker of the test is not the one of the report")
+			assert.Equal(t, []int{7}, h.dd.testIDs(), "the report goes into the existing test")
+			assert.ElementsMatch(t, append(slices.Clone(beforeTags), tc.kindTag), h.dd.test(7).tags)
+			assert.Equal(t, h.dd.reimports[0].BuildID, h.markerOf(7))
+			assert.NotEqual(t, tc.beforeMarker, h.markerOf(7))
+
+			h.reconcile()
+			h.restart()
+			h.reconcile()
+
+			assert.Len(t, h.dd.reimports, 1, "the second pass and the first pass after a restart upload nothing")
 		})
 	}
 }
