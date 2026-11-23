@@ -1,6 +1,10 @@
 <a name="unreleased"></a>
 ## [Unreleased]
 
+### Features
+
+- Tag every runtime test with its report kind
+
 ### Routine
 
 - Update current development version

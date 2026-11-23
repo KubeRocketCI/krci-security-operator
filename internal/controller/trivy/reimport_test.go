@@ -133,6 +133,7 @@ func TestReconcile_TestCarriesExactlyTheTagsOfItsWorkloadAndImage(t *testing.T) 
 		assert.ElementsMatch(t, []string{
 			"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
 			"k8s-workload:deployment.test-go-app", "k8s-container:test-go-app", image,
+			"report-kind:vulnerabilityreport",
 		}, h.dd.test(testID).tags)
 	})
 
@@ -149,6 +150,7 @@ func TestReconcile_TestCarriesExactlyTheTagsOfItsWorkloadAndImage(t *testing.T) 
 		assert.ElementsMatch(t, []string{
 			"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
 			"k8s-workload:deployment.test-go-app", "k8s-container:test-go-app", image, "app:shop",
+			"report-kind:vulnerabilityreport",
 		}, h.dd.test(testID).tags)
 	})
 
@@ -163,17 +165,18 @@ func TestReconcile_TestCarriesExactlyTheTagsOfItsWorkloadAndImage(t *testing.T) 
 		assert.ElementsMatch(t, []string{
 			"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
 			"k8s-workload:deployment.test-go-app", "k8s-container:test-go-app",
-			"oci-image:gitlab.127.0.0.1.nip.io:5050/krci/other-app",
+			"oci-image:gitlab.127.0.0.1.nip.io:5050/krci/other-app", "report-kind:vulnerabilityreport",
 		}, h.dd.test(testID).tags)
 	})
 
-	t.Run("an exposed secret report has the same tags", func(t *testing.T) {
+	t.Run("an exposed secret report has the same tags and its own report kind", func(t *testing.T) {
 		h := newHarness(t, withReports(goAppObjects(), goAppSecrets(t)))
 		testID := h.onlyTest()
 
 		assert.ElementsMatch(t, []string{
 			"k8s-cluster:in-cluster", "k8s-namespace:krci-demo-dev",
 			"k8s-workload:deployment.test-go-app", "k8s-container:test-go-app", image,
+			"report-kind:exposedsecretreport",
 		}, h.dd.test(testID).tags)
 	})
 }

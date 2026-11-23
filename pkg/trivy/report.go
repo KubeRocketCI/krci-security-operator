@@ -51,6 +51,9 @@ const (
 	TagKeyContainer = "k8s-container"
 	TagKeyImage     = "oci-image"
 	TagKeyApp       = "app"
+	// TagKeyReportKind is the report kind of a test: "report-kind:<kind>", the kind in lower case,
+	// "vulnerabilityreport" or "exposedsecretreport".
+	TagKeyReportKind = "report-kind"
 
 	// requestFormat is part of the upload marker. Bump it with every change to what a reimport sends that the marker
 	// does not hold otherwise: Payload, the scan_date rule, a constant form field of defectdojo.Client.Reimport.
@@ -187,9 +190,9 @@ type Reimport struct {
 	// Version is the image tag of the report, else "sha256:" and the first 12 characters of its digest. The tag of the
 	// report is ignored when the container reference in the pod template is its digest without a tag.
 	Version string
-	// Tags are the tags of the test: "k8s-cluster", "k8s-namespace", "k8s-workload", "k8s-container", "oci-image"
-	// and, when component is not empty, "app". A tag with an empty value is left out; a tag over MaxTagLen has
-	// its value shortened.
+	// Tags are the tags of the test: "k8s-cluster", "k8s-namespace", "k8s-workload", "k8s-container", "oci-image",
+	// "app" when component is not empty, and "report-kind". A tag with an empty value is left out; a tag over
+	// MaxTagLen has its value shortened.
 	Tags []string
 }
 
@@ -219,6 +222,7 @@ func NewReimport(
 			tag(TagKeyContainer, ContainerOf(report)),
 			tag(TagKeyImage, image.Name),
 			tag(TagKeyApp, component),
+			tag(TagKeyReportKind, kind),
 		}, func(t string) bool { return t == "" }),
 	}
 }
